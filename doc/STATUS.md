@@ -44,6 +44,8 @@ ALMs, validated with Verilator.
   every ignored clock, native retries, write hold, CLA, BGR).  The
   bench's slave checks the bus protocol on every transfer (BS3-BS0, SAS
   timing, the A3:A2/CLA rule, the write hold).  All 230 runs pass.
+- `tb/run_bench.sh`: Dhrystone and Whetstone, self-checking (see
+  Performance).
 - WinUAE cputest corpus for the 68060 (`tb/run_cputest.py`, generated
   with `cpu_unimplemented=0`): all slices pass except the oracle
   deviations below.
@@ -64,6 +66,38 @@ ALMs, validated with Verilator.
 
 - Branch prediction errors (FSLW.BPE access errors) are never generated:
   a stale branch cache entry is corrected in the decoder instead.
+- Single issue: the 060's second integer pipeline (sOEP, PCR.ESS) is not
+  implemented; PCR.ESS reads and writes but changes nothing.
+
+## Performance
+
+`tb/run_bench.sh` (vbcc -O=1023 for the 68060; `tb/c/crt0.s` with
+COPYBACK: user mode, copyback data, data/instruction/branch caches and
+the store buffer on, FPCR double precision).  Each program runs at two
+counts and the difference is taken, so start-up and cold caches drop
+out; the loops then run from the caches, and the bus setting makes no
+difference (zero-wait memory and BCLK at half CLK with random wait states
+give the same cycles).  Scores at 60 MHz, from RTL simulation:
+
+| build                          | Dhrystone 2.1                          | Whetstone              |
+|--------------------------------|----------------------------------------|------------------------|
+| default (area options off)     | 934 cycles/run, 36.56 DMIPS, 0.609 DMIPS/MHz | 9.59 MWIPS (0.160/MHz) |
+| FPU_PIPE, LOOP_PRED, EARLY_RES | 874 cycles/run, 39.07 DMIPS, 0.651 DMIPS/MHz | 10.40 MWIPS (0.173/MHz) |
+
+- Dhrystone: `tb/c/dhry.c`, 2.1, checked against the published final
+  values; 660 instructions per run (1.42 cycles per instruction).  DMIPS =
+  Dhrystones/s / 1757.
+- Whetstone: `tb/c/whet.c`, the classic double-precision Curnow-Wichmann
+  modules and loop counts (one loop = 100,000 Whetstone instructions).
+  The 68060 has no transcendental instructions -- an Amiga runs them in
+  the 68060.library's software package -- so sin, cos, atan, exp and log
+  are C routines in the program (within 4e-15 of libm); sqrt is FSQRT.
+  The results are checked against the same source compiled on the host.
+  With a different math library the score moves accordingly: module 7
+  and 11 (the functions) are most of the time.
+- Whetstone found a pipeline bug (fixed at the commit that added it): a
+  multiply or divide finishing in the cycle the next one entered EX let
+  the second skip its operation.  t_integer 300-305 cover it.
 
 ## Area and timing
 
@@ -73,6 +107,7 @@ Figures are recorded per commit below.
 | commit  | ALMs | registers | M10K bits | DSP | 60 MHz slack |
 |---------|------|-----------|-----------|-----|--------------|
 | c91d41c | 24,574 | 15,150 | 337,920 | 15 | -0.210 ns (Fmax 59.25 MHz; DMU steal -> D-ATC -> tag compare -> dq1) |
+| a4693f9 | not fitted: synthesis estimate 20,654 (c91d41c's was 22,575, so a fit near 22,500) | 13,231 | | | |
 
 ### Area options (rtl/ap68060.sv parameters, default 0)
 
@@ -90,7 +125,11 @@ A BALANCED-mode fit (instead of HIGH PERFORMANCE EFFORT) is no smaller
 
 ## Next
 
-1. Area: bring the core under 20,000 ALMs (the FPU is 7,800 of 33,300
-   ALUTs; decode, fetch and the DMU 4,000-5,200 each).
+1. Area: about 2,500 ALMs still to go.  With the options off, by ALUTs:
+   FPU 6,400, backend pipeline 4,600 (the ~410-bit uop through five
+   stages, ~2,900 registers), DMU 5,300, fetch 4,600 (two predecoders
+   670 each), decode 3,300 (five ~400-bit decoded records).  Planned:
+   narrow the uop per stage, remove the 040-only FPU paths the 060 traps
+   (checked against the corpus), then smaller queues.
 2. 60 MHz closure, structurally (no seed sweeps).
-3. Superscalar dispatch (the 060's sOEP under PCR.ESS) within the budget.
+3. Performance: superscalar dispatch (the 060's sOEP) within the budget.

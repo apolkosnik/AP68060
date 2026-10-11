@@ -1678,7 +1678,9 @@ always_ff @(posedge clk) begin
 			end
 			if (ex_u.op == OP_BF) bf_lonew <= bf_lo_out;
 		end
-		if (md_done && md_go) md_fin <= 1'b1;
+		// (not when the next uop enters EX this cycle: the reset above is
+		// for it, and the done belongs to the one leaving)
+		if (md_done && md_go && !adv_dc2) md_fin <= 1'b1;
 		if (md_done) begin
 			md_rem  <= md_hi;
 			md_lol  <= md_lo;

@@ -911,6 +911,73 @@ smcq_ok:
 	move.l	#$80808000,d0
 	movec	d0,cacr		; cache-hot again
 
+;------------------------- 300-305 dependent MUL/DIV right behind each other
+; A multiply or divide that finishes in the cycle the next one enters EX:
+; the next one must run its own operation (the result latch belongs to the
+; one leaving).  A store just before them sets up that timing (compiled
+; Whetstone, module 6, found it).
+	moveq	#1,d0
+	moveq	#2,d1
+	moveq	#3,d2
+	muls.l	d1,d0
+	muls.l	d2,d0
+	chkl	d0,6,300
+	moveq	#1,d0
+	move.l	d0,($8000).l
+	muls.l	d1,d0
+	muls.l	d2,d0
+	chkl	d0,6,301
+	move.l	#1000,d0
+	move.l	d0,($8000).l
+	divu.l	d1,d0
+	divu.l	d1,d0
+	chkl	d0,250,302
+	moveq	#5,d0
+	move.l	d0,($8000).l
+	muls.l	d1,d0
+	divs.l	d1,d0
+	muls.l	d2,d0
+	chkl	d0,15,303
+	; module 6 of Whetstone as vbcc compiles it, 420 passes: J = 1,
+	; K = 2, L = 3 throughout, J*K*L = 6
+	move.l	#1,($8000).l
+	move.l	#2,($8004).l
+	move.l	#3,($8008).l
+	moveq	#1,d5
+	move.l	#420,d6
+.m6:	move.l	($8004).l,d4
+	move.l	($8000).l,d0
+	move.l	d4,d1
+	sub.l	d0,d1
+	muls.l	d0,d1
+	move.l	($8008).l,d2
+	move.l	d2,d0
+	sub.l	d4,d0
+	muls.l	d1,d0
+	move.l	d0,($8000).l
+	move.l	d2,d1
+	muls.l	d4,d1
+	move.l	d2,d3
+	sub.l	d0,d3
+	muls.l	d4,d3
+	sub.l	d3,d1
+	move.l	d1,($8004).l
+	sub.l	d1,d2
+	move.l	d1,d3
+	add.l	d0,d3
+	muls.l	d3,d2
+	move.l	d2,($8008).l
+	add.l	d2,d3
+	muls.l	d1,d0
+	muls.l	d2,d0
+	cmp.l	#6,d0
+	beq.s	.m6ok
+	failt	304
+.m6ok:	addq.l	#1,d5
+	cmp.l	d5,d6
+	bge.s	.m6
+	chkl	d3,6,305
+
 ;----------------------------------------------------------------- all done
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700

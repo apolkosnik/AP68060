@@ -14,8 +14,9 @@
 	endr
 
 start:
-	move.l	#$80008000,d0	; both caches on
+	move.l	#$A0808000,d0	; data, store buffer, branch, instruction caches
 	movec	d0,cacr
+	fmove.l	#$00000080,fpcr	; round to double (Whetstone's reference is IEEE double)
 	ifd	COPYBACK
 	; user data copyback (DTT0), supervisor data noncachable (DTT1, the
 	; bench registers): the program runs in user mode, stamps trap
