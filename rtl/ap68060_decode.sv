@@ -506,7 +506,7 @@ always_comb begin
 		nrec.eop   = a0.eop;
 		nrec.econd = a0.econd;
 		nrec.ccr   = a0.ccr;
-		nrec.t0    = a0.t0;
+		nrec.bcp   = 1'b0;
 		pi   = 3'd1 + {1'b0, a0.nfix};
 		nimm = pd0.b - pi;
 		case (nimm)
@@ -719,7 +719,11 @@ always_comb begin
 	nrec_q.ras.k  = (nrec.exc != 8'd0) ? 2'd0 :
 	                rcall ? 2'd1 :
 	                (rret && ras_n != 4'd0) ? 2'd2 : 2'd0;
+	// a branch the fetch already took, as D1 decodes it (the branch cache's
+	// prediction, confirmed)
+	nrec_q.bcp = (ph == PH_IDLE) && bt_end && nrec.pred && teq;
 	if (go && (bt_restart || part_bt)) begin
+		nrec_q.bcp  = 1'b0;
 		nrec_q.exc  = EXC_SNR;
 		nrec_q.rt   = UA_DEC_EXC;
 		nrec_q.pred = 1'b0;

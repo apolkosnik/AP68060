@@ -338,8 +338,7 @@ always_comb begin
 	nu.bhc    = src.bhc;
 	nu.ser    = uw.ser;
 	// FMOVEM / FMOVE of control registers to memory are T0 trace points
-	nu.t0cof  = src.t0 || (src.opw[15:6] == 10'b1111_0010_00 &&
-	                       (src.ext1[15:13] == 3'b101 || src.ext1[15:13] == 3'b111));
+	nu.bcp    = src.bcp && (uw.br != BR_NONE);
 	nu.pc     = src.pc;
 	nu.npc    = src.npc;
 	nu.ras    = src.ras;

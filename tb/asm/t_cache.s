@@ -31,10 +31,10 @@ ok\@:
 	org	$400
 start:
 ;------------------------------------------------- enable both caches
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0		; EDC, EBC (the branch cache), EIC
 	movec	d0,cacr
 	movec	cacr,d1
-	chkl	d1,$80008000,1
+	chkl	d1,$80808000,1
 
 ;------------------------ MOVEC source clobbered by the next instruction
 ; MOVEQ is the one opcode the fast path dispatches straight out of decode
@@ -48,17 +48,17 @@ start:
 ; cases passed on first run.  They stay because the class is real and
 ; cheap to guard.  Two registers: CACR, and DFC, which is harmless if
 ; wrong so a failure here cannot take the rest of this program down.
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr
 	moveq	#1,d0
 	movec	cacr,d1
-	chkl	d1,$80008000,20
+	chkl	d1,$80808000,20
 	move.l	#5,d0
 	movec	d0,dfc
 	moveq	#1,d0
 	movec	dfc,d1
 	chkl	d1,5,21
-	move.l	#$80008000,d0		; leave both caches on for what follows
+	move.l	#$80808000,d0		; leave both caches on for what follows
 	movec	d0,cacr
 
 ;--------------------------------------- I-cache and self modifying code

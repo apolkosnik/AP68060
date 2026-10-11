@@ -1,5 +1,6 @@
 ; AP68060 cputest replay monitor, run by tb_cputest.sv.
-; assembled with vasmm68k_mot -Fbin -m68040, loaded at $42110000
+; assembled with vasmm68k_mot -Fbin -m68040, loaded at $42110000 (the
+; 68060 has no MSP: its slots in the mailbox stay, unused)
 ;
 ; The bench writes a round's input state into the mailbox and sets GO; the
 ; monitor loads it and enters the tested instruction through a format $0
@@ -82,8 +83,7 @@ capture:
 	move.l	usp,a0
 	move.l	a0,(CAP_USP).l
 	move.l	a7,(CAP_SP).l
-	movec	msp,a0
-	move.l	a0,(CAP_MSP).l
+	move.l	a7,(CAP_MSP).l
 	move.w	#1,(EVT).l
 cwait:
 	move.w	(CMD).l,d0
@@ -137,11 +137,9 @@ iwait:
 	fmovem.x	(IN_FP).l,fp0-fp7
 	move.l	(IN_USP).l,a0
 	move.l	a0,usp
-	move.l	(IN_MSP).l,a0
-	movec	a0,msp
 	move.l	(IN_VBR).l,a0
 	movec	a0,vbr
 	movem.l	(IN_D).l,d0-d7/a0-a6
 	move.l	(IN_FRM).l,a7
 	rte
-nullf:	dc.l	0
+nullf:	dc.l	0,0,0			; the 68060 NULL frame: three long words

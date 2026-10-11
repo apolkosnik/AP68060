@@ -97,7 +97,7 @@ lp10	macro
 start:
 	move.l	#$0000A040,d0		; DTT1: supervisor data noncachable
 	movec	d0,dtt1			; (the bench registers)
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr
 	clr.l	(ntrap).l
 	clr.l	(nirq).l

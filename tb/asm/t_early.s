@@ -49,7 +49,7 @@ start:
 	movec	d0,dtt1
 	move.l	#$00008020,d0	; DTT0: user data copyback
 	movec	d0,dtt0
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr
 	lea	(TBL).l,a0		; the table
 	moveq	#0,d0

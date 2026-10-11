@@ -292,12 +292,10 @@ R('RTD',    U(op='MOV', sz='L', a='LD', ag='BASED', agb='SP', msz='L', mem='LD',
 R('TRAPCC', U(op='TRAPCC', cond='CC', last=1))
 R('TRAPV',  U(op='TRAPCC', cond=9, last=1))
 
-# stack frames.  LINK A7 pushes the decremented A7 (68040).
-R('LINK',   U(jc='AY7', jt='LINK.4'),
-            U(op='MOV', sz='L', a='AY', ag='PUSH', msz='L', mem='ST'),
+# stack frames.  LINK A7 pushes the A7 it started with (68060: the source
+# is read before the predecrement; WinUAE gencpu i_LINK, all but the 68040)
+R('LINK',   U(op='MOV', sz='L', a='AY', ag='PUSH', msz='L', mem='ST'),
             U(ag='BASED', agb='SP', agw='AY'),
-            U(ag='ADDC', agb='SP', agw='SP', dsel='IMM', last=1),
-            U(op='SUB', sz='L', a='CONST', const=4, b='SP', ag='PUSH', msz='L', mem='ST'),
             U(ag='ADDC', agb='SP', agw='SP', dsel='IMM', last=1))
 # UNLK: SP = An + 4 and An = (An) in one uop
 R('UNLK',   U(op='MOV', sz='L', a='LD', ag='POPR', agb='AY', agw='SP', msz='L',

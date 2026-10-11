@@ -200,12 +200,23 @@ fsv3:
 	chkcnt	cnt_fline,1,63	; F-line count unchanged by fsave/frestore
 
 ;----------------------------------------------------------------- CHK
+	; the flags a trap leaves (WinUAE setchkundefinedflags, 68060): N from
+	; the value's sign, X Z V C as they were -- in the stacked SR, which
+	; the handler's RTE restores
 	move.l	#5,d0
+	move.w	#$0F,ccr
 	chk.w	#3,d0		; out of bounds high
+	move.w	ccr,d5
 	chkcnt	cnt_chk,1,6
+	and.l	#$1F,d5
+	chkl	d5,$07,6	; N clear (value positive), Z V C kept
 	move.l	#-1,d0
+	move.w	#$10,ccr
 	chk.w	#100,d0		; negative
+	move.w	ccr,d5
 	chkcnt	cnt_chk,2,7
+	and.l	#$1F,d5
+	chkl	d5,$18,7	; N set, X kept
 	move.l	#50,d0
 	chk.w	#100,d0		; in bounds: no trap
 	chkcnt	cnt_chk,2,8
@@ -1168,7 +1179,7 @@ inext_done:
 	move.w	(IPLCAP).l,d0
 	btst	#3,d0
 	beq	smc_done
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr			; caches on: the I-line must be cacheable
 	lea	(smc_t).l,a0
 	jsr	(a0)			; first run: would cache the line
@@ -1202,7 +1213,7 @@ smc_done:
 	; cached.  $B8xxxx is outside cache_win, so the L1 must treat every
 	; one of these as nocache and bypass; if it ever caches one, the
 	; register reads below stop tracking the hardware.
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr
 
 	move.w	($B8010E).l,d0

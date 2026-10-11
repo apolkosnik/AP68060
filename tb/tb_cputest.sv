@@ -159,7 +159,7 @@ assign ext_rdata = {rd8({xfer_addr[31:2], 2'b00}), rd8({xfer_addr[31:2], 2'b01})
 
 // CPU writes, and counts of the events the round follows
 int          evt_cnt;         // the capture stub reported (EVT written)
-int          frm_cnt;         // the entry RTE read its frame's format word
+int          frm_cnt;         // the entry RTE read its frame's PC
 int          iack_cnt;        // interrupt acknowledge cycles
 int          rdy_cnt;         // the monitor reached its idle loop (mask 7)
 int          rdy0;            // rdy_cnt already used by a round
@@ -172,10 +172,11 @@ always @(posedge clk) begin
 		if ({ev_addr[31:2], 2'b00} == MBOX + 32'h100 && ev_be[3]) evt_cnt = evt_cnt + 1;
 		if ({ev_addr[31:2], 2'b00} == MBOX + 32'h204 && ev_be[3]) rdy_cnt = rdy_cnt + 1;
 	end
-	// the read that covers the frame's last byte: the format word
+	// the RTE's last read of the frame: the one covering the PC's low byte
+	// (the core reads the format word first, then SR and PC)
 	if (ev && !ev_err && ev_rd && ev_tt != 2'd3 &&
-	    {ev_addr[31:2], 2'b00} == ((frm_addr + 32'd7) & ~32'd3) &&
-	    ev_be[2'd3 - 2'(frm_addr + 32'd7)])
+	    {ev_addr[31:2], 2'b00} == ((frm_addr + 32'd5) & ~32'd3) &&
+	    ev_be[2'd3 - 2'(frm_addr + 32'd5)])
 		frm_cnt = frm_cnt + 1;
 	if (ev && ev_tt == 2'd3) iack_cnt = iack_cnt + 1;
 end

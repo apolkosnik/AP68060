@@ -20,9 +20,16 @@
 ;        indexes PC[9:2]), both taken
 ;  18-19 returns the return stacks cannot predict: RTS to a pushed
 ;        address, and a call that leaves by a jump (a stale entry)
+;  20-23 the 68060's branch cache controls (MC68060UM 5.2, 5.11), counted
+;        through the bench's count of the predictions D1 confirms ($F2EC):
+;        CACR.EBC clear,
+;        nothing is predicted; CACR.CABC (and CUBC) clear every entry, and
+;        so does any CINV/CPUSH of the instruction cache; CABC and CUBC
+;        read as zero
 
 FAILREG	equ	$F100
 DONEREG	equ	$F102
+BCPRED	equ	$F2EC		; branch cache predictions followed (bench)
 CODE	equ	$6000		; rewritten code (test 6, 7)
 
 failt	macro
@@ -46,7 +53,7 @@ chkl	macro
 
 	org	$400
 start:
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr
 
 ;-------------------------------------- 1-4: branch end in word 0 / word 1
@@ -248,6 +255,103 @@ noret:	addq.l	#4,sp			; drop the return address
 ret1:	addq.l	#4,d0
 	rts
 done19:
+
+;------------------------------------------- 20-23: branch cache control
+	; (the bench counter is read noncachable: supervisor data by DTT1)
+	move.l	#$0000A040,d0
+	movec	d0,dtt1
+	; 20: EBC clear: a taken branch is never predicted
+	move.l	#$80008000,d0		; EDC, EIC, no EBC
+	movec	d0,cacr
+	clr.l	(BCPRED).l
+	bsr	bc_loop
+	move.l	(BCPRED).l,d0
+	chkl	d0,0,20
+	; ... EBC set: the loop's branch is predicted once it is known
+	move.l	#$80808000,d0
+	movec	d0,cacr
+	bsr	bc_loop			; (learns)
+	clr.l	(BCPRED).l
+	bsr	bc_loop
+	move.l	(BCPRED).l,d0
+	cmp.l	#30,d0
+	bcc.s	.ok20
+	failt	20
+.ok20:
+	; 21: CABC: the learned entry is gone, the first pass is not predicted
+	bsr	bc_loop
+	move.l	#$80C08000,d0		; EDC, EBC, CABC, EIC
+	movec	d0,cacr
+	clr.l	(BCPRED).l
+	bsr	bc_one			; one taken branch, cold
+	move.l	(BCPRED).l,d0
+	cmp.l	#2,d0
+	bcs.s	.cold0
+	failt	21
+.cold0:
+	bsr	bc_one			; and now learned: its BRA and RTS
+	clr.l	(BCPRED).l
+	bsr	bc_one
+	move.l	(BCPRED).l,d0
+	cmp.l	#2,d0
+	bcc.s	.warm21
+	failt	21
+.warm21:
+	; ... CUBC clears too (no supervisor/user split is kept: the entry
+	; a supervisor branch made goes as well, which costs only a prediction)
+	move.l	#$80A08000,d0		; EDC, EBC, CUBC, EIC
+	movec	d0,cacr
+	clr.l	(BCPRED).l
+	bsr	bc_one
+	move.l	(BCPRED).l,d0
+	cmp.l	#2,d0
+	bcs.s	.cold1
+	failt	21
+.cold1:
+	; 22: CINVA of the instruction cache clears the branch cache (5.11)
+	bsr	bc_one
+	bsr	bc_one
+	cinva	ic
+	clr.l	(BCPRED).l
+	bsr	bc_one
+	move.l	(BCPRED).l,d0
+	cmp.l	#2,d0
+	bcs.s	.cold2
+	failt	22
+.cold2:
+	; ... a data cache CINV does not
+	bsr	bc_one
+	cinva	dc
+	clr.l	(BCPRED).l
+	bsr	bc_one
+	move.l	(BCPRED).l,d0
+	cmp.l	#2,d0
+	bcc.s	.warm22
+	failt	22
+.warm22:
+	; 23: CABC and CUBC read as zero; EBC is kept
+	move.l	#$80E08000,d0
+	movec	d0,cacr
+	movec	cacr,d1
+	chkl	d1,$80808000,23
+	bra	done23
+
+	cnop	0,4
+bc_loop:
+	move.w	#39,d1
+.bl:	bra.s	.bn			; a taken branch, forty times
+	nop
+.bn:	dbra	d1,.bl
+	rts
+	cnop	0,4
+bc_one:
+	bra.s	.b1			; one taken branch (and the return): a
+	nop				; warm call retires both predicted, a cold
+.b1:	rts				; one neither -- the call itself may be
+					; learned by a decode run ahead (past a
+					; serializing instruction) and counts at
+					; most once
+done23:
 
 ;----------------------------------------------------------------- done
 	move.w	#$600D,(DONEREG).l

@@ -1032,7 +1032,9 @@ wire fr_wb_we = (fst == F_WB) && !x_kill &&
                 (r_op != 7'h38) && (r_op != 7'h3A);
 wire [14:0] fr_wb_e = (a_t == T_ZERO) ? 15'd0 :
                        (a_t == T_INF || a_t == T_NAN) ? 15'h7FFF : a_e[14:0];
-wire [63:0] fr_wb_m = (a_t == T_ZERO) ? 64'd0 : a_m;
+// the 68060 writes every infinity with a zero mantissa (WinUAE
+// infinity_clear_intbit: move, abs, neg, add, sub, mul, div, sqrt, int)
+wire [63:0] fr_wb_m = (a_t == T_ZERO || a_t == T_INF) ? 64'd0 : a_m;
 wire        fr_bank_we = fm_we || fr_wb_we || p6_v;
 wire  [2:0] fr_bank_wa = p6_v ? p6_d : fr_wb_we ? r_dst : fm_sel;
 wire [79:0] fr_bank_wd = p6_v ? {p6_s, p6_z ? 15'd0 : p6_e[14:0], p6_z ? 64'd0 : p6_m} :
@@ -2497,10 +2499,11 @@ always @(posedge clk) begin
 					nan = (a_t == T_NAN) || (du[1:0] == T_NAN);
 					n = 0; z = 0;
 					if (nan) begin
-						// cmp_signed_nan (68040): the propagated NaN keeps
-						// its sign and N reports it; the destination NaN is
-						// preferred, matching propagateFloatx80NaN(a, b)
-						n = (du[1:0] == T_NAN) ? ds : a_s;
+						// a NaN compares unordered with N clear on the
+						// 68060 (WinUAE sets cmp_signed_nan for the 68040
+						// only: floatx80_cmp then propagates sign-cleared
+						// operands)
+						n = 1'b0;
 					end
 					else begin
 						eq = (dz && a_t == T_ZERO) ||

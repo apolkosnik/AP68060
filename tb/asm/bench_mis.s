@@ -24,7 +24,7 @@ start:
 	movec	d0,dtt1
 	move.l	#$00008020,d0		; DTT0: user data copyback
 	movec	d0,dtt0
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr
 	lea	($3000).l,a1
 	move	a1,usp

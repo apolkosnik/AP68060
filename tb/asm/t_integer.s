@@ -70,7 +70,7 @@ start:
 ; every test after this point doubles as I/D-cache-hit coverage.  The
 ; caches are write-through with invalidate-on-write, so no test below
 ; needs cache maintenance.
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr
 	move.l	#unimp61,($F4).l	; vector 61: unimplemented integer instruction
 
@@ -393,6 +393,22 @@ t82ok:
 	beq.s	t83ok
 	failt	83
 t83ok:
+	; LINK A7: the 68060 pushes the A7 it started with (the source is read
+	; before the predecrement; the 68040 pushed the decremented A7)
+	move.l	sp,d5
+	link	a7,#-8
+	move.l	8(sp),d0	; (a7 = old - 4 - 8: the pushed long at +8)
+	cmp.l	d5,d0
+	beq.s	t83b
+	failt	290
+t83b:
+	move.l	sp,d0
+	add.l	#12,d0
+	cmp.l	d5,d0
+	beq.s	t83c
+	failt	291
+t83c:
+	lea	12(sp),sp
 
 	pea	4(a0)
 	move.l	(sp)+,d0
@@ -754,12 +770,12 @@ c2dok:
 	chkl	d0,0,165
 
 ;----------------------------------------------------------------- CHK flags
-; 68040: N always tracks the value's sign, C cleared when in bounds
-; (set on traps only for specific sign combos), Z/V/X unchanged
+; 68060 (WinUAE setchkundefinedflags): N is cleared, or on a trap set
+; from the value's sign; X, Z, V and C are unchanged (traps: t_exceptions)
 	move.l	#16,d0
 	move.w	#$1F,ccr
 	chk.l	d0,d0		; value 16, bound 16: in bounds
-	chkccr	$16,166		; N,C cleared; X,Z,V survive
+	chkccr	$17,166		; N cleared; X,Z,V,C survive
 
 	move.l	#0,d1
 	move.l	#10,d2
@@ -892,7 +908,7 @@ smcq:
 	failt	192
 smcq_ok:
 	cinva	ic		; drop the line cached before the bypass
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr		; cache-hot again
 
 ;----------------------------------------------------------------- all done

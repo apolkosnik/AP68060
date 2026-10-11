@@ -47,6 +47,8 @@
 //               took between the two parts (the DMU's fallback)          //
 //   $F2E4 long  (read) Bcc/DBcc mispredicted in EX (write 0 clears)      //
 //   $F2E8 long  (read) the core's options: bit 0 the loop exit predictor  //
+//   $F2EC long  (read) retired branches the branch cache predicted        //
+//               (write 0 clears)                                           //
 //               (t_loops checks its predictions only when it is there)    //
 //   $F164 word  (read) interrupts accepted on an IPEND claim alone: at   //
 //               or below the boundary mask, after the request qualified   //
@@ -505,6 +507,12 @@ always_ff @(posedge clk) begin
 		mem.mem[16'hF2E4 >> 2] <= mem.mem[16'hF2E4 >> 2] + 32'd1;
 	// the core's options, for the programs that check what they do
 	mem.mem[16'hF2E8 >> 2] <= {31'd0, 1'(`AP_LOOP_PRED)};
+	// branch cache predictions retired (t_btb: CACR.EBC, CABC): branches
+	// the fetch took from the branch cache, D1 confirmed, and WB completed
+	if (rsti_n && dut.be.wb_commit && dut.be.wb_u.bcp) begin
+		mem.mem[16'hF2EC >> 2] <= mem.mem[16'hF2EC >> 2] + 32'd1;
+		if (trace) $display("%8d BC prediction retired at %08x", cycles, dut.be.wb_u.pc);
+	end
 end
 int          cap;
 
@@ -775,6 +783,16 @@ always_ff @(posedge clk)
 		         dut.be.wb_v ? $sformatf("%04x", dut.be.wb_u.pc[15:0]) : "----",
 		         dut.be.ag_hold, dut.dm_hold1, dut.be.dc2_hold, dut.be.ex_hold, dut.be.wb_hold,
 		         dut.redir_v ? "REDIR " : "", dut.d_redir_v ? "DREDIR" : "");
+
+// +mdtrace=<from>: the multiply/divide handshake for 100 cycles
+int mdt_from;
+initial if (!$value$plusargs("mdtrace=%d", mdt_from)) mdt_from = -1;
+always_ff @(posedge clk)
+	if (mdt_from >= 0 && cycles >= mdt_from && cycles < mdt_from + 100)
+		$display("%8d MD ex_v=%b pc=%04x go=%b start=%b busy=%b done=%b z=%b kill=%b fault=%b exc=%0d stall_ex=%b irq=%b",
+		         cycles, dut.be.ex_v, dut.be.ex_u.pc[15:0], dut.be.md_go, dut.be.ex_md_start,
+		         dut.be.md_busy, dut.be.md_done, dut.be.md_z, dut.be.kill_now, dut.be.ex_fault,
+		         dut.be.ex_u.exc, dut.be.stall_ex, dut.be.irq_pend);
 
 // +fptrace=<from>: the FPU state each cycle for 300 cycles
 int fpt_from;

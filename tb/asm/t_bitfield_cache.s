@@ -43,7 +43,7 @@ start:
         ; pass 2: caches ON, cold
         move.l  #$00000808,d0          ; CINV both, all
         movec   d0,cacr
-        move.l  #$80008000,d0
+        move.l  #$80808000,d0
         movec   d0,cacr
         lea     (resB).l,a1
         bsr     sweep
@@ -73,7 +73,7 @@ tloop:
         pflusha
         move.l  #$00000808,d0          ; CINV both, all
         movec   d0,cacr
-        move.l  #$80008000,d0
+        move.l  #$80808000,d0
         movec   d0,cacr
         lea     (resC).l,a1
         bsr     sweep

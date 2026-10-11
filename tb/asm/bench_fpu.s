@@ -7,7 +7,7 @@ DONEREG	equ	$F102
 	dc.l	start
 	org	$400
 start:
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr
 	fmove.l	#3,fp0
 	fmove.l	#1,fp1

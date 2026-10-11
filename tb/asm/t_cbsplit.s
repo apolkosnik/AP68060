@@ -115,7 +115,7 @@ start:
 	moveq	#1,d0
 	movec	d0,sfc
 	movec	d0,dfc
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr
 	lea	(BUF).l,a0
 

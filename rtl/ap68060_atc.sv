@@ -1,7 +1,7 @@
 //--------------------------------------------------------------------------//
 // AP68060 - pipelined MC68040                                            //
 //                                                                          //
-// ap68060_atc.sv - address translation cache (MC68040UM 3.3)                //
+// ap68060_atc.sv - address translation cache (MC68060UM 4.3)                //
 //                                                                          //
 // 64 entries, four-way set associative, 16 sets indexed by LA15-12 (4K     //
 // pages) or LA16-13 (8K pages).  The tag is FC2 and the logical page; the  //
@@ -13,6 +13,8 @@
 // compared here and the hit way's entry returned.  Replacement takes an    //
 // existing entry for the same page, else the first invalid way, else the  //
 // way a 2-bit counter points to (the counter advances on every miss fill).//
+// In the 1/2-cache mode (TCR FOTC/FITC) only ways 0 and 1 take new         //
+// entries: 32 of them.                                                     //
 // PFLUSH by page reads the set through the lookup port: the caller holds  //
 // the lookup inputs on the page for one cycle while flush_page is high.   //
 //--------------------------------------------------------------------------//
@@ -23,6 +25,7 @@ module ap68060_atc
 	input  logic        clk,
 	input  logic        nreset,
 	input  logic        p8k,           // TC.P: 8 Kbyte pages
+	input  logic        half,          // TC.FOTC/FITC: 32 entries (ways 0, 1)
 
 	// lookup
 	input  logic [31:0] la,
@@ -108,9 +111,8 @@ always_comb begin
 	for (int i = 3; i >= 0; i--)
 		if (v[wset][i] && tag_eq(ws[i], wla, wfc2, p8k)) begin wway = 2'(i); found = 1'b1; end
 	if (!found) begin
-		logic fi;
-		fi = 1'b0;
-		for (int i = 3; i >= 0; i--) if (!v[wset][i]) begin wway = 2'(i); fi = 1'b1; end
+		if (half) wway = {1'b0, rr[0]};
+		for (int i = 3; i >= 0; i--) if (!v[wset][i] && !(half && i >= 2)) wway = 2'(i);
 	end
 end
 
@@ -124,7 +126,7 @@ always_ff @(posedge clk) begin
 	if (wr) begin
 		v[wset][wway] <= 1'b1;
 		g[wset][wway] <= went.g;
-		if (v[wset] == 4'hF) rr <= rr + 2'd1;
+		if (half ? (v[wset][1:0] == 2'b11) : (v[wset] == 4'hF)) rr <= rr + 2'd1;
 	end
 	if (flush_all)
 		for (int i = 0; i < 16; i++)

@@ -1,12 +1,31 @@
 ; Memory bitfields must access only the bytes containing the field.
 ; Reproduces OPENSTEP 4.2 WindowServer's BFTST at the end of an 8K page.
-; Runs under tb_ap040_program.v (zero and varied bus wait states).
+; Runs under tb_ap68060.sv (zero and varied bus wait states).
+;
+; 68060 access errors (MC68060UM 8.4.4): format $4, +2 PC of the faulted
+; instruction (restarted from its beginning by the RTE, 8.4.4.1), +8 fault
+; address, +$C FSLW.  The expectations for the three page-crossing faults
+; follow WinUAE's 68060 bitfield path (cpummu.cpp mmu060_get_rmw_bitfield /
+; newcpu_common.cpp x_get_bitfield): span 2 is ONE misaligned word access
+; (mmu_get_word_unaligned: the second byte faults, misalignednotfirst sets
+; FSLW MA and the fault address stays the operand's first byte -- the
+; manual's 8.4.4.2 "points to the initial logical address calculated by the
+; integer unit regardless of which bus cycle actually faulted"); spans 3 and
+; 5 are a word / long word access followed by a SEPARATE byte access at
+; +2 / +4, so a fault on that byte is an aligned byte access of its own:
+; fault address $A000, SIZE byte, no MA.  A failed table search makes no ATC
+; entry on the 060 (4.3; WinUAE mmu_fill_atc "68060 only if valid
+; descriptor was found"), so the handler maps the page WITHOUT a PFLUSH and
+; the restarted instruction searches again; the count proves one fault.
 
 FAILREG         equ $F100
 DONEREG         equ $F102
 cnt_aerr        equ $3600
 last_fa         equ $3604
-last_ssw        equ $3608
+last_fslw       equ $3608
+last_pc         equ $360C
+FS_SPAN2        equ $09450200   ; MA, R, SIZE word, TM 5, PF
+FS_BYTE         equ $01250200   ; R, SIZE byte, TM 5, PF
 guard_pte       equ $4414       ; page $A000-$BFFF
 
 checkl macro
@@ -149,21 +168,23 @@ user_done:
         ; Genuine crossing, span 2: a split WORD read must still fault.
         ; The handler maps the missing page and retries the instruction.
         move.b  #$FE,($9FFF).l
+bft_cross:
         bftst   ($9FFF).l{6:3}
         moveq   #0,d0
         move.w  (cnt_aerr).l,d0
         checkl  d0,1,23
         move.l  (last_fa).l,d0
         checkl  d0,$9FFF,24
-        moveq   #0,d0
-        move.w  (last_ssw).l,d0
-        and.l   #$0F67,d0
-        checkl  d0,$0D45,25     ; MA + ATC + read + WORD + supervisor data
+        move.l  (last_fslw).l,d0
+        checkl  d0,FS_SPAN2,25  ; MA + read + WORD + supervisor data + PF
+        move.l  (last_pc).l,d0
+        checkl  d0,bft_cross,25 ; the BFTST itself, restarted
 
         ; Genuine crossing on the third byte tests the new WORD+BYTE path.
         move.w  #$1234,($9FFE).l
         move.b  #$56,($A000).l
         bsr     guard
+bfx3_cross:
         bfextu  ($9FFE).l{0:24},d0
         checkl  d0,$123456,26
         moveq   #0,d0
@@ -171,11 +192,16 @@ user_done:
         checkl  d0,1,27
         move.l  (last_fa).l,d0
         checkl  d0,$A000,28
+        move.l  (last_fslw).l,d0
+        checkl  d0,FS_BYTE,28   ; the separate byte access: no MA, byte
+        move.l  (last_pc).l,d0
+        checkl  d0,bfx3_cross,28
 
         ; Genuine crossing on the fifth byte retains LONG+BYTE restart.
         move.l  #$12345678,($9FFC).l
         move.b  #$9A,($A000).l
         bsr     guard
+bfx5_cross:
         bfextu  ($9FFC).l{4:32},d0
         checkl  d0,$23456789,29
         moveq   #0,d0
@@ -183,6 +209,10 @@ user_done:
         checkl  d0,1,30
         move.l  (last_fa).l,d0
         checkl  d0,$A000,31
+        move.l  (last_fslw).l,d0
+        checkl  d0,FS_BYTE,31
+        move.l  (last_pc).l,d0
+        checkl  d0,bfx5_cross,31
 
         move.w  #$600D,(DONEREG).l
         stop    #$2700
@@ -198,14 +228,19 @@ no_fault:
         bne     fail
         rts
 
+; guard: the previous case left page $A000 mapped and in the ATC, so its
+; invalidation does need the PFLUSHA (a successful search's entry stays).
+; h_aerr: no PFLUSH -- the failed search left no entry to discard.
 h_aerr:
-        cmpi.w  #$7008,6(sp)
+        cmpi.w  #$4008,6(sp)
         bne     unexpected
-        move.l  $14(sp),(last_fa).l
-        move.w  $C(sp),(last_ssw).l
+        move.l  2(sp),(last_pc).l
+        move.l  8(sp),(last_fa).l
+        move.l  $C(sp),(last_fslw).l
         addq.w  #1,(cnt_aerr).l
+        cmpi.w  #3,(cnt_aerr).l
+        bhs     unexpected      ; a restart loop: the fault was cached
         move.l  #$A003,(guard_pte).l
-        pflusha
         rte
 
 h_user_return:

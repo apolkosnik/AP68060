@@ -283,7 +283,7 @@ typedef struct packed {
 	// exceptions and control
 	logic  [7:0] exc;       // decode-time exception vector, 0 = none
 	logic        ser;       // serialize: flush and refetch npc after WB
-	logic        t0cof;     // the instruction is on the 68040 T0 trace list
+	logic        bcp;       // a branch the branch cache predicted (D1 confirmed it)
 	logic        b_upd;     // operand B is this uop's own (An)+/-(An) register:
 	                        // it reads the updated value (source EA updates)
 	logic        a_upd;     // the same for operand A (MOVES An,(An)+ / -(An))
@@ -349,7 +349,7 @@ typedef struct packed {
 	ea_t         ea1;
 	logic [31:0] target;  // PC-relative branch target
 	logic        pred;    // the front end followed target
-	logic        t0;      // on the 68040 T0 trace list
+	logic        bcp;     // a branch the branch cache predicted and D1 confirmed
 	logic        bst;     // Bcc: the static prediction (backward taken)
 	logic  [1:0] bhc;     // Bcc: its history counter as D1 read it
 	ras_snap_t   ras;     // D1's return stack before this instruction

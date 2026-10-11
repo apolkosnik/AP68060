@@ -1,11 +1,12 @@
 ; AP68060: the data cache in each caching mode, by the bus transfers it
-; makes (MC68040UM 4.3, 4.4, table 4-x); the bench counts the CPU's data
-; reads and writes in a window ($F2D0-$F2DC, in beats: a line is four)
+; makes (MC68060UM 5.4, 5.5); the bench counts the CPU's data reads and
+; writes in a window ($F2D0-$F2DC, in beats: a line is four)
 ; assembled with vasmm68k_mot -Fbin -m68040
 ;
 ; User data goes through MOVES (SFC = DFC = 1) under DTT0, whose CM field
 ; selects the mode; supervisor data (the bench registers, the memory
-; checks) is noncachable (DTT1).  Lines of one set are $400 apart.
+; checks) is noncachable (DTT1).  Lines of one set are $800 apart (128
+; sets of 16 bytes).
 ;   write-through (CM 00)
 ;   1    a read miss fills the line (4 reads); a read hit makes none
 ;   2    a write hit updates the line and writes through (1 write, and the
@@ -26,6 +27,17 @@
 ;        it) pushes it and invalidates it, then reads memory (4 writes,
 ;        1 read; WinUAE does the same); the next read is a bus read, and
 ;        back in copyback the line refills with the pushed value
+;   68060 (MC68060UM 5.2, 5.5)
+;   12   a write-through read hit on a dirty line pushes it (4 writes) and
+;        the line stays valid: the next read is a hit
+;   13   a write-through write hit on a dirty line pushes it, then writes
+;        through (4 + 1 writes); the line stays valid
+;   14   CACR.NAD: misses do not allocate -- a copyback read miss is one
+;        bus read (again the next time), a copyback write miss one write
+;   15   CACR.DPI: CPUSHL pushes the dirty line and leaves it valid (the
+;        next read hits, a second CPUSHL finds it clean)
+;   16   CACR.FOC: the 1/2-cache mode allocates in two ways only -- of
+;        three lines of one set at least one is gone; four ways keep all
 
 FAILREG	equ	$F100
 DONEREG	equ	$F102
@@ -33,11 +45,11 @@ WLO	equ	$F2D0
 WHI	equ	$F2D4
 WRD	equ	$F2D8
 WWR	equ	$F2DC
-L0	equ	$9C00		; five lines of one set
+L0	equ	$9800		; five lines of one set
 L1	equ	$A000
-L2	equ	$A400
-L3	equ	$A800
-L4	equ	$AC00
+L2	equ	$A800
+L3	equ	$B000
+L4	equ	$B800
 
 failt	macro
 	move.w	#\1,d7
@@ -228,6 +240,143 @@ start:
 	moves.l	(L0).l,d3
 	chkl	d3,$50505050,11
 	cnt	4,0,11
+
+;---------------------- 12 a write-through read hit on a dirty line
+	cinva	dc
+	move.l	#$00008020,d0		; copyback: L0 dirty
+	movec	d0,dtt0
+	moves.l	(L0).l,d3
+	move.l	#$60606060,d2
+	moves.l	d2,(L0).l
+	clr.l	(WRD).l
+	clr.l	(WWR).l
+	move.l	#$00008000,d0		; write-through, the dirty line still there
+	movec	d0,dtt0
+	moves.l	(L0).l,d3
+	chkl	d3,$60606060,12
+	cnt	0,4,12			; the push; the data from the cache
+	moves.l	(L0+4).l,d3		; still valid: a hit
+	cnt	0,0,12
+	lea	(L0).l,a0
+	cpushl	dc,(a0)			; and clean: nothing to push
+	nop
+	cnt	0,0,12
+	mem	L0,$60606060,12		; (a noncachable read of a cached line
+					; invalidates it: last)
+
+;---------------------- 13 a write-through write hit on a dirty line
+	cinva	dc
+	move.l	#$00008020,d0		; copyback: L1 dirty
+	movec	d0,dtt0
+	moves.l	(L1).l,d3
+	move.l	#$61616161,d2
+	moves.l	d2,(L1+4).l
+	clr.l	(WRD).l
+	clr.l	(WWR).l
+	move.l	#$00008000,d0		; write-through
+	movec	d0,dtt0
+	move.l	#$62626262,d2
+	moves.l	d2,(L1).l
+	cnt	0,5,13			; the push, then the write itself
+	moves.l	(L1).l,d3		; valid: a hit with the new data
+	chkl	d3,$62626262,13
+	cnt	0,0,13
+	mem	L1+4,$61616161,13
+	mem	L1,$62626262,13
+
+;---------------------- 14 CACR.NAD: no allocation
+	cinva	dc
+	move.l	#$C0008000,d0		; EDC + NAD, EIC
+	movec	d0,cacr
+	move.l	#$00008020,d0		; copyback
+	movec	d0,dtt0
+	move.l	#$70707070,(L2).l
+	clr.l	(WRD).l
+	clr.l	(WWR).l
+	moves.l	(L2).l,d3		; a miss: one read, no line
+	chkl	d3,$70707070,14
+	cnt	1,0,14
+	moves.l	(L2).l,d3		; and again
+	cnt	1,0,14
+	move.l	#$71717171,d2		; a copyback write miss: written to memory
+	moves.l	d2,(L2).l
+	cnt	0,1,14
+	mem	L2,$71717171,14
+	move.l	#$80008000,d0		; NAD off: the read allocates
+	movec	d0,cacr
+	moves.l	(L2).l,d3
+	cnt	4,0,14
+	; a line already cached still hits with NAD set
+	move.l	#$C0008000,d0
+	movec	d0,cacr
+	moves.l	(L2+8).l,d3
+	cnt	0,0,14
+
+;---------------------- 15 CACR.DPI: CPUSH keeps the line
+	cinva	dc
+	move.l	#$90008000,d0		; EDC + DPI, EIC
+	movec	d0,cacr
+	moves.l	(L3).l,d3		; fill, dirty
+	move.l	#$72727272,d2
+	moves.l	d2,(L3).l
+	clr.l	(WRD).l
+	clr.l	(WWR).l
+	lea	(L3).l,a0
+	cpushl	dc,(a0)
+	nop
+	cnt	0,4,15			; pushed
+	moves.l	(L3).l,d3		; still valid
+	chkl	d3,$72727272,15
+	cnt	0,0,15
+	cpushl	dc,(a0)			; clean now: no push
+	nop
+	cnt	0,0,15
+	mem	L3,$72727272,15		; (this invalidates it)
+	moves.l	(L3).l,d3		; refill, then dirty it again
+	moves.l	d2,(L3).l
+	clr.l	(WRD).l
+	clr.l	(WWR).l
+	move.l	#$80008000,d0		; DPI off: CPUSH pushes and invalidates
+	movec	d0,cacr
+	cpushl	dc,(a0)
+	nop
+	cnt	0,4,15
+	moves.l	(L3).l,d3		; a miss
+	cnt	4,0,15
+
+;---------------------- 16 CACR.FOC: two ways
+	cinva	dc
+	move.l	#$00008000,d0		; write-through
+	movec	d0,dtt0
+	move.l	#$88008000,d0		; EDC + FOC, EIC
+	movec	d0,cacr
+	clr.l	(WRD).l
+	clr.l	(WWR).l
+	moves.l	(L0).l,d3		; three lines of one set
+	moves.l	(L1).l,d3
+	moves.l	(L2).l,d3
+	cnt	12,0,16
+	moves.l	(L2).l,d3		; the last one is there
+	cnt	0,0,16
+	moves.l	(L0).l,d3		; of the first two at least one is not
+	moves.l	(L1).l,d3
+	move.l	(WRD).l,d1
+	cmp.l	#4,d1
+	bcc.s	.foc1
+	failt	16
+.foc1:
+	clr.l	(WRD).l
+	cinva	dc
+	move.l	#$80008000,d0		; four ways: all three stay
+	movec	d0,cacr
+	moves.l	(L0).l,d3
+	moves.l	(L1).l,d3
+	moves.l	(L2).l,d3
+	cnt	12,0,16
+	moves.l	(L0).l,d3
+	moves.l	(L1).l,d3
+	moves.l	(L2).l,d3
+	cnt	0,0,16
 
 	clr.l	(WLO).l
 	clr.l	(WHI).l

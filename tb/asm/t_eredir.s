@@ -5,10 +5,12 @@
 ; front end round as it leaves EX; the stages behind it are flushed when it
 ; completes at WB.  Each case puts a mispredicted branch next to something
 ; that could overtake or undo that early redirect:
-;   1-4    a store that takes a bus error just before the branch (format $7,
-;          the store restarted, the branch then taken, its fall-through never
-;          executed), at four alignments
-;   5-6    the same with a load
+;   1-4    a store that takes a bus error just before the branch (format $4,
+;          FSLW W|WE; the store is RESTARTED by the RTE and rewrites memory,
+;          the branch then taken, its fall-through never executed), at four
+;          alignments
+;   5-6    the same with a load (FSLW R|RE; the load is re-executed and
+;          returns what the handler left at the faulted address)
 ;   7-9    trace on every instruction across a mispredicted branch: the
 ;          frames' PCs, in order
 ;   10-13  DBRA leaving its loop (a mispredict): the counter it wrote, used
@@ -21,7 +23,20 @@
 ;          the interrupt taken once
 ;
 ; The bench rejects the first access to $F140 after $F142 is written.
-; Supervisor data is noncachable (DTT1), so every access reaches it.
+; Supervisor data is noncachable precise (DTT1 CM=10), so every access
+; reaches it and a write bus error is reported precisely: MC68060UM 8.2.1
+; ("for writes that are precise (... references to pages marked noncachable
+; precise), the occurrence of a bus error causes the pipeline to be aborted
+; immediately"), 8.4.4.1 ("If the write is to a precise operand space ...
+; the stacked PC contains the instruction address of the TEST_WRITE").  The
+; 060 has no write-back slots: the RTE restarts the store from the
+; beginning, so the write reaches memory again (proved below by the handler
+; overwriting the location before the RTE).
+;
+; FSLW (8.4.4.3, WinUAE cpummu.cpp mmu_bus_error): R $01000000 /
+; W $00800000, SIZE 00 = long, TT 0, TM 5 (supervisor data), RE $20 /
+; WE $10; no other bit (aligned, unlocked, not a table search, no TTR
+; fault: a TTR hit only sets FSLW TTR for a fault the TTR itself detects).
 
 FAILREG	equ	$F100
 DONEREG	equ	$F102
@@ -33,6 +48,11 @@ IPLDLY	equ	$F148
 nberr	equ	$3600		; bus errors taken
 berr_pc	equ	$3604		; stacked PC of the last one
 berr_fa	equ	$3608		; its fault address
+berr_fs	equ	$3618		; its FSLW
+SBE_FSLW equ	$00850010	; W, long, TM 5, WE
+LBE_FSLW equ	$01050020	; R, long, TM 5, RE
+SBE_FILL equ	$A5A5A5A5	; written by the handler under a faulted store
+LBE_FILL equ	$5EED1234	; written by the handler under a faulted load
 ntrace	equ	$360C		; trace frames recorded
 nirq	equ	$3610		; level 2 interrupts taken
 trbuf	equ	$3700		; trace PCs (16)
@@ -96,6 +116,8 @@ sbe	macro
 	beq.s	.tk\@
 	failt	\2
 .tk\@:	chkm	berr_pc,.st\@,\2
+	chkm	berr_fs,SBE_FSLW,\2
+	chkm	BERRREG,0,\2	; restarted store overwrote the handler's fill
 	endm
 
 	sbe	0,1
@@ -118,6 +140,8 @@ lbe	macro
 	beq.s	.tk\@
 	failt	\2
 .tk\@:	chkm	berr_pc,.ld\@,\2
+	chkm	berr_fs,LBE_FSLW,\2
+	chkl	d0,LBE_FILL,\2	; restarted load read the handler's fill
 	endm
 
 	lbe	0,5
@@ -260,12 +284,22 @@ rsf:	tst.l	d0
 rsf1:	nop
 	rts
 
+; Access error: format $4 (8.4.4): +2 PC, +8 fault address, +$C FSLW.
+; The injection is one-shot, so the RTE's restart of the access succeeds.
+; Before returning the handler fills the faulted long word: a restarted
+; store must overwrite the fill, a restarted load must read it.
 h_berr:
-	cmpi.w	#$7008,6(sp)		; format $7, vector 2
+	cmpi.w	#$4008,6(sp)		; format $4, vector 2
 	bne.s	hb_bad
 	addq.l	#1,(nberr).l
 	move.l	2(sp),(berr_pc).l
-	move.l	$14(sp),(berr_fa).l
+	move.l	8(sp),(berr_fa).l
+	move.l	$C(sp),(berr_fs).l
+	btst	#7,$D(sp)		; FSLW bit 23 (W): a store
+	beq.s	hb_ld
+	move.l	#SBE_FILL,(BERRREG).l
+	rte
+hb_ld:	move.l	#LBE_FILL,(BERRREG).l
 	rte
 hb_bad:	failt	97
 

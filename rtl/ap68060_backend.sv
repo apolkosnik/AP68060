@@ -59,6 +59,7 @@ module ap68060_backend
 	output logic [15:0] sr,
 	output logic [31:0] vbr,
 	output logic [31:0] cacr,
+	output logic        bc_clr,         // MOVEC to CACR with CABC or CUBC: clear the branch cache
 	output logic  [2:0] sfc,
 	output logic  [2:0] dfc,
 
@@ -112,6 +113,7 @@ module ap68060_backend
 	input  logic  [7:0] dm_fvec,        // 2 access error, 3 address error
 	input  logic [31:0] dm_faddr,
 	input  logic [31:0] dm_fslw,        // ... its fault status long word
+	input  logic [31:0] if_cause,       // the fetch's translation fault cause (FSLW)
 	output logic        dm_st_v,        // WB store data valid this cycle
 	output logic [31:0] dm_st_data,
 	input  logic        dm_st_rdy,      // store accepted (WB may complete)
@@ -563,6 +565,8 @@ logic [31:0] md_rem;          // remainder / product high, for OP_MDRES
 logic [31:0] md_lol;          // quotient / product low, for OP_MDRES
 logic        md_ovfl;         // the last divide overflowed
 logic        md_go;           // this EX uop has started the unit
+logic        md_fin;          // ... and the unit has finished (done is a pulse: EX may
+                              // be stalled by WB in that cycle)
 logic        md_z;            // ... is a divide by zero (from its second cycle)
 wire         ex_is_md   = (ex_u.op == OP_MUL) || (ex_u.op == OP_DIV);
 wire         ex_div0    = (ex_u.op == OP_DIV) &&
@@ -606,7 +610,7 @@ ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 // EX holds while the unit runs, until the cycle its result is presented
 // (a divide by zero holds its first cycle too: the zero test of the
 // operand stays off the stall path, and the exception goes a cycle later)
-assign ex_hold = (ex_v && ex_is_md && !md_z && !ex_fault && !md_done) ||
+assign ex_hold = (ex_v && ex_is_md && !md_z && !ex_fault && !md_done && !md_fin) ||
                  (ex_v && ex_slow && !ex_ph) ||
                  (ex_v && ex_is_fp && !ex_fault && ex_u.exc == 8'd0 && fp_hold);
 
@@ -1245,7 +1249,7 @@ assign mt_caches = wb_u.imm_b[7:6];
 assign mt_addr   = wb_res;
 assign mt_fc     = dfc_r;
 assign mt_ng     = (wb_u.cond == 4'd4) && !wb_u.imm_b[3];
-assign mt_wr     = (wb_u.cond == 4'd5) && !wb_u.imm_b[5];
+assign mt_wr     = (wb_u.cond == 4'd5) && !wb_u.imm_b[6];   // PLPAW $F588, PLPAR $F5C8
 
 logic        rst_seq;         // reset exception pending (first cycles)
 
@@ -1344,6 +1348,7 @@ always_ff @(posedge clk) begin
 		sr_r    <= 16'h2700;
 		vbr_r   <= 32'd0;
 		cacr_r  <= 32'd0;
+		bc_clr  <= 1'b0;
 		sfc_r   <= 3'd0;
 		dfc_r   <= 3'd0;
 		tc_r    <= 32'd0;
@@ -1353,6 +1358,7 @@ always_ff @(posedge clk) begin
 		bus_l <= 1'b0; bus_sl <= 1'b0; bus_le <= 1'b0; bus_sle <= 1'b0; bus_lkdone <= 1'b0;
 		xi_pc   <= 32'd0; xi_addr <= 32'd0; xi_sr <= 16'd0; xi_vecw <= 16'd0; xi_fslw <= 32'd0;
 		md_go   <= 1'b0;
+		md_fin  <= 1'b0;
 		md_z    <= 1'b0;
 		ex_ph   <= 1'b0;
 		ex_pb   <= 1'b0;
@@ -1492,6 +1498,7 @@ always_ff @(posedge clk) begin
 			ex_faddr <= dm_faddr;
 			ex_fslw  <= dm_fslw;
 			md_go    <= 1'b0;
+			md_fin   <= 1'b0;
 			md_z     <= 1'b0;
 		end
 		if (!stall_ex) ex_v <= adv_dc2;
@@ -1567,13 +1574,14 @@ always_ff @(posedge clk) begin
 				// a faulted instruction fetch (MC68060UM 8.4.4): FA is the
 				// instruction's opword address; FSLW IO, MA when the faulted
 				// word was an extension word, read, long, TT normal, TM the
-				// program space (FC 6 or 2), and the cause: an MMU fault
-				// (PF: the fetch unit does not say which) or a bus error (RE)
+				// program space (FC 6 or 2), and the cause: the translation's
+				// (PTA PTB IL PF SP, TWE LK for a bus error in the search) or a
+				// bus error (RE)
 				if (ifs || ex_u.exc == EXC_IFB || ex_u.exc == EXC_IFA) begin
 					wb_exc_addr <= ex_u.pc;
 					wb_exc_fslw <= FSLW_IO | ((ex_u.target != ex_u.pc) ? FSLW_MA : 32'd0) |
 					               FSLW_R | {13'd0, sr_r[13], 2'b10, 16'd0} |
-					               (ifa ? FSLW_PF : FSLW_RE);
+					               (ifa ? if_cause : FSLW_RE);
 				end
 				else begin
 					wb_exc_addr <= ex_u.pc;
@@ -1639,6 +1647,7 @@ always_ff @(posedge clk) begin
 			end
 			if (ex_u.op == OP_BF) bf_lonew <= bf_lo_out;
 		end
+		if (md_done && md_go) md_fin <= 1'b1;
 		if (md_done) begin
 			md_rem  <= md_hi;
 			md_lol  <= md_lo;
@@ -1650,6 +1659,7 @@ always_ff @(posedge clk) begin
 		//------------------------------------------------------------------
 		// WB commit
 		//------------------------------------------------------------------
+		bc_clr <= 1'b0;
 		if (wb_commit) begin
 			dbg_retire <= wb_u.last;
 			// architectural commit: the back file's write ports (bwe)
@@ -1660,7 +1670,10 @@ always_ff @(posedge clk) begin
 				case (wb_u.imm_b[7:0])
 					8'h00: sfc_r  <= wb_res[2:0];
 					8'h01: dfc_r  <= wb_res[2:0];
-					8'h02: cacr_r <= wb_res & 32'hF880_E000;
+					8'h02: begin
+						cacr_r <= wb_res & 32'hF880_E000;
+						bc_clr <= wb_res[22] || wb_res[21];
+					end
 					8'h03: tc_r   <= wb_res & 32'h0000_FFFE;
 					8'h04: itt0_r <= wb_res & 32'hFFFF_E364;
 					8'h05: itt1_r <= wb_res & 32'hFFFF_E364;

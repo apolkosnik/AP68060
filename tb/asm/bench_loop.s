@@ -33,7 +33,7 @@ ELEMS	equ	64		; longwords per pass
 
 	org	$400
 start:
-	move.l	#$80008000,d0	; caches on (a no-op in the g_nocache build)
+	move.l	#$80808000,d0	; caches on (a no-op in the g_nocache build)
 	movec	d0,cacr
 
 ;---------------------------------------------------- initialise array

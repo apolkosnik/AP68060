@@ -13,8 +13,9 @@
 //                                                                          //
 // Undefined-flag behaviour is the 68040's, as WinUAE's newcpu_common.cpp   //
 // models it (verified against the cputest 68040 corpus on the previous     //
-// core): BCD leaves N and V unchanged; CHK writes N, and C per             //
-// setchkundefinedflags; CHK2/CMP2 write only Z and C.                      //
+// core): BCD leaves N and V unchanged; CHK writes only N (68060: N is     //
+// clear unless it traps, then N = Dn < 0; WinUAE setchkundefinedflags);   //
+// CHK2/CMP2 write only Z and C (68060: unimplemented, vector 61).          //
 //--------------------------------------------------------------------------//
 
 module ap68060_alu
@@ -146,10 +147,6 @@ wire [32:0] chk_diff   = {1'b0, am} - {1'b0, bm};   // bound - Dn
 wire        chk_gt     = (chk_ub_neg != chk_dn_neg) ? chk_ub_neg
                                                     : msb_of(chk_diff[31:0], sz);
 wire        chk_trap   = chk_dn_neg || chk_gt;
-// setchkundefinedflags (68040): C set on trap per the src/dst relation
-wire        chk_c      = (chk_dn_neg && !chk_ub_neg) ||
-                         (!chk_ub_neg && !chk_dn_neg && chk_gt) ||
-                         (chk_dn_neg && chk_ub_neg && msb_of(chk_diff[31:0], sz));
 
 //--------------------------------------------------------------------------
 // CHK2/CMP2: b is the value, a the bound; signedness from cond[1]
@@ -266,7 +263,8 @@ always_comb begin
 
 		OP_CHK: begin
 			trap = chk_trap;
-			flags_out = {f_x, chk_dn_neg, f_z, f_v, chk_trap ? chk_c : 1'b0};
+			// 68060: N clear, or Dn < 0 on the trap; Z, V, C unchanged
+			flags_out = {f_x, chk_trap && chk_dn_neg, f_z, f_v, f_c};
 		end
 
 		OP_CCRLOG: begin

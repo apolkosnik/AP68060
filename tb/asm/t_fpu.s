@@ -116,7 +116,7 @@ start:
 ; The FPU battery (extended-precision memory operands, FSAVE frames,
 ; the IRQ soak's handler stack traffic) executes with both internal
 ; caches enabled.
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr
 
 	clr.w	(cnt_fpunimp).l
@@ -1429,9 +1429,9 @@ audit_battery:
 	move.l	($3718).l,d0
 	chkl	d0,$FFFFFFFF,146
 
-;---------------- pass-through infinity keeps the operand's raw mantissa
-; inf_clear_intbit is a 68060 flag: on the 040 FABS of a 6888x-style
-; infinity (integer bit set) keeps that bit in the result.
+;---------------- an infinity result has a zero mantissa (68060)
+; WinUAE sets infinity_clear_intbit for the 68060: FABS of a 6888x-style
+; infinity (integer bit set) writes the infinity with the bit cleared.
 	move.l	#$FFFF0000,($3700).l
 	move.l	#$80000000,($3704).l
 	move.l	#$00000000,($3708).l
@@ -1441,7 +1441,7 @@ audit_battery:
 	move.l	($3710).l,d0
 	chkl	d0,$7FFF0000,147	; sign cleared by FABS
 	move.l	($3714).l,d0
-	chkl	d0,$80000000,148	; integer bit preserved
+	chkl	d0,0,148		; mantissa cleared
 
 ;------------------------------------------ FCMP condition code corners
 ; equal NONZERO finite values compare as +0 regardless of sign
@@ -1460,8 +1460,8 @@ audit_battery:
 	fmove.l	fpsr,d0
 	and.l	#$0F000000,d0
 	chkl	d0,$0C000000,150	; N and Z: destination is -0
-; a NaN comparison reports the propagated NaN's sign in N (the 040's
-; cmp_signed_nan flag); the destination NaN is preferred
+; a NaN comparison is unordered with N clear on the 68060, whatever the
+; NaN's sign (WinUAE sets cmp_signed_nan for the 68040 only)
 	move.l	#$FFFF0000,($3700).l	; negative quiet NaN
 	move.l	#$C0000000,($3704).l
 	move.l	#$00000000,($3708).l
@@ -1470,7 +1470,7 @@ audit_battery:
 	fcmp.x	fp5,fp4			; dest fp4 is the negative NaN
 	fmove.l	fpsr,d0
 	and.l	#$0F000000,d0
-	chkl	d0,$09000000,151	; N + NAN
+	chkl	d0,$01000000,151	; NAN only
 ; a denormalized DESTINATION is an unsupported data type for FCMP too
 	move.l	#$00000000,($3700).l	; extended denormal
 	move.l	#$00000000,($3704).l

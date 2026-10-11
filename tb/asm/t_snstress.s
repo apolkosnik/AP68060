@@ -58,7 +58,7 @@ start:
 	move.w	#63,d1
 .c2:	clr.l	(a0)+
 	dbra	d1,.c2
-	move.l	#$80008000,d0
+	move.l	#$80808000,d0
 	movec	d0,cacr
 	move.w	#$8008,(TRAFFIC).l	; traffic on, a transfer every 8 bus clocks
 
