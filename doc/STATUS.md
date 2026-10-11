@@ -57,8 +57,8 @@ ALMs, validated with Verilator.
   the trace exceptions in between, so effects of those exceptions are not
   in its expectations (BUSCR L/LE copied to SL/SLE, 7.4), nor is TCR's
   default write protection (DWO) when a round writes TCR.
-- ODDEXC rounds make every vector odd but record a normal trace: the bench
-  keeps the trace vector valid to match the generator's model.
+  This also covers the ODDEXC/ODDIRQ rounds (every vector odd) that trace
+  an instruction followed by another before the terminating ILLEGAL.
 
 ### Known simplifications
 
@@ -72,7 +72,7 @@ Figures are recorded per commit below.
 
 | commit  | ALMs | registers | M10K bits | DSP | 60 MHz slack |
 |---------|------|-----------|-----------|-----|--------------|
-| c91d41c | (synthesis estimate 22,575) | 14,331 | 337,920 | 15 | pending |
+| c91d41c | 24,574 | 15,150 | 337,920 | 15 | -0.210 ns (Fmax 59.25 MHz; DMU steal -> D-ATC -> tag compare -> dq1) |
 
 ## Next
 

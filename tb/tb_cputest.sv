@@ -131,10 +131,8 @@ function automatic logic [7:0] rd8(input logic [31:0] a);
 	if (a >= TBASE && a < TBASE + TSIZE) return tmem[a - TBASE];
 	if (a >= CAPV && a < CAPV + 32'h400) begin
 		vec = 8'((a - CAPV) >> 2);
-		// (odd vectors: the generator records a trace as taken normally,
-		// so the trace vector keeps its monitor entry)
-		v = (odd_vector != 32'd0 && vec >= 8'd4 && vec != 8'd9) ? odd_vector
-		                                                       : MONB + {20'd0, vec, 4'd0};
+		v = (odd_vector != 32'd0 && vec >= 8'd4) ? odd_vector
+		                                        : MONB + {20'd0, vec, 4'd0};
 		return v[31 - 8 * a[1:0] -: 8];
 	end
 	if (a >= MONB && a < MONB + MONN) return mon[a - MONB];
