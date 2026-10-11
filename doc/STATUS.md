@@ -74,6 +74,20 @@ Figures are recorded per commit below.
 |---------|------|-----------|-----------|-----|--------------|
 | c91d41c | 24,574 | 15,150 | 337,920 | 15 | -0.210 ns (Fmax 59.25 MHz; DMU steal -> D-ATC -> tag compare -> dq1) |
 
+### Area options (rtl/ap68060.sv parameters, default 0)
+
+Synthesis estimates at 8ca556f (all on: 22,651 ALMs) and cycles of the
+tb/asm bench programs:
+
+| option      | ALMs saved when 0 | cost when 0                               |
+|-------------|-------------------|-------------------------------------------|
+| FPU_PIPE    | ~990              | bench_fpu +7.1 %, bench_insn +4.8 %       |
+| LOOP_PRED   | } ~1,000 together | bench_loop +2.5 %                         |
+| EARLY_RES   | }                 | bench_insn +1.9 %                         |
+
+A BALANCED-mode fit (instead of HIGH PERFORMANCE EFFORT) is no smaller
+(24,658 ALMs).
+
 ## Next
 
 1. Area: bring the core under 20,000 ALMs (the FPU is 7,800 of 33,300

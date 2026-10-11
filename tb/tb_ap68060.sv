@@ -143,15 +143,15 @@ wire   [2:0] ipl_pins = !rsti_n ? ~{md_hold, md_native, md_ign} : ~ipl_lvl;
 wire  [31:0] d_pins   = !rsti_n ? {16'd0, md_cnt} : am_d_oe ? am_d : d_mem;
 
 // the core's area options (build_sim.sh DEFS="+define+AP_FPU_PIPE=0 ..."):
-// the default is every feature on
+// the default follows the core: all three off (doc/STATUS.md: their cost)
 `ifndef AP_FPU_PIPE
-`define AP_FPU_PIPE 1
+`define AP_FPU_PIPE 0
 `endif
 `ifndef AP_LOOP_PRED
-`define AP_LOOP_PRED 1
+`define AP_LOOP_PRED 0
 `endif
 `ifndef AP_EARLY_RES
-`define AP_EARLY_RES 1
+`define AP_EARLY_RES 0
 `endif
 ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EARLY_RES)) dut (
 	.clk(clk), .bclk_en(bclk_en), .rsti_n(rsti_n),

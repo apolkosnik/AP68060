@@ -18,9 +18,9 @@ module ap68060
 	import ap68060_pkg::*;
 #(
 	// area options (doc/STATUS.md has what each costs in ALMs and cycles)
-	parameter bit         FPU_PIPE     = 1,      // the FPU's arithmetic pipeline (0: the state machine alone)
-	parameter bit         LOOP_PRED    = 1,      // D1's loop exit predictor
-	parameter bit         EARLY_RES    = 1,      // AG's early results for younger uops' base and index
+	parameter bit         FPU_PIPE     = 0,      // the FPU's arithmetic pipeline (0: the state machine alone)
+	parameter bit         LOOP_PRED    = 0,      // D1's loop exit predictor
+	parameter bit         EARLY_RES    = 0,      // AG's early results for younger uops' base and index
 	parameter logic [7:0] PCR_REV      = 8'h06   // PCR revision number
 )(
 
