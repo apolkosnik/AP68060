@@ -565,7 +565,6 @@ ap68060_alu alu (
 // multiply / divide
 logic        md_done, md_ovf;
 logic [31:0] md_hi, md_lo;
-logic [31:0] md_hiin;         // OP_MDHI latch (64-bit dividend high)
 logic [31:0] md_rem;          // remainder / product high, for OP_MDRES
 logic [31:0] md_lol;          // quotient / product low, for OP_MDRES
 logic        md_ovfl;         // the last divide overflowed
@@ -585,13 +584,11 @@ wire [31:0] md_a    = (ex_u.sz == SZ_W) ?
                       (md_sign ? {{16{ex_av[15]}}, ex_av[15:0]} : {16'd0, ex_av[15:0]}) : ex_av;
 wire [31:0] md_blo  = (ex_u.op == OP_MUL && ex_u.sz == SZ_W) ?
                       (md_sign ? {{16{ex_bv[15]}}, ex_bv[15:0]} : {16'd0, ex_bv[15:0]}) : ex_bv;
-wire [31:0] md_bhi  = (ex_u.op == OP_DIV) ?
-                      ((ex_u.cond[1]) ? md_hiin : (md_sign ? {32{ex_bv[31]}} : 32'd0)) : 32'd0;
 
 ap68060_muldiv md (
 	.clk(clk), .nreset(nreset), .kill(kill_now),
 	.start(ex_md_start), .is_div(ex_u.op == OP_DIV), .sign_op(md_sign),
-	.op_a(md_a), .op_hi(md_bhi), .op_lo(md_blo),
+	.op_a(md_a), .op_lo(md_blo),
 	.busy(md_busy), .done(md_done), .res_hi(md_hi), .res_lo(md_lo), .ovf(md_ovf)
 );
 
@@ -904,7 +901,6 @@ always_comb begin
 			xf.res   = ex_u.cond[0] ? md_lol : md_rem;
 			xf.dkill = md_ovfl;
 		end
-		OP_MDHI:   xf.res = ex_av;
 		OP_BCC:    xf.taken = alu_cc;
 		OP_DBCC: begin
 			xf.taken = !alu_cc && (alu_res[15:0] != 16'hFFFF);
@@ -1398,7 +1394,6 @@ always_ff @(posedge clk) begin
 		ex_ph   <= 1'b0;
 		ex_pb   <= 1'b0;
 		xs_q    <= '0;
-		md_hiin <= 32'd0;
 		md_rem  <= 32'd0;
 		md_lol  <= 32'd0;
 		md_ovfl <= 1'b0;
@@ -1668,7 +1663,6 @@ always_ff @(posedge clk) begin
 				wb_ccr <= (nf & ex_u.ccr_we) | (ccr_f & ~ex_u.ccr_we);
 			end
 			else wb_ccr <= ccr_f;
-			if (ex_u.op == OP_MDHI)  md_hiin  <= ex_av;
 			if (ex_u.op == OP_LATCH || (ex_u.op == OP_IACKV && !ex_u.cond[0])) ex_latch <= ex_av;
 			if (ex_u.op == OP_BFSET && !ex_u.cond[0]) begin
 				logic [5:0] w;

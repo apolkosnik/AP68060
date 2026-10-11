@@ -4,9 +4,10 @@
 // ap68060_muldiv.sv - iterative multiply and divide (from AP040's          //
 // ap040_muldiv.v, which the cputest corpus validated)                       //
 //                                                                          //
-// MUL: 32x32 -> 64, signed or unsigned, one registered DSP product         //
-// DIV: 64/32 -> q32,r32 restoring, 4 bits per cycle; ovf when the true     //
-//      quotient does not fit 32 bits.  Signed quotients truncate toward    //
+// MUL: 32x32 -> 64, signed or unsigned, one registered DSP product        //
+// DIV: 32/32 -> q32,r32 restoring, 4 bits per cycle (the 68060 has no     //
+//      64-bit dividend: those forms trap); ovf for the one signed quotient //
+//      that does not fit, -2^31 / -1.  Signed quotients truncate toward    //
 //      zero, the remainder takes the dividend's sign.                       //
 // kill abandons a running operation (pipeline flush).                       //
 //--------------------------------------------------------------------------//
@@ -21,8 +22,7 @@ module ap68060_muldiv
 	input             is_div,
 	input             sign_op,
 	input      [31:0] op_a,        // multiplier / divisor
-	input      [31:0] op_hi,       // dividend high (div only)
-	input      [31:0] op_lo,       // multiplicand / dividend low
+	input      [31:0] op_lo,       // multiplicand / dividend
 
 	output            busy,
 	output reg        done,        // one cycle pulse
@@ -39,35 +39,33 @@ reg  [6:0] count;
 reg [31:0] den;                   // divisor / multiplier (absolute)
 reg [31:0] mcand;                 // multiplicand (absolute)
 reg [63:0] prod;                  // registered DSP product
-reg [96:0] acc;
+reg [64:0] acc;                   // divide: remainder [64:32], dividend/quotient [31:0]
 
 // absolute values for signed operations
 wire [31:0] abs_a  = (sign_op && op_a[31]) ? (32'd0 - op_a) : op_a;
-wire [63:0] dvd    = {op_hi, op_lo};
-wire [63:0] abs_d  = (sign_op && op_hi[31]) ? (64'd0 - dvd) : dvd;
-wire [31:0] abs_m  = (sign_op && op_lo[31]) ? (32'd0 - op_lo) : op_lo;
+wire [31:0] abs_m  = (sign_op && op_lo[31]) ? (32'd0 - op_lo) : op_lo;   // also |dividend|
 
-// divide: four cascaded restoring steps per cycle (64 bits = 16 rounds),
+// divide: four cascaded restoring steps per cycle (32 bits = 8 rounds),
 // each exactly one former one-bit iteration; the divisor is an explicit
 // argument so the function stays pure (module-level variables read from
 // inside a function are unreliable in continuous assignments under iverilog)
-function [96:0] div_step;
-	input [96:0] a;
+function [64:0] div_step;
+	input [64:0] a;
 	input [31:0] d;
-	reg   [96:0] sh;
+	reg   [64:0] sh;
 	reg   [33:0] t;
 	begin
-		sh = {a[95:0], 1'b0};
-		t  = {1'b0, sh[96:64]} - {2'b00, d};
-		if (!t[33]) div_step = {t[32:0], sh[63:1], 1'b1};
+		sh = {a[63:0], 1'b0};
+		t  = {1'b0, sh[64:32]} - {2'b00, d};
+		if (!t[33]) div_step = {t[32:0], sh[31:1], 1'b1};
 		else        div_step = sh;
 	end
 endfunction
 
-wire [96:0] div4 = div_step(div_step(div_step(div_step(acc, den), den), den), den);
+wire [64:0] div4 = div_step(div_step(div_step(div_step(acc, den), den), den), den);
 
-wire [63:0] q_raw = div_r ? acc[63:0] : prod;
-wire [31:0] r_raw = acc[95:64];
+wire [63:0] q_raw = div_r ? {32'd0, acc[31:0]} : prod;
+wire [31:0] r_raw = acc[63:32];
 
 always @(posedge clk) begin
 	if (!nreset) begin
@@ -98,10 +96,10 @@ always @(posedge clk) begin
 			ovf     <= 0;
 			if (is_div) begin
 				den   <= abs_a;
-				acc   <= {33'd0, abs_d};
-				count <= 7'd16;
-				neg_q <= sign_op && (op_hi[31] ^ op_a[31]);
-				neg_r <= sign_op && op_hi[31];
+				acc   <= {33'd0, abs_m};
+				count <= 7'd8;
+				neg_q <= sign_op && (op_lo[31] ^ op_a[31]);
+				neg_r <= sign_op && op_lo[31];
 			end
 			else begin
 				den   <= abs_a;
@@ -129,9 +127,7 @@ always @(posedge clk) begin
 				if (div_r) begin
 					res_lo <= neg_q ? (32'd0 - q_raw[31:0]) : q_raw[31:0];
 					res_hi <= neg_r ? (32'd0 - r_raw) : r_raw;
-					ovf    <= (|q_raw[63:32]) |
-					          (sign_op & (neg_q ? (q_raw[31:0] > 32'h8000_0000)
-					                            : q_raw[31]));
+					ovf    <= sign_op & !neg_q & q_raw[31];
 				end
 				else begin
 					res_lo <= neg_q ? (32'd0 - q_raw[31:0]) : q_raw[31:0];
