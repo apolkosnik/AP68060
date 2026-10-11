@@ -30,10 +30,17 @@
 ;   28-29 a snoop between the two halves of a store across a line: the
 ;        second line pushed (CPUSHL), a long stored across $D00E (its
 ;        second line allocated, then written at WB the cycle after the
-;        first), while the alternate master writes $D014 (SC 01: a clean
-;        line is invalidated) 0..7 bus clocks apart, 250 stores each;
-;        every value reads back, and with BCLK at half PCLK the bench saw
-;        the DMU's fallback (the second part by the engine)
+;        first), while the alternate master writes $D014 with SNOOP 0..7
+;        bus clocks apart, 250 stores each.  The 68060 invalidates the
+;        line, dirty or not (MC68060UM 5.6: copyback data shared with
+;        another master is not kept coherent), so a snoop after the store
+;        may drop its second half.  The check is exact all the same: a
+;        noncachable read of $D00E (which pushes a dirty line it hits
+;        first, 5.7) must show the store's high word and, as the low word,
+;        the store's or the one memory held before it -- nothing else --
+;        and a cached read must then agree with it.  With BCLK at half
+;        PCLK the bench saw the DMU's fallback (a snoop between the halves:
+;        the second part by the engine, which allocates the line again)
 ;   30   CLR (long, word, byte), ST and MOVE from SR to noncachable memory
 ;        write without reading it (68020 and later): five writes, no read
 ;   14-17 the MMU on: two logical pages mapped copyback by their page
@@ -371,18 +378,30 @@ ucont:
 	moves.l	(a3),d1			; both lines present
 	clr.l	(FBCNT).l
 	move.l	#$10000,d5
-	move.w	#$C000,d6		; SC 01 writes to $D014, 0..7 clocks apart
+	cpusha	dc
+	move.w	($D010).l,d2		; memory's word there before the stores
+	move.w	#$C000,d6		; snooped writes to $D014, 0..7 clocks apart
 .s0:	move.w	d6,(TRAFFIC).l
 	move.w	#249,d4
 .s1:	cpushl	dc,(a4)			; the second line: pushed, invalidated
 	addq.l	#1,d5
 	moves.l	d5,(a3)			; across the line
-	moves.l	(a3),d1
-	cmp.l	d5,d1
+	move.l	($D00E).l,d3		; memory, after pushing what is dirty
+	moves.l	(a3),d1			; the cache agrees with it
+	cmp.l	d3,d1
+	bne.s	.s9
+	move.l	d3,d0
+	eor.l	d5,d0
+	and.l	#$FFFF0000,d0		; the first line's half is never snooped
+	bne.s	.s9
+	cmp.w	d5,d3			; the second half: the store's...
 	beq.s	.s2
-	clr.w	(TRAFFIC).l
+	cmp.w	d2,d3			; ... or the snoop dropped it
+	beq.s	.s2
+.s9:	clr.w	(TRAFFIC).l
 	failt	28
-.s2:	dbra	d4,.s1
+.s2:	move.w	d3,d2			; memory's word now (nobody else writes it)
+	dbra	d4,.s1
 	addq.w	#1,d6
 	cmp.w	#$C008,d6
 	bne.s	.s0
@@ -390,10 +409,19 @@ ucont:
 	move.w	#200,d1
 .s3:	nop
 	dbra	d1,.s3
+	move.l	($D00E).l,d3		; the last store, the same check
 	moves.l	(a3),d1
-	cmp.l	d5,d1
+	cmp.l	d3,d1
+	bne.s	.s8
+	move.l	d3,d0
+	eor.l	d5,d0
+	and.l	#$FFFF0000,d0
+	bne.s	.s8
+	cmp.w	d5,d3
 	beq.s	.s4
-	failt	28
+	cmp.w	d2,d3
+	beq.s	.s4
+.s8:	failt	28
 .s4:	btst	#5,(CAPW+1).l		; BCLK at half PCLK: the other master's
 	beq.s	.s5			; snoop can fall between the halves (at
 	move.l	(FBCNT).l,d1		; full speed it arbitrates for the bus

@@ -1,14 +1,17 @@
 //--------------------------------------------------------------------------//
 // AP68060 - pipelined MC68040                                            //
 //                                                                          //
-// ap68060.sv - top level: the 68040 bus (MC68040UM section 7)               //
+// ap68060.sv - top level: the 68060 bus (MC68060UM sections 2, 7)          //
 //                                                                          //
-// clk is the processor clock (PCLK); bclk_en marks the processor clocks    //
-// that end a bus clock (BCLK rising edge).  Bidirectional pins are split   //
-// into _i/_o/_oe: a_i, ts_n_i, rw_n_i, siz_i and tt_i are the bus as an    //
-// alternate master drives it (snooped, with SC1/SC0), d_i the data bus    //
-// in either direction, ta_n the bus TA; the 68040 drives TA (ta_n_o,      //
-// ta_oe) and D31-D0 only as a snooping slave.                             //
+// clk is the processor clock (CLK); bclk_en is CLKEN, marking the CLK      //
+// edges that are bus clock (BCLK) edges.  Bidirectional pins are split     //
+// into _i/_o/_oe: a_i, ts_n_i and tt_i are the bus as another master      //
+// drives it (snooped with SNOOP), d_i the data bus in either direction;   //
+// a_oe covers the address, the transfer attributes, TS, SAS and BS3-BS0.  //
+// At reset (the last bus clock with RSTI asserted) IPL2-IPL0 and D15-D0   //
+// select the special modes (7.14): IPL0 the ignore states (D15-D0 their   //
+// counts), IPL1 the native acknowledge termination (TRA), IPL2 the extra  //
+// data write hold.                                                        //
 //--------------------------------------------------------------------------//
 
 module ap68060
@@ -29,18 +32,14 @@ module ap68060
 	output logic        a_oe,
 	input  logic [31:0] a_i,
 	input  logic        ts_n_i,
-	input  logic        rw_n_i,
-	input  logic  [1:0] siz_i,
 	input  logic  [1:0] tt_i,
-	input  logic  [1:0] sc,
-	output logic        mi_n,
-	output logic        ta_n_o,
-	output logic        ta_oe,
+	input  logic        snoop_n,
 	input  logic [31:0] d_i,
 	output logic [31:0] d_o,
 	output logic        d_oe,
 	output logic        rw_n,
 	output logic  [1:0] siz,
+	output logic  [3:0] bs_n,         // BS0-BS3 (bs_n[0] = BS0, D31-D24)
 	output logic  [1:0] tt,
 	output logic  [2:0] tm,
 	output logic  [1:0] tln,
@@ -50,17 +49,25 @@ module ap68060
 	output logic        locke_n,
 	output logic        ts_n,
 	output logic        tip_n,
+	output logic        tip_oe,
+	output logic        sas_n,
 	input  logic        ta_n,
 	input  logic        tea_n,
+	input  logic        tra_n,
 	input  logic        tci_n,
 	input  logic        tbi_n,
+	input  logic        cla_n,
 	input  logic  [2:0] ipl_n,
 	input  logic        avec_n,
 	output logic        br_n,
 	input  logic        bg_n,
+	input  logic        bgr_n,
 	input  logic        bb_n_i,
 	output logic        bb_n_o,
 	output logic        bb_oe,
+	input  logic        btt_n_i,
+	output logic        btt_n_o,
+	output logic        btt_oe,
 	output logic        rsto_n,
 	input  logic        cdis_n,       // CDIS: disable the caches (contents kept)
 	input  logic        mdis_n,       // MDIS: disable page translation
@@ -77,6 +84,18 @@ module ap68060
 logic [1:0] rst_q;
 always_ff @(posedge clk) rst_q <= {rst_q[0], rsti_n};
 wire nreset = rst_q[1];
+
+// the special modes (7.14): IPL2-IPL0 and D15-D0 registered on the bus
+// clock edges while RSTI is asserted; the last one stands
+logic        m_ign, m_native, m_hold;
+logic [15:0] m_cnt;
+always_ff @(posedge clk)
+	if (bclk_en && !rsti_n) begin
+		m_ign    <= !ipl_n[0];
+		m_native <= !ipl_n[1];
+		m_hold   <= !ipl_n[2];
+		m_cnt    <= d_i[15:0];
+	end
 
 // CDIS and MDIS act at the next internal boundary: two bus-clock samples
 // (the multiplexed bus mode CDIS selects at reset is not provided)
@@ -118,8 +137,7 @@ always_ff @(posedge clk)
 localparam int NC = 2;
 logic [NC-1:0] b_req, b_gnt, b_done, b_err;
 logic          b_own;
-logic [31:0]   b_d_o, sn_d_o;
-logic          b_d_oe, sn_d_oe;
+logic          sn_ovf, sn_busy, sn_act;
 busreq_t       b_breq [NC];
 logic [127:0]  b_wdata [NC];
 logic          b_rvalid;
@@ -133,18 +151,22 @@ logic          rsto_req, rsto_busy;
 
 ap68060_biu #(.NC(NC)) biu (
 	.clk(clk), .nreset(nreset), .bclk_en(bclk_en),
+	.m_ign(m_ign), .m_native(m_native), .m_hold(m_hold), .m_cnt(m_cnt),
 	.req(b_req), .breq(b_breq), .wdata(b_wdata),
 	.gnt(b_gnt), .done(b_done), .err(b_err),
 	.rvalid(b_rvalid), .rclient(b_rclient), .rdata(b_rdata), .rbeat(b_rbeat),
 	.ravec(b_ravec), .rtci(b_rtci), .errbeat(b_errbeat), .idle(b_idle), .own(b_own),
-	.unlock(kill_now),
+	.unlock(kill_now), .sn_busy(sn_busy || sn_act),   // (the DMU engine sees no grant while frozen)
 	.rsto_req(rsto_req), .rsto_busy(rsto_busy),
-	.a_o(a_o), .a_oe(a_oe), .d_i(d_i), .d_o(b_d_o), .d_oe(b_d_oe),
-	.rw_n(rw_n), .siz(siz), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
+	.a_o(a_o), .a_oe(a_oe), .d_i(d_i), .d_o(d_o), .d_oe(d_oe),
+	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
 	.ciout_n(ciout_n), .lock_n(lock_n), .locke_n(locke_n),
-	.ts_n(ts_n), .tip_n(tip_n), .ta_n(ta_n), .tea_n(tea_n),
-	.tci_n(tci_n), .tbi_n(tbi_n), .avec_n(avec_n),
-	.br_n(br_n), .bg_n(bg_n), .bb_n_i(bb_n_i), .bb_n_o(bb_n_o), .bb_oe(bb_oe),
+	.ts_n(ts_n), .tip_n(tip_n), .tip_oe(tip_oe), .sas_n(sas_n),
+	.ta_n(ta_n), .tea_n(tea_n), .tra_n(tra_n),
+	.tci_n(tci_n), .tbi_n(tbi_n), .avec_n(avec_n), .cla_n(cla_n),
+	.br_n(br_n), .bg_n(bg_n), .bgr_n(bgr_n), .ts_n_i(ts_n_i),
+	.bb_n_i(bb_n_i), .bb_n_o(bb_n_o), .bb_oe(bb_oe),
+	.btt_n_i(btt_n_i), .btt_n_o(btt_n_o), .btt_oe(btt_oe),
 	.rsto_n(rsto_n)
 );
 
@@ -160,18 +182,15 @@ logic        sn_ic, sn_ic_all, sn_ic_done, sn_ihit;
 logic [31:0] sn_ic_pa;
 
 ap68060_snoop snoop (
-	.clk(clk), .nreset(nreset), .bclk_en(bclk_en), .own(b_own),
-	.a_i(a_i), .ts_n_i(ts_n_i), .rw_n_i(rw_n_i), .siz_i(siz_i), .tt_i(tt_i), .sc(sc),
-	.d_i(d_i), .ta_n_i(ta_n), .tea_n_i(tea_n), .tbi_n_i(tbi_n),
-	.mi_n(mi_n), .ta_n_o(ta_n_o), .ta_oe(ta_oe), .d_o(sn_d_o), .d_oe(sn_d_oe),
+	.clk(clk), .nreset(nreset), .bclk_en(bclk_en), .own(a_oe),
+	.a_i(a_i), .ts_n_i(ts_n_i), .tt_i(tt_i), .snoop_n(snoop_n),
 	.dc_req(sn_req), .dc_pa(sn_pa), .dc_look(sn_look), .dc_hit(sn_hit),
-	.dc_dirty(sn_dirty), .dc_line(sn_line), .dc_inv(sn_inv), .dc_wr(sn_wr),
-	.dc_wbe(sn_wbe), .dc_wword(sn_wword),
+	.dc_inv(sn_inv), .dc_ovf(sn_ovf), .busy(sn_busy),
 	.ic_req(sn_ic), .ic_pa(sn_ic_pa), .ic_all(sn_ic_all), .ic_done(sn_ic_done)
 );
-
-assign d_o  = sn_d_oe ? sn_d_o : b_d_o;
-assign d_oe = sn_d_oe || b_d_oe;
+assign sn_wr    = 1'b0;          // (the 68060 never takes snooped data)
+assign sn_wbe   = '0;
+assign sn_wword = '0;
 
 //--------------------------------------------------------------------------
 // back end and front end
@@ -279,7 +298,7 @@ ap68060_dmu dmu (
 	.b_rvalid(b_rvalid && b_rclient == 1'b0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
 	.b_ravec(b_ravec), .b_rtci(b_rtci),
 	.sn_req(sn_req), .sn_pa(sn_pa), .sn_look(sn_look), .sn_hit(sn_hit),
-	.sn_dirty(sn_dirty), .sn_line(sn_line), .sn_inv(sn_inv), .sn_wr(sn_wr),
+	.sn_dirty(sn_dirty), .sn_line(sn_line), .sn_inv(sn_inv), .sn_act(sn_act), .sn_wr(sn_wr),
 	.sn_wbe(sn_wbe), .sn_wword(sn_wword)
 );
 

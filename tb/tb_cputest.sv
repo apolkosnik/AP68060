@@ -55,27 +55,29 @@ logic [31:0] a_o, d_i, d_o;
 logic        a_oe, d_oe, rw_n, ciout_n, lock_n, locke_n, ts_n, tip_n;
 logic  [1:0] siz, tt, tln, upa;
 logic  [2:0] tm;
-logic        ta_n, tea_n, tci_n, tbi_n, avec_n;
-logic        br_n, bb_n_o, bb_oe, rsto_n;
+logic        ta_n, tea_n, tra_n, tci_n, tbi_n, cla_n, avec_n;
+logic        br_n, bb_n_o, bb_oe, btt_n_o, btt_oe, rsto_n;
+logic  [3:0] bs_n;
+logic        sas_n, tip_oe, perr;
 logic  [2:0] ipl;
 logic [31:0] dbg_pc;
 logic        dbg_retire, dbg_halted;
-logic        mi_n, cpu_ta_n, cpu_ta_oe;
 
-// no other master on this bus: the snoop inputs stay idle, and memory
-// still waits for MI as the 68040 bus requires
+// no other master on this bus: the snoop inputs stay idle; the reset modes
+// are all off (the 68040 termination protocol, no ignore states)
 ap68060 dut (
 	.clk(clk), .bclk_en(bclk_en), .rsti_n(rsti_n),
 	.a_o(a_o), .a_oe(a_oe),
-	.a_i(a_o), .ts_n_i(1'b1), .rw_n_i(1'b1), .siz_i(2'd0), .tt_i(2'd0), .sc(2'd0),
-	.mi_n(mi_n), .ta_n_o(cpu_ta_n), .ta_oe(cpu_ta_oe),
+	.a_i(a_o), .ts_n_i(1'b1), .tt_i(2'd0), .snoop_n(1'b1),
 	.cdis_n(1'b1), .mdis_n(1'b1), .ipend_n(), .pst(),
-	.d_i(d_i), .d_o(d_o), .d_oe(d_oe),
-	.rw_n(rw_n), .siz(siz), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
+	.d_i(rsti_n ? d_i : 32'd0), .d_o(d_o), .d_oe(d_oe),
+	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
 	.ciout_n(ciout_n), .lock_n(lock_n), .locke_n(locke_n),
-	.ts_n(ts_n), .tip_n(tip_n), .ta_n(ta_n), .tea_n(tea_n),
-	.tci_n(tci_n), .tbi_n(tbi_n), .ipl_n(~ipl), .avec_n(avec_n),
-	.br_n(br_n), .bg_n(1'b0), .bb_n_i(1'b1), .bb_n_o(bb_n_o), .bb_oe(bb_oe),
+	.ts_n(ts_n), .tip_n(tip_n), .tip_oe(tip_oe), .sas_n(sas_n),
+	.ta_n(ta_n), .tea_n(tea_n), .tra_n(tra_n),
+	.tci_n(tci_n), .tbi_n(tbi_n), .cla_n(cla_n), .ipl_n(rsti_n ? ~ipl : 3'b111), .avec_n(avec_n),
+	.br_n(br_n), .bg_n(1'b0), .bgr_n(1'b1), .bb_n_i(1'b1), .bb_n_o(bb_n_o), .bb_oe(bb_oe),
+	.btt_n_i(1'b1), .btt_n_o(btt_n_o), .btt_oe(btt_oe),
 	.rsto_n(rsto_n),
 	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .dbg_halted(dbg_halted)
 );
@@ -94,14 +96,19 @@ logic [31:0] ext_rdata;
 
 m68060_bus_slave #(.AW(24), .SEED(7), .EXT(1)) mem (
 	.clk(clk), .nreset(rsti_n), .bclk_en(bclk_en),
-	.a(a_o), .d_cpu(d_o), .rw_n(rw_n), .siz(siz), .tt(tt), .tm(tm), .ts_n(ts_n),
-	.d_mem(d_i), .ta_n(ta_n), .tea_n(tea_n), .tbi_n(tbi_n), .tci_n(tci_n), .avec_n(avec_n),
-	.wait_mode(wait_mode), .tbi_mode(2'd0), .retry_pct(0), .tea_req(1'b0), .tci_req(1'b0),
-	.hold(!mi_n), .oth_ta_n(1'b1), .iack_vector(8'd0), .ext_rdata(ext_rdata), .ext_inmem(1'b1),
+	.a(a_o), .d_cpu(d_o), .d_oe_cpu(d_oe), .rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm),
+	.ts_n(ts_n), .sas_n(sas_n), .cpu_xfer(1'b1),
+	.d_mem(d_i), .ta_n(ta_n), .tea_n(tea_n), .tra_n(tra_n), .tbi_n(tbi_n), .tci_n(tci_n),
+	.cla_n(cla_n), .avec_n(avec_n),
+	.m_ign(1'b0), .m_native(1'b0), .m_hold(1'b0), .m_cnt(16'd0),
+	.wait_mode(wait_mode), .tbi_mode(2'd0), .retry_pct(0), .cla_mode(1'b0), .ign_junk(1'b0),
+	.tea_req(1'b0), .tci_req(1'b0),
+	.hold(1'b0), .iack_vector(8'd0), .ext_rdata(ext_rdata), .ext_inmem(1'b1),
 	.xfer_v(xfer_v), .xfer_addr(xfer_addr), .xfer_rd(xfer_rd), .xfer_siz(xfer_siz),
 	.xfer_tt(xfer_tt), .xfer_tm(xfer_tm), .xfer_beat(xfer_beat),
 	.ev(ev), .ev_rd(ev_rd), .ev_addr(ev_addr), .ev_data(ev_data), .ev_be(ev_be),
-	.ev_siz(ev_siz), .ev_tt(ev_tt), .ev_tm(ev_tm), .ev_err(ev_err)
+	.ev_siz(ev_siz), .ev_tt(ev_tt), .ev_tm(ev_tm), .ev_err(ev_err),
+	.perr(perr)
 );
 
 //--------------------------------------------------------------------------
@@ -124,8 +131,10 @@ function automatic logic [7:0] rd8(input logic [31:0] a);
 	if (a >= TBASE && a < TBASE + TSIZE) return tmem[a - TBASE];
 	if (a >= CAPV && a < CAPV + 32'h400) begin
 		vec = 8'((a - CAPV) >> 2);
-		v = (odd_vector != 32'd0 && vec >= 8'd4) ? odd_vector
-		                                        : MONB + {20'd0, vec, 4'd0};
+		// (odd vectors: the generator records a trace as taken normally,
+		// so the trace vector keeps its monitor entry)
+		v = (odd_vector != 32'd0 && vec >= 8'd4 && vec != 8'd9) ? odd_vector
+		                                                       : MONB + {20'd0, vec, 4'd0};
 		return v[31 - 8 * a[1:0] -: 8];
 	end
 	if (a >= MONB && a < MONB + MONN) return mon[a - MONB];
@@ -199,6 +208,11 @@ end
 //--------------------------------------------------------------------------
 int jf, jn;
 int errors, ran, mism, skipped, report_lim, trace_round;
+always @(posedge clk)
+	if (perr) begin
+		errors++;
+		$display("HARNESS: bus protocol violation (see above)");
+	end
 logic [31:0] flags, test_idx, round_idx;
 
 function automatic logic [7:0] jread8();

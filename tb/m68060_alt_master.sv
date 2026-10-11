@@ -1,27 +1,29 @@
 //--------------------------------------------------------------------------//
 // AP68060 test bench                                                     //
 //                                                                          //
-// m68060_alt_master.sv - an alternate bus master on the 68040 bus           //
-//                         (MC68040UM 7.8 arbitration, 7.9 snooping)         //
+// m68060_alt_master.sv - an alternate bus master on the 68060 bus           //
+//                         (MC68060UM 7.11 arbitration, 7.12 snooping)       //
 //                                                                          //
-// Also the bus arbiter: the 68040 has BG while this master is idle.  A     //
+// Also the bus arbiter: the 68060 has BG while this master is idle.  A     //
 // command runs up to four transfers in one bus tenure:                     //
 //   go         pulse: start (n transfers, 1..4)                            //
 //   trig_en    first wait for trig (a bench event), then request the bus  //
 //   delay      bus clocks to hold the bus before the first TS             //
 //   x_addr[k]  address; x_ctl[k] bit 0 read, 2:1 SIZ (00 long, 01 byte,   //
-//              10 word, 11 line), 4:3 SC1/SC0                              //
+//              10 word, 11 line), 4:3 nonzero: SNOOP asserted              //
 //   x_wd[k]    write data: a line's four long words (A3:A2 = 0 first), or //
 //              in [127:96] the long word as it goes on D31-D0             //
 //   x_rd[k]    read data, the same layout (a single transfer in [127:96]) //
 //   status     0 idle or busy, 1 done, 2 ended in a bus error             //
 //                                                                          //
-// Arbitration: BG to the 68040 is negated, and the bus is taken once the  //
-// 68040 has released BB.  Transfers follow the 68040 protocol: TS for one //
-// bus clock, then TA/TEA; TA with TEA is a retry (the transfer is run     //
-// again from its start); TBI with the first TA of a line turns the rest   //
-// into three long-word transfers.  Every bus output is a flip-flop that  //
-// changes on a bus clock edge.                                            //
+// Arbitration: BG to the 68060 is negated (with BGR asserted when        //
+// bgr_mode is set), and the bus is taken once the 68060 has released BB. //
+// The tenure ends 68060-style: BTT asserted one bus clock with BB going   //
+// negated, then both released.  Transfers follow the 68040 termination   //
+// protocol: TS for one bus clock, then TA/TEA; TA with TEA is a retry     //
+// (the transfer is run again from its start); TBI with the first TA of a  //
+// line turns the rest into three long-word transfers.  Every bus output  //
+// is a flip-flop that changes on a bus clock edge.                        //
 //--------------------------------------------------------------------------//
 
 module m68060_alt_master (
@@ -40,7 +42,9 @@ module m68060_alt_master (
 	output logic [127:0] x_rd  [4],
 	output logic  [1:0] status,
 
+	input  logic        bgr_mode,
 	output logic        cpu_bg_n,
+	output logic        cpu_bgr_n,
 	input  logic        cpu_bb_n,
 
 	output logic        drive,
@@ -49,9 +53,10 @@ module m68060_alt_master (
 	output logic  [1:0] siz,
 	output logic  [1:0] tt,
 	output logic  [2:0] tm,
-	output logic  [1:0] sc,
+	output logic        snoop_n,
 	output logic        ts_n,
 	output logic        bb_n,
+	output logic        btt_n,
 	output logic [31:0] d,
 	output logic        d_oe,
 	input  logic [31:0] d_bus,
@@ -85,9 +90,9 @@ always_ff @(posedge clk) begin
 	if (!nreset) begin
 		st <= A_IDLE; nx <= '0; k <= '0; beat <= '0; inh <= 1'b0; dly <= '0;
 		status <= 2'd0;
-		cpu_bg_n <= 1'b0;
-		drive <= 1'b0; a <= '0; rw_n <= 1'b1; siz <= '0; tt <= '0; tm <= '0; sc <= '0;
-		ts_n <= 1'b1; bb_n <= 1'b1; d <= '0; d_oe <= 1'b0;
+		cpu_bg_n <= 1'b0; cpu_bgr_n <= 1'b1;
+		drive <= 1'b0; a <= '0; rw_n <= 1'b1; siz <= '0; tt <= '0; tm <= '0; snoop_n <= 1'b1;
+		ts_n <= 1'b1; bb_n <= 1'b1; btt_n <= 1'b1; d <= '0; d_oe <= 1'b0;
 		for (int i = 0; i < 4; i++) x_rd[i] <= '0;
 	end
 	else begin
@@ -102,8 +107,9 @@ always_ff @(posedge clk) begin
 		if (bclk_en) begin
 			case (st)
 			A_REQ: begin
-				// take BG away; the bus is ours once the 68040 lets BB go
-				cpu_bg_n <= 1'b1;
+				// take BG away; the bus is ours once the 68060 lets BB go
+				cpu_bg_n  <= 1'b1;
+				cpu_bgr_n <= !bgr_mode;
 				if (cpu_bg_n && cpu_bb_n) begin
 					bb_n  <= 1'b0;
 					drive <= 1'b1;
@@ -126,7 +132,7 @@ always_ff @(posedge clk) begin
 				siz  <= inh ? 2'b00 : c_siz;
 				tt   <= 2'd0;
 				tm   <= 3'd1;
-				sc   <= ctl[4:3];
+				snoop_n <= (ctl[4:3] == 2'b00);
 				d    <= c_line ? lw(x_wd[k], a32) : x_wd[k][127:96];
 				d_oe <= !c_rd;
 				st   <= A_DATA;
@@ -170,14 +176,18 @@ always_ff @(posedge clk) begin
 				end
 			end
 			A_REL: begin
-				d_oe <= 1'b0;
-				bb_n <= 1'b1;            // negate BB, then let the lines go
-				st   <= A_REL2;
+				d_oe  <= 1'b0;
+				bb_n  <= 1'b1;           // negate BB, BTT for one bus clock,
+				btt_n <= 1'b0;           // then let the lines go
+				st    <= A_REL2;
 			end
 			A_REL2: begin
-				drive    <= 1'b0;
-				cpu_bg_n <= 1'b0;
-				st       <= A_IDLE;
+				btt_n     <= 1'b1;
+				drive     <= 1'b0;
+				snoop_n   <= 1'b1;
+				cpu_bg_n  <= 1'b0;
+				cpu_bgr_n <= 1'b1;
+				st        <= A_IDLE;
 			end
 			default: ;
 			endcase

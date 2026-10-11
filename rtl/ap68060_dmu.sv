@@ -163,6 +163,7 @@ module ap68060_dmu
 	output logic        sn_dirty,
 	output logic [127:0] sn_line,        // with sn_look: the line found
 	input  logic        sn_inv,         // pulse: invalidate what was found
+	output logic        sn_act,         // the snoop port holds the cache (the engine waits)
 	input  logic        sn_wr,          // pulse: write into what was found
 	input  logic [15:0] sn_wbe,         // the bytes, of...
 	input  logic [31:0] sn_wword        // ...this long word on every long word
@@ -343,6 +344,7 @@ logic  [6:0] st_set;               // engine data/tag set
 typedef enum logic [2:0] { SN_IDLE, SN_A, SN_B, SN_H, SN_R } snph_t;
 snph_t       sn_ph;
 wire         sn_frz  = (sn_ph != SN_IDLE);
+assign       sn_act  = sn_frz;
 wire         sn_rset = (sn_ph == SN_A) || (sn_ph == SN_B);   // B: the line stays readable in H
 logic  [1:0] sn_src;               // found in: 0 a cache way, 1 push buffer, 2 queued push
 logic  [1:0] sn_way;

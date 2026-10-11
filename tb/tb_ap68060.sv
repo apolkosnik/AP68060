@@ -2,7 +2,7 @@
 // AP68060 test bench                                                     //
 //                                                                          //
 // tb_ap68060.sv - runs an assembled self-checking program on the core      //
-// through the 68040 bus                                                    //
+// through the 68060 bus                                                    //
 //                                                                          //
 // Program image: +prog=<hex> (one 16-bit word per line, from bin2hex.py),  //
 // loaded at address 0.  The programs report through memory-mapped         //
@@ -24,11 +24,11 @@
 //   $F160 word  (read) bench capability word, +cap=<n> (default 7); bit   //
 //               5 is set when BCLK runs at half PCLK (+bclk2)             //
 //   $F200 + 32k (k = 0..3): alternate-master transfer k: +0 address,     //
-//               +4 word: bit 0 read, 2:1 SIZ, 4:3 SC1/SC0; +8..+$17 data //
+//               +4 word: bit 0 read, 2:1 SIZ, 4:3 nonzero: SNOOP; +8.. //
 //               (write data in, read data back: a line's four long words,//
 //               or one long word as it is on D31-D0 at +8)                //
 //   $F280 word  run transfers 0..n-1 as an alternate bus master: bits 2:0 //
-//               n, bit 8 wait first for a 68040 line read of the line at //
+//               n, bit 8 wait first for a 68060 line read of the line at //
 //               $F284 (it takes the bus right after it)                   //
 //   $F288 word  bus clocks the alternate master holds the bus before its  //
 //               first transfer                                             //
@@ -42,7 +42,7 @@
 //               (pushes included) into $F2DC (bus beats; write 0 clears)  //
 //   $F2C4 word  random snoop traffic from the alternate master: bit 15    //
 //               on, bits 7:0 bus clocks between transfers (see t_snstress)//
-//               bit 14: instead, SC 01 long writes to $D014 only          //
+//               bit 14: instead, snooped long writes to $D014 only        //
 //   $F2E0 long  (read) split copyback stores whose second line a snoop    //
 //               took between the two parts (the DMU's fallback)          //
 //   $F2E4 long  (read) Bcc/DBcc mispredicted in EX (write 0 clears)      //
@@ -60,7 +60,15 @@
 // boundary.                                                               //
 //                                                                          //
 // Plusargs: +waits (random wait states), +tbi=<0|1|2>, +retry=<percent>,  //
-// +bclk2 (bus at half the processor clock), +timeout=<cycles>, +trace.    //
+// +bclk2 (bus at half the processor clock), +timeout=<cycles>, +trace,    //
+// +amtrace (bus beats of both masters), +biutrace (BIU transactions).     //
+// The 68060's reset modes (7.14), set up on IPL2-IPL0 and D15-D0 while    //
+// RSTI is asserted: +ign=<hex> the ignore states with those four counts  //
+// (+ignjunk: the slave drives TA/TEA/TRA in every ignored clock), +native //
+// TRA retries, +whold the extra write hold.  +cla: the slave asserts CLA  //
+// for the processor to advance A3:A2 in a burst.  +bgr: the alternate    //
+// master asserts BGR when it takes BG away.                              //
+// Every bus protocol violation the slave detects fails the run.           //
 //--------------------------------------------------------------------------//
 
 `timescale 1ns/1ps
@@ -82,14 +90,20 @@ logic [31:0] a_o, d_o, d_mem;
 logic        a_oe, d_oe, rw_n, ciout_n, lock_n, locke_n, ts_n, tip_n;
 logic  [1:0] siz, tt, tln, upa;
 logic  [2:0] tm;
-logic        ta_n, tea_n, tci_n, tbi_n, avec_n;
-logic        br_n, bb_n_o, bb_oe, rsto_n;
+logic        ta_n, tea_n, tra_n, tci_n, tbi_n, cla_n, avec_n;
+logic        br_n, bb_n_o, bb_oe, btt_n_o, btt_oe, rsto_n;
+logic  [3:0] bs_n;
+logic        sas_n, tip_oe;
 logic  [2:0] ipl_lvl;
+// the reset modes
+logic        md_ign, md_native, md_hold, md_cla, md_junk, md_bgr;
+logic [15:0] md_cnt;
+logic        perr;
 logic [31:0] dbg_pc;
 logic        dbg_retire, dbg_halted;
 
 // random snoop traffic ($F2C4, t_snstress): reads of the CPU's counters
-// at $A000 (SC 01: they must never go backwards) and reads/writes of the
+// at $A000 (snooped: they must never go backwards) and reads/writes of the
 // shared words at $B000 (each value names its writer and address)
 logic        rs_en, rs_split;
 int          fb_cnt;
@@ -111,11 +125,10 @@ logic  [1:0] pins_r;
 logic        ipend_n;
 logic  [4:0] pst;
 
-// the bus: the 68040 or the alternate master drives it
-logic        mi_n, cpu_ta_n, cpu_ta_oe, slv_ta_n;
-logic        am_drive, am_rw_n, am_ts_n, am_bb_n, am_d_oe, am_bg_n;
+// the bus: the 68060 or the alternate master drives it
+logic        am_drive, am_rw_n, am_ts_n, am_bb_n, am_btt_n, am_d_oe, am_bg_n, am_bgr_n, am_snoop_n;
 logic [31:0] am_a, am_d;
-logic  [1:0] am_siz, am_tt, am_sc;
+logic  [1:0] am_siz, am_tt;
 logic  [2:0] am_tm;
 wire  [31:0] bus_a    = am_drive ? am_a : a_o;
 wire         bus_ts_n = am_drive ? am_ts_n : ts_n;
@@ -124,8 +137,10 @@ wire   [1:0] bus_siz  = am_drive ? am_siz : siz;
 wire   [1:0] bus_tt   = am_drive ? am_tt : tt;
 wire   [2:0] bus_tm   = am_drive ? am_tm : tm;
 wire  [31:0] bus_dw   = am_d_oe ? am_d : d_o;            // write data
-wire  [31:0] bus_dr   = d_oe ? d_o : d_mem;              // read data (snoop-supplied)
-assign       ta_n     = slv_ta_n & (cpu_ta_oe ? cpu_ta_n : 1'b1);
+wire  [31:0] bus_dr   = d_mem;                           // read data
+// while RSTI is asserted, IPL2-IPL0 and D15-D0 carry the modes
+wire   [2:0] ipl_pins = !rsti_n ? ~{md_hold, md_native, md_ign} : ~ipl_lvl;
+wire  [31:0] d_pins   = !rsti_n ? {16'd0, md_cnt} : am_d_oe ? am_d : d_mem;
 
 // the core's area options (build_sim.sh DEFS="+define+AP_FPU_PIPE=0 ..."):
 // the default is every feature on
@@ -141,17 +156,20 @@ assign       ta_n     = slv_ta_n & (cpu_ta_oe ? cpu_ta_n : 1'b1);
 ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EARLY_RES)) dut (
 	.clk(clk), .bclk_en(bclk_en), .rsti_n(rsti_n),
 	.a_o(a_o), .a_oe(a_oe),
-	.a_i(bus_a), .ts_n_i(am_drive ? am_ts_n : 1'b1), .rw_n_i(bus_rw_n), .siz_i(bus_siz),
-	.tt_i(bus_tt), .sc(am_drive ? am_sc : 2'd0),
-	.mi_n(mi_n), .ta_n_o(cpu_ta_n), .ta_oe(cpu_ta_oe),
+	.a_i(bus_a), .ts_n_i(am_drive ? am_ts_n : 1'b1), .tt_i(bus_tt),
+	.snoop_n(am_drive ? am_snoop_n : 1'b1),
 	.cdis_n(!pins_r[0]), .mdis_n(!pins_r[1]), .ipend_n(ipend_n), .pst(pst),
-	.d_i(am_d_oe ? am_d : d_mem), .d_o(d_o), .d_oe(d_oe),
-	.rw_n(rw_n), .siz(siz), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
+	.d_i(d_pins), .d_o(d_o), .d_oe(d_oe),
+	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
 	.ciout_n(ciout_n), .lock_n(lock_n), .locke_n(locke_n),
-	.ts_n(ts_n), .tip_n(tip_n), .ta_n(ta_n), .tea_n(tea_n),
-	.tci_n(tci_n), .tbi_n(tbi_n), .ipl_n(~ipl_lvl), .avec_n(avec_n),
-	.br_n(br_n), .bg_n(am_bg_n), .bb_n_i((bb_oe ? bb_n_o : 1'b1) & am_bb_n),
-	.bb_n_o(bb_n_o), .bb_oe(bb_oe), .rsto_n(rsto_n),
+	.ts_n(ts_n), .tip_n(tip_n), .tip_oe(tip_oe), .sas_n(sas_n),
+	.ta_n(ta_n), .tea_n(tea_n), .tra_n(tra_n),
+	.tci_n(tci_n), .tbi_n(tbi_n), .cla_n(cla_n), .ipl_n(ipl_pins), .avec_n(avec_n),
+	.br_n(br_n), .bg_n(am_bg_n), .bgr_n(am_bgr_n),
+	.bb_n_i((bb_oe ? bb_n_o : 1'b1) & am_bb_n),
+	.bb_n_o(bb_n_o), .bb_oe(bb_oe),
+	.btt_n_i((btt_oe ? btt_n_o : 1'b1) & am_btt_n), .btt_n_o(btt_n_o), .btt_oe(btt_oe),
+	.rsto_n(rsto_n),
 	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .dbg_halted(dbg_halted)
 );
 
@@ -171,17 +189,26 @@ logic  [2:0] ev_tm;
 
 m68060_bus_slave #(.AW(20)) mem (
 	.clk(clk), .nreset(rsti_n), .bclk_en(bclk_en),
-	.a(bus_a), .d_cpu(bus_dw), .rw_n(bus_rw_n), .siz(bus_siz), .tt(bus_tt), .tm(bus_tm), .ts_n(bus_ts_n),
-	.d_mem(d_mem), .ta_n(slv_ta_n), .tea_n(tea_n), .tbi_n(tbi_n), .tci_n(tci_n),
-	.avec_n(avec_n),
+	.a(bus_a), .d_cpu(bus_dw), .d_oe_cpu(d_oe), .rw_n(bus_rw_n), .siz(bus_siz), .bs_n(bs_n),
+	.tt(bus_tt), .tm(bus_tm), .ts_n(bus_ts_n), .sas_n(a_oe ? sas_n : 1'b1), .cpu_xfer(!am_drive),
+	.d_mem(d_mem), .ta_n(ta_n), .tea_n(tea_n), .tra_n(tra_n), .tbi_n(tbi_n), .tci_n(tci_n),
+	.cla_n(cla_n), .avec_n(avec_n),
+	.m_ign(md_ign), .m_native(md_native), .m_hold(md_hold), .m_cnt(md_cnt),
 	.wait_mode(wait_mode), .tbi_mode(tbi_mode), .retry_pct(retry_pct),
-	.tea_req(tea_req), .tci_req(1'b0), .hold(fetch_hold || !mi_n), .oth_ta_n(cpu_ta_oe ? cpu_ta_n : 1'b1),
+	.cla_mode(md_cla), .ign_junk(md_junk),
+	.tea_req(tea_req), .tci_req(1'b0), .hold(fetch_hold),
 	.iack_vector(8'd0), .ext_rdata(32'd0), .ext_inmem(1'b0),
 	.xfer_v(xfer_v), .xfer_addr(xfer_addr), .xfer_rd(xfer_rd), .xfer_siz(xfer_siz),
 	.xfer_tt(xfer_tt), .xfer_tm(xfer_tm), .xfer_beat(xfer_beat),
 	.ev(ev), .ev_rd(ev_rd), .ev_addr(ev_addr), .ev_data(ev_data), .ev_be(ev_be),
-	.ev_siz(ev_siz), .ev_tt(ev_tt), .ev_tm(ev_tm), .ev_err(ev_err)
+	.ev_siz(ev_siz), .ev_tt(ev_tt), .ev_tm(ev_tm), .ev_err(ev_err),
+	.perr(perr)
 );
+always_ff @(posedge clk)
+	if (perr) begin
+		errors <= errors + 1;
+		$display("FAIL: bus protocol (cycle %0d, pc=%h)", cycles, dbg_pc);
+	end
 
 //--------------------------------------------------------------------------
 // program load
@@ -281,7 +308,7 @@ always_ff @(posedge clk) if (rsti_n) begin
 	if (dut.dmu.m2.r.v && dut.dmu.m2.fast && dut.dmu.hzf) ej[5]++;
 end
 // snoops: lookups by where the line was (cache, push buffer, queued push,
-// miss), dirty supplies, sinks, invalidations, snoop-forced refetches
+// miss), invalidations, snoop-forced refetches
 int snc [8];
 initial for (int i = 0; i < 8; i++) snc[i] = 0;
 always_ff @(posedge clk) if (rsti_n) begin
@@ -289,8 +316,6 @@ always_ff @(posedge clk) if (rsti_n) begin
 		if (!dut.dmu.sn_hit) snc[3]++;
 		else snc[dut.dmu.sn_src]++;
 	end
-	if (dut.snoop.st == dut.snoop.S_SRC && dut.snoop.bclk_en && !dut.snoop.ta_oe) snc[4]++;
-	if (dut.snoop.dc_wr) snc[5]++;
 	if (dut.snoop.dc_inv) snc[6]++;
 	if (dut.sn_ihit) snc[7]++;
 end
@@ -388,8 +413,8 @@ task automatic prof_report();
 	         100 * pf[PF_DC2] / tot, 100 * pf[PF_DC1] / tot, 100 * pf[PF_AG] / tot,
 	         100 * pf[PF_FE] / tot, 100 * pf[PF_FQE] / tot, pf[PF_REDIR], pf[PF_DREDIR]);
 	$display("PROF BTB: followed %0d, overruled at the end %0d, restarted %0d", btc[0], btc[1], btc[2]);
-	$display("PROF snoops: hit cache %0d, push buffer %0d, queued push %0d, miss %0d; supplied %0d, sunk %0d, invalidated %0d, I-side refetches %0d",
-	         snc[0], snc[1], snc[2], snc[3], snc[4], snc[5], snc[6], snc[7]);
+	$display("PROF snoops: hit cache %0d, push buffer %0d, queued push %0d, miss %0d; invalidated %0d, I-side refetches %0d",
+	         snc[0], snc[1], snc[2], snc[3], snc[6], snc[7]);
 	for (int i = 0; i < 8; i++) snc[i] = 0;
 	$display("PROF loads at DC1: fast %0d, miss %0d, set written since lookup %0d, engine busy %0d, other %0d",
 	         lsl[0], lsl[1], lsl[2], lsl[3], lsl[4]);
@@ -444,13 +469,13 @@ m68060_alt_master am (
 	.clk(clk), .nreset(rsti_n), .bclk_en(bclk_en),
 	.go(am_go), .n(am_n), .trig_en(am_trig_en), .trig(am_trig), .delay(am_delay),
 	.x_addr(am_x_addr), .x_ctl(am_x_ctl), .x_wd(am_x_wd), .x_rd(am_x_rd), .status(am_status),
-	.cpu_bg_n(am_bg_n), .cpu_bb_n(bb_oe ? bb_n_o : 1'b1),
+	.bgr_mode(md_bgr), .cpu_bg_n(am_bg_n), .cpu_bgr_n(am_bgr_n), .cpu_bb_n(bb_oe ? bb_n_o : 1'b1),
 	.drive(am_drive), .a(am_a), .rw_n(am_rw_n), .siz(am_siz), .tt(am_tt), .tm(am_tm),
-	.sc(am_sc), .ts_n(am_ts_n), .bb_n(am_bb_n), .d(am_d), .d_oe(am_d_oe),
+	.snoop_n(am_snoop_n), .ts_n(am_ts_n), .bb_n(am_bb_n), .btt_n(am_btt_n), .d(am_d), .d_oe(am_d_oe),
 	.d_bus(bus_dr), .ta_n(ta_n), .tea_n(tea_n), .tbi_n(tbi_n)
 );
 
-// the trigger: the 68040 starts a line read of the armed line
+// the trigger: the 68060 starts a line read of the armed line
 assign am_trig = bclk_en && !ts_n && a_oe && !am_drive && rw_n && siz == 2'b11 &&
                  a_o[31:4] == am_trig_a[31:4];
 
@@ -477,17 +502,41 @@ initial amtrace = $test$plusargs("amtrace");
 always_ff @(posedge clk)
 	if (amtrace && bclk_en) begin
 		if (!bus_ts_n)
-			$display("%8d %s TS %08x %s siz=%0d sc=%0d mi_n=%b", cycles, am_drive ? "ALT" : "CPU",
-			         bus_a, bus_rw_n ? "RD" : "WR", bus_siz, am_sc, mi_n);
-		if (!ta_n || !tea_n)
-			$display("%8d %s %s%s d=%08x (cpu ta_oe=%b mi_n=%b)", cycles, am_drive ? "ALT" : "CPU",
-			         !ta_n ? "TA" : "", !tea_n ? "TEA" : "", bus_rw_n ? bus_dr : bus_dw, cpu_ta_oe, mi_n);
+			$display("%8d %s TS %08x %s siz=%0d snoop=%b", cycles, am_drive ? "ALT" : "CPU",
+			         bus_a, bus_rw_n ? "RD" : "WR", bus_siz, am_drive && !am_snoop_n);
+		if (!ta_n || !tea_n || !tra_n)
+			$display("%8d %s %s%s%s d=%08x sas=%b", cycles, am_drive ? "ALT" : "CPU",
+			         !ta_n ? "TA" : "", !tea_n ? "TEA" : "", !tra_n ? "TRA" : "",
+			         bus_rw_n ? bus_dr : bus_dw, !sas_n);
+	end
+
+// +biutrace: every transaction the BIU latches and how it ends
+logic biutrace;
+initial biutrace = $test$plusargs("biutrace");
+always_ff @(posedge clk)
+	if (biutrace) begin
+		for (int c = 0; c < 3; c++) begin
+			if (dut.biu.gnt[c])
+				$display("%8d BIU gnt c%0d %s a=%08x siz=%0d tm=%0d", cycles, c,
+				         dut.biu.breq[c].rd ? "RD" : "WR", dut.biu.breq[c].addr,
+				         dut.biu.breq[c].siz, dut.biu.breq[c].tm);
+			if (dut.biu.done[c]) $display("%8d BIU done c%0d", cycles, c);
+			if (dut.biu.err[c])  $display("%8d BIU err c%0d", cycles, c);
+		end
+		if (dut.biu.rvalid)
+			$display("%8d BIU rvalid c%0d beat=%0d d=%08x", cycles, dut.biu.rclient,
+			         dut.biu.rbeat, dut.biu.rdata);
 	end
 
 always_ff @(posedge clk)
 	if (amtrace && dut.dmu.sn_look)
 		$display("%8d SNOOP %08x hit=%b dirty=%b src=%0d way=%0d", cycles, dut.dmu.sn_pa,
 		         dut.dmu.sn_hit, dut.dmu.sn_dirty, dut.dmu.sn_src, dut.dmu.sn_way);
+always_ff @(posedge clk)
+	if (rsti_n && dut.sn_ovf) begin
+		$display("FAIL: snoop invalidation queue overflowed");
+		errors <= errors + 1;
+	end
 
 // results back into the register block the program reads
 always_ff @(posedge clk) begin
@@ -570,24 +619,24 @@ always_ff @(posedge clk) begin
 				am_n   <= 3'd1;
 				am_trig_en <= 1'b0;
 				am_delay <= '0;
-				if (rs_split) begin     // write $D014, SC 01 (t_cbsplit)
+				if (rs_split) begin     // write $D014, snooped (t_cbsplit)
 					rs_op <= 3'd1;
 					am_x_addr[0] <= 32'h0000_D014;
 					am_x_ctl[0]  <= 5'b01_00_0;
 					am_x_wd[0]   <= {16'h5A5A, rs_seq, 96'd0};
 				end
-				else if (r < 30) begin  // read a counter, SC 01
+				else if (r < 30) begin  // read a counter, snooped
 					rs_op <= 3'd0;
 					am_x_addr[0] <= 32'h0000_A000 + {24'd0, k, 2'b00};
 					am_x_ctl[0]  <= 5'b01_00_1;
 				end
-				else if (r < 50) begin  // write a shared word, SC 01
+				else if (r < 50) begin  // write a shared word, snooped
 					rs_op <= 3'd1;
 					am_x_addr[0] <= 32'h0000_B000 + {24'd0, k, 2'b00};
 					am_x_ctl[0]  <= 5'b01_00_0;
 					am_x_wd[0]   <= {{rs_seq, {8'd0, k, 2'b00} ^ 16'h5A5A}, 96'd0};
 				end
-				else if (r < 60) begin  // write a shared line, SC 01
+				else if (r < 60) begin  // write a shared line, snooped
 					logic [127:0] l;
 					rs_op <= 3'd2;
 					for (int i = 0; i < 4; i++)
@@ -596,18 +645,18 @@ always_ff @(posedge clk) begin
 					am_x_ctl[0]  <= 5'b01_11_0;
 					am_x_wd[0]   <= l;
 				end
-				else if (r < 68) begin  // write a shared word, SC 10
+				else if (r < 68) begin  // write a shared word, snooped (ctl 10)
 					rs_op <= 3'd3;
 					am_x_addr[0] <= 32'h0000_B000 + {24'd0, k, 2'b00};
 					am_x_ctl[0]  <= 5'b10_00_0;
 					am_x_wd[0]   <= {{rs_seq, {8'd0, k, 2'b00} ^ 16'h5A5A}, 96'd0};
 				end
-				else if (r < 88) begin  // read a shared word, SC 01
+				else if (r < 88) begin  // read a shared word, snooped
 					rs_op <= 3'd4;
 					am_x_addr[0] <= 32'h0000_B000 + {24'd0, k, 2'b00};
 					am_x_ctl[0]  <= 5'b01_00_1;
 				end
-				else begin              // read a counter line, SC 01
+				else begin              // read a counter line, snooped
 					rs_op <= 3'd5;
 					am_x_addr[0] <= 32'h0000_A000 + {24'd0, k[5:2], 4'd0};
 					am_x_ctl[0]  <= 5'b01_11_1;
@@ -794,6 +843,37 @@ always_ff @(posedge clk)
 		         dut.be.md_busy, dut.be.md_done, dut.be.md_z, dut.be.kill_now, dut.be.ex_fault,
 		         dut.be.ex_u.exc, dut.be.stall_ex, dut.be.irq_pend);
 
+// +fstrace: split copyback stores (both halves) and snoop lookups
+logic fstrace;
+initial fstrace = $test$plusargs("fstrace");
+always_ff @(posedge clk)
+	if (fstrace) begin
+		if (dut.dmu.wb_fs && !dut.dmu.sn_frz) $display("%8d FS first half", cycles);
+		if (dut.dmu.wfs_p1 && !dut.dmu.sn_frz)
+			$display("%8d FS second half hit=%b", cycles, dut.dmu.m4.x1.hit);
+		if (dut.dmu.sn_req && dut.dmu.sn_ph == 0) $display("%8d SN req %08x", cycles, dut.dmu.sn_pa);
+		if (dut.dmu.sn_look) $display("%8d SN look hit=%b", cycles, dut.dmu.sn_hit);
+	end
+
+// +pintrace=<from>: the bus pins every clock for 60 cycles
+int pin_from;
+initial if (!$value$plusargs("pintrace=%d", pin_from)) pin_from = -1;
+always_ff @(posedge clk)
+	if (pin_from >= 0 && cycles >= pin_from && cycles < pin_from + 60)
+		$display("%8d PIN bclk=%b a=%08x rw=%b siz=%0d ts=%b sas=%b ta=%b tea=%b tra=%b tbi=%b cla=%b d_oe=%b d=%08x | biu st=%0d beat=%0d ign=%0d | slv busy=%b beat=%0d ic=%0d exp_sas=%b",
+		         cycles, bclk_en, bus_a, bus_rw_n, bus_siz, bus_ts_n, sas_n, ta_n, tea_n, tra_n, tbi_n, cla_n,
+		         d_oe, d_o, dut.biu.st, dut.biu.beat, dut.biu.ign, mem.busy, mem.beat, mem.ic, mem.exp_sas);
+
+// +engtrace=<from>: the DMU engine's bus handshake for 80 cycles
+int eng_from;
+initial if (!$value$plusargs("engtrace=%d", eng_from)) eng_from = -1;
+always_ff @(posedge clk)
+	if (eng_from >= 0 && cycles >= eng_from && cycles < eng_from + 80)
+		$display("%8d ENG e=%0d breq=%b gnt=%b done=%b err=%b rv=%b bo_pa=%08x left=%0d pn=%0d rd=%b line=%b cancel=%b sn_ph=%0d biu_st=%0d bclk=%b",
+		         cycles, dut.dmu.e_st, dut.dmu.e_breq, dut.dmu.b_gnt, dut.dmu.b_done, dut.dmu.b_err,
+		         dut.dmu.b_rvalid, dut.dmu.bo_pa, dut.dmu.bo_left, dut.dmu.bo_pn, dut.dmu.bo.rd,
+		         dut.dmu.bo.line, dut.dmu.bo_cancel, dut.dmu.sn_ph, dut.biu.st, bclk_en);
+
 // +fptrace=<from>: the FPU state each cycle for 300 cycles
 int fpt_from;
 initial if (!$value$plusargs("fptrace=%d", fpt_from)) fpt_from = -1;
@@ -910,6 +990,13 @@ initial begin
 	tbi_mode = tbiv[1:0];
 	if (!$value$plusargs("retry=%d", retry_pct)) retry_pct = 0;
 	bclk2 = $test$plusargs("bclk2");
+	md_ign    = $value$plusargs("ign=%h", md_cnt);
+	if (!md_ign) md_cnt = 16'd0;
+	md_native = $test$plusargs("native");
+	md_hold   = $test$plusargs("whold");
+	md_cla    = $test$plusargs("cla");
+	md_junk   = $test$plusargs("ignjunk");
+	md_bgr    = $test$plusargs("bgr");
 	trace = $test$plusargs("trace");
 	ptrace = $test$plusargs("ptrace");
 	prof = $test$plusargs("prof");

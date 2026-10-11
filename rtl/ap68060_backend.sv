@@ -187,6 +187,8 @@ logic  [7:0] wb_exc;          // exception vector, 0 none
 logic        wb_exc_pcv;      // the frame PC is wb_exc_pc (odd change of flow)
 logic [31:0] wb_exc_pc;
 logic        wb_oddrte;       // RTE to an odd PC: its SR is committed first
+logic        wb_hodd;         // the handler address of an exception is odd
+logic        xm_v, xm_m;      // the routine running is an interrupt's; its old M
 logic        wb_exc_fmtv;     // the frame format is wb_exc_fmt (FPU exceptions)
 logic  [3:0] wb_exc_fmt;
 logic        wb_xcommit;      // the uop's address updates stand (FPU unimp/unsupp)
@@ -1273,6 +1275,10 @@ always_comb begin
 	// CCR is cleared except Z and N, set from the new SR word
 	if (adv_wb && wb_is_exc && wb_oddrte)
 		cur = {sr_r[15:8], 3'b000, 1'b0, wb_sr_new[15], wb_sr_new == 16'd0, 2'b00};
+	// an interrupt whose handler address is odd: the address error comes
+	// before the interrupt clears M (WinUAE cputest, 68060: M stays)
+	if (adv_wb && wb_is_exc && wb_hodd && xm_v)
+		cur[12] = xm_m;
 	x_osr  = cur;
 	x_fslw = 32'd0;
 	x_addr = wb_u.pc;
@@ -1346,6 +1352,8 @@ always_ff @(posedge clk) begin
 		ccr_f   <= 5'd0;
 		ccr_b   <= 5'd0;
 		sr_r    <= 16'h2700;
+		xm_v    <= 1'b0;
+		xm_m    <= 1'b0;
 		vbr_r   <= 32'd0;
 		cacr_r  <= 32'd0;
 		bc_clr  <= 1'b0;
@@ -1622,6 +1630,8 @@ always_ff @(posedge clk) begin
 			end
 			wb_oddrte  <= ex_u.exc == 8'd0 && !ex_fault && ex_xvec == 8'd0 && ex_odd &&
 			              ex_u.op == OP_RTE;
+			wb_hodd    <= ex_u.exc == 8'd0 && !ex_fault && ex_xvec == 8'd0 && ex_odd &&
+			              ex_u.br == BR_A && ex_u.op == OP_MOV && ex_u.cond == 4'hF;
 			// CCR after this uop (CHK, CHK2, TRAPcc and divide-by-zero set
 			// their flags and then trap: the stacked SR carries them)
 			if (ex_u.exc == 8'd0 && !ex_fault) begin
@@ -1744,9 +1754,16 @@ always_ff @(posedge clk) begin
 			rt_armed <= 1'b0;
 			smc_pend <= 1'b0;
 			// BUSCR: L and LE go to the shadow bits SL and SLE, LOCK and
-			// LOCKE are negated (MC68060UM 7.4)
-			bus_sl   <= bus_l;
-			bus_sle  <= bus_le;
+			// LOCKE are negated (MC68060UM 7.4) -- L and LE as a MOVEC to
+			// BUSCR committing now (a trace after it) leaves them
+			if (wb_commit && wb_u.op == OP_SPW && wb_u.imm_b[7:0] == 8'h08) begin
+				bus_sl  <= wb_res[31];
+				bus_sle <= wb_res[29];
+			end
+			else begin
+				bus_sl  <= bus_l;
+				bus_sle <= bus_le;
+			end
 			bus_l    <= 1'b0;
 			bus_le   <= 1'b0;
 			vw = {x_fmt, 2'b00, x_vec, 2'b00};
@@ -1763,6 +1780,8 @@ always_ff @(posedge clk) begin
 			xi_addr  <= x_addr;
 			xi_fslw  <= x_fslw;
 			sr_r     <= {x_nsr[15:5], 5'd0};
+			xm_v     <= (x_kind == EK_IRQ);
+			xm_m     <= x_osr[12];
 			ccr_b    <= x_osr[4:0];
 			ccr_f    <= x_osr[4:0];
 			stopped  <= 1'b0;

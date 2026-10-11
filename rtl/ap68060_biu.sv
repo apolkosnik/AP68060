@@ -1,26 +1,44 @@
 //--------------------------------------------------------------------------//
-// AP68060 - pipelined MC68040                                            //
+// AP68060 - pipelined MC68060                                              //
 //                                                                          //
-// ap68060_biu.sv - bus interface unit (MC68040UM section 7)                 //
+// ap68060_biu.sv - bus interface unit (MC68060UM section 7)                 //
 //                                                                          //
-// Runs one internal transaction at a time on the 68040 bus:                //
+// Runs one internal transaction at a time on the 68060 bus:                //
 //   * byte/word/long transfers (the requester has already split a          //
-//     misaligned operand into aligned pieces, 7.3)                         //
+//     misaligned operand into aligned pieces, 7.6), with the byte selects  //
+//     BS3-BS0 (table 2-6)                                                  //
 //   * line transfers as a burst; TBI on the first beat falls back to       //
-//     three long-word transfers (7.4.2, 7.4.4); A3:A2 of a burst are       //
-//     incremented by the slave and wrap inside the line                   //
-//   * TA+TEA retry of a byte/word/long transfer and of the first beat of  //
-//     a line; a retry on a later beat is a bus error (7.6.2)              //
-//   * TEA bus error, reported with the beat it hit (7.6.1)                //
-//   * locked sequences: the arbiter stays with the locking requester       //
-//     from its first LOCK transfer until the LOCKE transfer completes      //
-//   * bus arbitration BR/BG/BB (7.8): ownership is taken when BG is        //
-//     asserted and BB is free; a negated BG gives the bus up at the end   //
-//     of the transfer in progress, unless a locked sequence is open        //
-//   * RSTO for 512 bus clocks (RESET instruction, 7.10)                    //
+//     three long-word transfers (7.7.2, 7.7.4).  A3:A2 stay put unless     //
+//     CLA is asserted, which advances them, wrapping in the line (7.7.7); //
+//     the slave counts the beats either way                                //
+//   * termination (7.9, table 7-5) in the protocol chosen at reset:        //
+//       68040: TA normal, TEA bus error, TA+TEA retry (a retry after the   //
+//              first beat of a line is a bus error)                        //
+//       native: TEA bus error, TRA retry (ignored after the first beat),  //
+//              TA normal                                                   //
+//   * the acknowledge termination ignore states (7.14.1): the primary     //
+//     count before the first sample of a transfer, the secondary before   //
+//     every later beat of a line; SAS is asserted for the one bus clock   //
+//     at whose end a beat's terminations are first sampled (2.4.3)        //
+//   * the extra data write hold (7.14.3): write data stays one bus clock  //
+//     past its TA (the next beat's data follows then)                     //
+//   * locked sequences: LOCK from the first locked transfer to the end of //
+//     the LOCKE transfer; a negated BG does not take the bus away inside   //
+//     one unless BGR is asserted (7.11)                                    //
+//   * arbitration (7.11, figure 7-41): reset, alternate-master implicit   //
+//     and explicit ownership, implicit and explicit ownership, end of      //
+//     tenure.  Either protocol works: a tenure of another master ends     //
+//     with BTT or with BB going negated; ours ends with BTT asserted one   //
+//     bus clock and negated one, BB negated one CLK, then three-stated.   //
+//     The bus is driven only in explicit ownership.  A retry with BG      //
+//     negated gives the bus up and retries once it is back (7.9.2).       //
+//   * RSTO for 512 CLK cycles (RESET instruction, 7.13)                    //
+//   * a snoop has priority over the processor (5.6): no transfer starts   //
+//     while the snooper still has invalidations to make                   //
 //                                                                          //
-// Every bus output is a flip-flop that changes only in a clk cycle with    //
-// bclk_en high; inputs are sampled only in such cycles.                    //
+// Every bus output changes only in a clk cycle with bclk_en high, except  //
+// BB and TIP, which are negated for one CLK before being three-stated,    //
+// and RSTO; inputs are sampled only in bclk_en cycles.                     //
 //                                                                          //
 // Requester interface (per client c):                                      //
 //   req[c]      level; breq[c] must be stable while req[c] is high and    //
@@ -28,7 +46,7 @@
 //               done[c] or err[c] (the BIU drives the bus from it)         //
 //   gnt[c]      pulse: the transaction is latched, req may drop or change  //
 //   rvalid      pulse per read beat for the client in rclient; rdata,      //
-//               rbeat (A3:A2 of the long word), avec (AVEC with TA)        //
+//               rbeat (the long word's A3:A2), avec (AVEC with TA)         //
 //   done[c]     pulse: transaction finished without error                  //
 //   err[c]      pulse: transaction ended with a bus error; errbeat says    //
 //               which long word of a line (0 = the first transferred)      //
@@ -49,6 +67,12 @@ module ap68060_biu
 	input  logic              nreset,
 	input  logic              bclk_en,
 
+	// modes registered at reset (7.14)
+	input  logic              m_ign,      // ignore state capability (IPL0)
+	input  logic              m_native,   // native acknowledge termination (IPL1)
+	input  logic              m_hold,     // extra data write hold (IPL2)
+	input  logic [15:0]       m_cnt,      // D15-D0: read primary/secondary, write primary/secondary
+
 	// requesters
 	input  logic [NC-1:0]     req,
 	input  busreq_t           breq   [NC],
@@ -64,22 +88,24 @@ module ap68060_biu
 	output logic              rtci,
 	output logic  [1:0]       errbeat,
 	output logic              idle,     // no transaction latched or running
-	output logic              own,      // we are the bus master (BB ours)
+	output logic              own,      // we hold the bus (implicitly or explicitly)
 
 	input  logic              unlock,   // abandon an open locked sequence
+	input  logic              sn_busy,  // snoop invalidations still pending: no new transfer
 
 	// RESET instruction
 	input  logic              rsto_req,  // pulse
 	output logic              rsto_busy,
 
-	// 68040 bus
+	// the 68060 bus
 	output logic [31:0]       a_o,
-	output logic              a_oe,
+	output logic              a_oe,      // address, attributes, TS, SAS, TIP driven
 	input  logic [31:0]       d_i,
 	output logic [31:0]       d_o,
 	output logic              d_oe,
 	output logic              rw_n,
 	output logic  [1:0]       siz,
+	output logic  [3:0]       bs_n,      // BS0-BS3 (bs_n[0] = BS0, D31-D24)
 	output logic  [1:0]       tt,
 	output logic  [2:0]       tm,
 	output logic  [1:0]       tln,
@@ -89,37 +115,62 @@ module ap68060_biu
 	output logic              locke_n,
 	output logic              ts_n,
 	output logic              tip_n,
+	output logic              tip_oe,
+	output logic              sas_n,
 	input  logic              ta_n,
 	input  logic              tea_n,
+	input  logic              tra_n,
 	input  logic              tci_n,
 	input  logic              tbi_n,
 	input  logic              avec_n,
+	input  logic              cla_n,
 	output logic              br_n,
 	input  logic              bg_n,
+	input  logic              bgr_n,
+	input  logic              ts_n_i,    // the bused TS (another master's)
 	input  logic              bb_n_i,
 	output logic              bb_n_o,
 	output logic              bb_oe,
+	input  logic              btt_n_i,
+	output logic              btt_n_o,
+	output logic              btt_oe,
 	output logic              rsto_n
 );
 
 localparam int CW = (NC > 1) ? $clog2(NC) : 1;
 
 typedef enum logic [2:0] {
-	S_IDLE,     // owner (or not), no transfer
+	S_IDLE,     // no transfer
 	S_C1,       // TS asserted this bus clock
-	S_DATA,     // waiting for TA/TEA, burst beats
-	S_GAP       // a burst-inhibited line restarts the next long word
+	S_DATA,     // terminations sampled (after the ignore states), beats
+	S_HOLD,     // extra data write hold after a write beat's TA
+	S_GAP,      // a burst-inhibited line restarts with the next long word
+	S_RETRY     // a retry with the bus given up: rerun once it is back
 } state_t;
 
+// arbitration (figure 7-41)
+typedef enum logic [2:0] {
+	B_RESET,    // after RSTI
+	B_AMI,      // alternate master: implicit (BG not ours, no tenure seen)
+	B_AME,      // alternate master: explicit (its TS seen, its tenure open)
+	B_IMP,      // implicit ownership: BG ours, bus not driven
+	B_EXP,      // explicit ownership: BB asserted, bus driven
+	B_END1,     // end of tenure: BTT asserted
+	B_END2      // ... BTT negated, then three-stated
+} arb_t;
+
 state_t      st;
+arb_t        ab;
 busreq_t     cur;
 logic [CW-1:0] cur_c;
 wire  [127:0] cur_wd = wdata[cur_c];   // stable until done/err (contract)
 logic  [1:0] beat;        // beats completed so far in a line
+logic  [1:0] a32;         // A3:A2 on the bus
 logic        inhibited;   // line continued as long-word transfers
-logic        owner;       // we hold BB
 logic        locked;      // a locked sequence is open
 logic [CW-1:0] lock_c;
+logic  [3:0] ign;         // ignore states left before sampling
+logic        h_last;      // S_HOLD follows the transfer's last beat
 
 //--------------------------------------------------------------------------
 // arbitration among requesters: fixed priority, except that an open locked
@@ -143,9 +194,9 @@ always_comb begin
 	end
 end
 
-// long-word data for beat number n of the latched line (address order)
-function automatic logic [31:0] line_word(input logic [127:0] w, input logic [1:0] a32);
-	case (a32)
+// long-word data for a line's long word at A3:A2
+function automatic logic [31:0] line_word(input logic [127:0] w, input logic [1:0] a);
+	case (a)
 		2'd0: line_word = w[127:96];
 		2'd1: line_word = w[95:64];
 		2'd2: line_word = w[63:32];
@@ -153,18 +204,48 @@ function automatic logic [31:0] line_word(input logic [127:0] w, input logic [1:
 	endcase
 endfunction
 
-wire  [1:0] cur_a32  = cur.addr[3:2] + beat;   // long word now on the bus
-wire        is_line  = (cur.siz == SIZ_LINE);
-wire        ta       = !ta_n;
-wire        tea      = !tea_n;
+// BS3-BS0 from SIZ and A1:A0 (table 2-6; asserted low)
+function automatic logic [3:0] bsel(input logic [1:0] s, input logic [1:0] a10);
+	logic [3:0] b;       // b[0] = BS0 (D31-D24)
+	case (s)
+		SIZ_B:   b = 4'b0001 << a10;
+		SIZ_W:   b = a10[1] ? 4'b1100 : 4'b0011;
+		default: b = 4'b1111;
+	endcase
+	bsel = ~b;
+endfunction
 
-// ownership: BG asserted and the bus free, or already ours and BG still
-// asserted (or a locked sequence open: it keeps the bus)
-wire        can_own  = (owner && (!bg_n || locked)) || (!bg_n && bb_n_i);
+// the ignore state count for a beat (7.14.1): [15:12] read primary, [11:8]
+// read secondary, [7:4] write primary, [3:0] write secondary
+function automatic logic [3:0] icount(input logic rd, input logic secondary);
+	if (!m_ign) icount = 4'd0;
+	else case ({rd, secondary})
+		2'b10:   icount = m_cnt[15:12];
+		2'b11:   icount = m_cnt[11:8];
+		2'b00:   icount = m_cnt[7:4];
+		default: icount = m_cnt[3:0];
+	endcase
+endfunction
+
+wire        beat_line = (cur.siz == SIZ_LINE) && !inhibited;  // a burst beat follows
+wire        last_beat = (cur.siz != SIZ_LINE) || (beat == 2'd3);
+wire        first     = (beat == 2'd0) && !inhibited;
+wire        ta        = !ta_n;
+wire        tea       = !tea_n;
+wire        tra       = !tra_n;
+// the termination this bus clock (table 7-5)
+wire        t_err     = m_native ? tea : (tea && !(ta && first));
+wire        t_retry   = m_native ? (!tea && tra && first) : (tea && ta && first);
+wire        t_ok      = ta && !t_err && !t_retry;
+
+// another master's TS (ours is not on ts_n_i while we drive it)
+wire        ts_oth    = !ts_n_i && !(a_oe && !ts_n);
+// keep the bus: BG ours, or a locked sequence open that BGR does not break
+wire        keep_bus  = !bg_n || (locked && bgr_n);
 
 logic [9:0] rsto_cnt;
-logic       rsto_pend;   // a RESET request waiting for a bus clock
 logic       unlock_pend;
+logic       end_tenure;        // relinquish once the transfer in progress ends
 
 always_ff @(posedge clk) begin
 	gnt    <= '0;
@@ -174,13 +255,16 @@ always_ff @(posedge clk) begin
 
 	if (!nreset) begin
 		st        <= S_IDLE;
+		ab        <= B_RESET;
 		cur       <= '0;
 		cur_c     <= '0;
 		beat      <= 2'd0;
+		a32       <= 2'd0;
 		inhibited <= 1'b0;
-		owner     <= 1'b0;
 		locked    <= 1'b0;
 		lock_c    <= '0;
+		ign       <= 4'd0;
+		h_last    <= 1'b0;
 		rclient   <= '0;
 		rdata     <= '0;
 		rbeat     <= 2'd0;
@@ -193,6 +277,7 @@ always_ff @(posedge clk) begin
 		d_oe      <= 1'b0;
 		rw_n      <= 1'b1;
 		siz       <= 2'd0;
+		bs_n      <= 4'hF;
 		tt        <= 2'd0;
 		tm        <= 3'd0;
 		tln       <= 2'd0;
@@ -202,168 +287,304 @@ always_ff @(posedge clk) begin
 		locke_n   <= 1'b1;
 		ts_n      <= 1'b1;
 		tip_n     <= 1'b1;
+		tip_oe    <= 1'b0;
+		sas_n     <= 1'b1;
 		br_n      <= 1'b1;
 		bb_n_o    <= 1'b1;
 		bb_oe     <= 1'b0;
+		btt_n_o   <= 1'b1;
+		btt_oe    <= 1'b0;
 		rsto_n    <= 1'b1;
 		rsto_cnt  <= '0;
-		rsto_pend <= 1'b0;
 		unlock_pend <= 1'b0;
+		end_tenure  <= 1'b0;
 	end
 	else begin
-		if (rsto_req) rsto_pend <= 1'b1;
+		// BB and TIP: negated for one CLK, then three-stated (7.1)
+		if (bb_oe && bb_n_o && ab != B_EXP) bb_oe <= 1'b0;
+		if (tip_oe && tip_n && ab != B_EXP) tip_oe <= 1'b0;
+
+		// RESET instruction: RSTO for 512 CLK cycles
+		if (rsto_cnt != 0) begin
+			rsto_cnt <= rsto_cnt - 1'd1;
+			if (rsto_cnt == 10'd1) rsto_n <= 1'b1;
+		end
+		if (rsto_req) begin
+			rsto_n   <= 1'b0;
+			rsto_cnt <= 10'd512;
+		end
+
 		if (unlock) unlock_pend <= 1'b1;
 		if ((unlock || unlock_pend) && st == S_IDLE) begin
 			locked      <= 1'b0;
 			unlock_pend <= 1'b0;
 		end
+
 		if (bclk_en) begin
-			// RESET instruction: RSTO for 512 bus clocks
-			if (rsto_cnt != 0) begin
-				rsto_cnt <= rsto_cnt - 1'd1;
-				if (rsto_cnt == 10'd1) rsto_n <= 1'b1;
+			logic start;
+			start = 1'b0;
+
+			// bus request: an internal request the bus is not there for
+			br_n <= !((pick_v || st == S_RETRY) && !(ab == B_EXP && keep_bus));
+
+			//--------------------------------------------------------------
+			// arbitration
+			//--------------------------------------------------------------
+			case (ab)
+			B_RESET:
+				// a tenure another master may have open ends with BTT / BB
+				ab <= (!bg_n && !ts_oth) ? B_IMP : ts_oth ? B_AME : B_AMI;
+			B_AMI: begin
+				if (ts_oth)                       ab <= B_AME;
+				else if (!bg_n && bb_n_i)         ab <= B_IMP;
+				else if (!bg_n)                   ab <= B_AME;   // BB still held
 			end
+			B_AME: begin
+				// the other master's tenure ends with BTT, or BB going negated
+				if (!ts_oth && (!btt_n_i || bb_n_i))
+					ab <= !bg_n ? B_IMP : B_AMI;
+			end
+			B_IMP: begin
+				if (ts_oth)      ab <= B_AME;
+				else if (bg_n)   ab <= B_AMI;
+				// (to B_EXP: below, with the first TS)
+			end
+			B_EXP: ;
+			B_END1: begin
+				btt_n_o <= 1'b1;         // BTT negated for one bus clock
+				ab      <= B_END2;
+			end
+			B_END2: begin
+				btt_oe  <= 1'b0;
+				ab      <= !bg_n ? B_IMP : B_AMI;
+			end
+			default: ab <= B_AMI;
+			endcase
 
-			// bus request: asserted while there is work and the bus is
-			// not ours; negated once we own it
-			br_n <= !((pick_v || st != S_IDLE) && !owner);
-
+			//--------------------------------------------------------------
+			// transfers
+			//--------------------------------------------------------------
 			case (st)
-			S_IDLE: begin
-				ts_n <= 1'b1;
-				if (pick_v && can_own) begin
-					// start a transfer
-					owner   <= 1'b1;
-					bb_n_o  <= 1'b0;
-					bb_oe   <= 1'b1;
-					cur     <= breq[pick_c];
-					cur_c   <= pick_c;
-					gnt[pick_c] <= 1'b1;
-					beat    <= 2'd0;
-					inhibited <= 1'b0;
-					if (breq[pick_c].lock) begin
-						locked <= !breq[pick_c].locke;
-						lock_c <= pick_c;
+			S_IDLE, S_RETRY: begin
+				ts_n  <= 1'b1;
+				sas_n <= 1'b1;
+				d_oe  <= 1'b0;
+				if ((pick_v || st == S_RETRY) && !sn_busy &&
+				    (((ab == B_IMP) && !bg_n && !ts_oth) || (ab == B_EXP && keep_bus && !end_tenure))) begin
+					start = 1'b1;
+					if (st == S_IDLE) begin
+						cur   <= breq[pick_c];
+						cur_c <= pick_c;
+						gnt[pick_c] <= 1'b1;
+						if (breq[pick_c].lock) begin
+							locked <= !breq[pick_c].locke;
+							lock_c <= pick_c;
+						end
 					end
-					a_o     <= breq[pick_c].addr;
-					a_oe    <= 1'b1;
-					rw_n    <= breq[pick_c].rd;
-					siz     <= breq[pick_c].siz;
-					tt      <= breq[pick_c].tt;
-					tm      <= breq[pick_c].tm;
-					tln     <= breq[pick_c].tln;
-					upa     <= breq[pick_c].upa;
-					ciout_n <= !breq[pick_c].ci;
-					lock_n  <= !breq[pick_c].lock;
-					locke_n <= !(breq[pick_c].lock && breq[pick_c].locke);
-					d_o     <= (breq[pick_c].siz == SIZ_LINE) ?
-					           line_word(wdata[pick_c], breq[pick_c].addr[3:2]) :
-					           wdata[pick_c][31:0];
-					d_oe    <= !breq[pick_c].rd;
-					ts_n    <= 1'b0;
-					tip_n   <= 1'b0;
-					st      <= S_C1;
 				end
-				else begin
+				else if (ab == B_EXP && (!keep_bus || end_tenure)) begin
+					// end of tenure: BTT one bus clock asserted, one negated;
+					// BB negated for one CLK
+					ab         <= B_END1;
+					end_tenure <= 1'b0;
+					btt_n_o    <= 1'b0;
+					btt_oe     <= 1'b1;
+					bb_n_o     <= 1'b1;
+					tip_n      <= 1'b1;
+					a_oe       <= 1'b0;
+					lock_n     <= 1'b1;
+					locke_n    <= 1'b1;
+				end
+				else if (ab == B_EXP) begin
+					// explicit owner with nothing to do: TIP negated, the
+					// address and attributes keep being driven (undefined)
 					tip_n <= 1'b1;
-					d_oe  <= 1'b0;
-					// keep driving the bus only while we own it
-					if (owner && bg_n && !locked) begin
-						owner  <= 1'b0;
-						bb_n_o <= 1'b1;   // negate, then release next clock
-					end
-					else if (!owner) begin
-						bb_oe <= 1'b0;
-						a_oe  <= 1'b0;
-					end
 				end
 			end
 
 			S_C1: begin
 				ts_n <= 1'b1;
-				st   <= S_DATA;
+				// SAS: the terminations are sampled at the end of this clock
+				sas_n <= (ign != 4'd0);
+				st    <= S_DATA;
 			end
 
 			S_GAP: begin
-				// next long word of a burst-inhibited line
-				a_o   <= {cur.addr[31:4], cur_a32, cur.addr[1:0]};
+				// the next long word of a burst-inhibited line: a cycle of its own
+				a_o   <= {cur.addr[31:4], a32, cur.addr[1:0]};
 				siz   <= SIZ_L;
-				d_o   <= line_word(cur_wd, cur_a32);
+				bs_n  <= 4'h0;
+				d_o   <= line_word(cur_wd, a32);
 				ts_n  <= 1'b0;
+				tip_n <= 1'b0;
+				ign   <= icount(cur.rd, 1'b0);   // a long-word cycle: the primary count
 				st    <= S_C1;
 			end
 
-			S_DATA: begin
-				if (ta && tea) begin
-					// retry: legal on a single transfer and on the first
-					// beat of a line, otherwise a bus error
-					if (beat == 2'd0 && !inhibited) begin
-						ts_n <= 1'b0;
-						st   <= S_C1;
-					end
-					else begin
-						err[cur_c] <= 1'b1;
-						errbeat    <= beat;
-						locked     <= locked && !cur.locke;
-						d_oe       <= 1'b0;
-						st         <= S_IDLE;
-					end
+			S_HOLD: begin
+				// write data held one bus clock past its TA (7.14.3)
+				if (h_last) begin
+					d_oe <= 1'b0;
+					st   <= S_IDLE;
+					done[cur_c] <= 1'b1;
+					finish_cycle();
 				end
-				else if (tea) begin
+				else if (inhibited) st <= S_GAP;
+				else begin
+					d_o   <= line_word(cur_wd, cur.addr[3:2] + beat);
+					ign   <= icount(1'b0, 1'b1);
+					sas_n <= (icount(1'b0, 1'b1) != 4'd0);
+					st    <= S_DATA;
+				end
+			end
+
+			S_DATA: begin
+				if (ign != 4'd0) begin
+					// an ignore state: terminations are not looked at
+					ign   <= ign - 4'd1;
+					sas_n <= (ign != 4'd1);
+				end
+				else if (t_err) begin
 					err[cur_c] <= 1'b1;
 					errbeat    <= beat;
 					// a bus error ends a locked sequence: the requester
 					// takes an access error and will not complete it
 					locked     <= 1'b0;
 					d_oe       <= 1'b0;
+					sas_n      <= 1'b1;
 					st         <= S_IDLE;
+					finish_cycle();
 				end
-				else if (ta) begin
+				else if (t_retry) begin
+					// rerun the transfer from its start; with BG negated (and
+					// no locked sequence held without BGR) the bus goes first
+					sas_n <= 1'b1;
+					if (!keep_bus) begin
+						d_oe <= 1'b0;
+						st   <= S_RETRY;
+					end
+					else begin
+						a32   <= cur.addr[3:2];
+						a_o   <= cur.addr;
+						d_o   <= (cur.siz == SIZ_LINE) ? line_word(cur_wd, cur.addr[3:2]) : cur_wd[31:0];
+						ts_n  <= 1'b0;
+						ign   <= icount(cur.rd, 1'b0);
+						st    <= S_C1;
+					end
+				end
+				else if (t_ok) begin
+					logic [1:0] lw;
+					lw = cur.addr[3:2] + beat;           // the long word this beat moves
 					if (cur.rd) begin
 						rvalid  <= 1'b1;
 						rclient <= cur_c;
 						rdata   <= d_i;
-						rbeat   <= cur_a32;
+						rbeat   <= lw;
 						ravec   <= !avec_n;
-						if (beat == 2'd0) rtci <= !tci_n;
+						if (beat == 2'd0 && !inhibited) rtci <= !tci_n;
 					end
-					if (!is_line || beat == 2'd3) begin
-						done[cur_c] <= 1'b1;
-						if (cur.lock && cur.locke) locked <= 1'b0;
-						d_oe <= 1'b0;
-						st   <= S_IDLE;
+					if (last_beat) begin
+						if (!cur.rd && m_hold) begin
+							sas_n  <= 1'b1;
+							h_last <= 1'b1;
+							st     <= S_HOLD;
+						end
+						else begin
+							d_oe  <= 1'b0;
+							sas_n <= 1'b1;
+							st    <= S_IDLE;
+							done[cur_c] <= 1'b1;
+							finish_cycle();
+						end
 					end
 					else begin
 						beat <= beat + 1'd1;
-						if (beat == 2'd0 && !tbi_n) begin
+						if ((beat == 2'd0 && !inhibited && !tbi_n) || inhibited) begin
+							// TBI with the first TA: the rest as long words
 							inhibited <= 1'b1;
-							st        <= S_GAP;
+							a32       <= lw + 2'd1;
+							sas_n     <= 1'b1;
+							h_last    <= 1'b0;
+							st        <= (!cur.rd && m_hold) ? S_HOLD : S_GAP;
 						end
-						else if (inhibited) begin
-							st <= S_GAP;
+						else if (!cur.rd && m_hold) begin
+							sas_n  <= 1'b1;
+							h_last <= 1'b0;
+							st     <= S_HOLD;
 						end
 						else begin
-							// burst: the slave advances A3:A2
-							d_o <= line_word(cur_wd, cur_a32 + 2'd1);
+							// burst: the next long word, after its ignore states
+							d_o   <= line_word(cur_wd, lw + 2'd1);
+							ign   <= icount(cur.rd, 1'b1);
+							sas_n <= (icount(cur.rd, 1'b1) != 4'd0);
 						end
 					end
 				end
+				else
+					sas_n <= 1'b1;   // a wait state: SAS marks only the first sample (2.4.3)
 			end
 
 			default: st <= S_IDLE;
 			endcase
 
-			if (rsto_req || rsto_pend) begin
-				rsto_n    <= 1'b0;
-				rsto_cnt  <= 10'd512;
-				rsto_pend <= 1'b0;
+			// CLA (7.7.7): sampled from the edge after TS on, on every edge
+			// of a burst, the ignore states included; each sample advances
+			// A3:A2, wrapping in the line.  (A retry's restart overrides.)
+			if ((st == S_C1 || st == S_DATA || st == S_HOLD) && beat_line && !cla_n &&
+			    !(st == S_DATA && ign == 4'd0 && t_retry)) begin
+				a32      <= a32 + 2'd1;
+				a_o[3:2] <= a32 + 2'd1;
+			end
+
+			if (start) begin
+				// drive the transfer (S_IDLE: the request picked; S_RETRY: cur)
+				busreq_t r;
+				logic [127:0] w;
+				r = (st == S_RETRY) ? cur : breq[pick_c];
+				w = (st == S_RETRY) ? cur_wd : wdata[pick_c];
+				ab        <= B_EXP;
+				bb_n_o    <= 1'b0;
+				bb_oe     <= 1'b1;
+				beat      <= 2'd0;
+				inhibited <= 1'b0;
+				a32       <= r.addr[3:2];
+				a_o       <= r.addr;
+				a_oe      <= 1'b1;
+				rw_n      <= r.rd;
+				siz       <= r.siz;
+				bs_n      <= bsel(r.siz, r.addr[1:0]);
+				tt        <= r.tt;
+				tm        <= r.tm;
+				tln       <= r.tln;
+				upa       <= r.upa;
+				ciout_n   <= !r.ci;
+				lock_n    <= !r.lock;
+				locke_n   <= !(r.lock && r.locke);
+				d_o       <= (r.siz == SIZ_LINE) ? line_word(w, r.addr[3:2]) : w[31:0];
+				d_oe      <= !r.rd;
+				ts_n      <= 1'b0;
+				tip_n     <= 1'b0;
+				tip_oe    <= 1'b1;
+				ign       <= icount(r.rd, 1'b0);
+				st        <= S_C1;
 			end
 		end
 	end
 end
 
+// a transfer ended (normally or with a bus error): LOCK/LOCKE negate after
+// the LOCKE transfer; with BG negated the tenure ends unless a locked
+// sequence holds the bus
+task automatic finish_cycle();
+	if (cur.lock && cur.locke) begin
+		locked  <= 1'b0;
+		lock_n  <= 1'b1;
+		locke_n <= 1'b1;
+	end
+endtask
+
 assign idle      = (st == S_IDLE);
-assign own       = owner;
-assign rsto_busy = !rsto_n || rsto_pend;
+assign own       = (ab == B_IMP) || (ab == B_EXP);
+assign rsto_busy = !rsto_n;
 
 endmodule
