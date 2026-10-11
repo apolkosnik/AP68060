@@ -869,10 +869,11 @@ int eng_from;
 initial if (!$value$plusargs("engtrace=%d", eng_from)) eng_from = -1;
 always_ff @(posedge clk)
 	if (eng_from >= 0 && cycles >= eng_from && cycles < eng_from + 80)
-		$display("%8d ENG e=%0d breq=%b gnt=%b done=%b err=%b rv=%b bo_pa=%08x left=%0d pn=%0d rd=%b line=%b cancel=%b sn_ph=%0d biu_st=%0d bclk=%b",
+		$display("%8d ENG e=%0d breq=%b gnt=%b done=%b err=%b rv=%b bo_pa=%08x left=%0d pn=%0d rd=%b line=%b cancel=%b sn_ph=%0d biu_st=%0d bclk=%b | sb n=%0d sel_q=%b own=%b bi_gnt=%b bi_done=%b err=%b",
 		         cycles, dut.dmu.e_st, dut.dmu.e_breq, dut.dmu.b_gnt, dut.dmu.b_done, dut.dmu.b_err,
 		         dut.dmu.b_rvalid, dut.dmu.bo_pa, dut.dmu.bo_left, dut.dmu.bo_pn, dut.dmu.bo.rd,
-		         dut.dmu.bo.line, dut.dmu.bo_cancel, dut.dmu.sn_ph, dut.biu.st, bclk_en);
+		         dut.dmu.bo.line, dut.dmu.bo_cancel, dut.dmu.sn_ph, dut.biu.st, bclk_en,
+		         dut.dmu.sb_n, dut.dmu.sel_q, dut.dmu.own_sb, dut.dmu.bi_gnt, dut.dmu.bi_done, dut.dmu.sb_err);
 
 // +fptrace=<from>: the FPU state each cycle for 300 cycles
 int fpt_from;

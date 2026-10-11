@@ -101,6 +101,9 @@ module ap68060_backend
 	input  logic        mt_fault,       // ... or its access error
 	input  logic [31:0] mt_fslw,
 	input  logic        dm_lkend,       // a LOCKE write completed (BUSCR sequences)
+	input  logic        sb_empty,       // the DMU's store buffer is empty
+	input  logic        sb_err,         // ... and one of its writes ended in TEA
+	output logic        sb_err_ack,     // the access error for it is being taken
 	output logic        adv_dc1,        // DC1 -> DC2
 	output logic        adv_dc2,        // DC2 -> EX
 	output logic        adv_ex,         // EX -> WB
@@ -1188,18 +1191,26 @@ wire trace_due   = wb_bound && tr_now;
 // the same boundary, and interrupts are not sampled from the start of an
 // exception's processing until the first instruction of its handler has
 // executed (the boundary at the end of an exception routine, xstk)
-wire take_irq    = irq_pend && !trace_due && ((wb_bound && !xstk) || (stopped && !wb_v));
-wire take_trace  = trace_due;
+// a buffered write that ended in TEA: once the store buffer is empty, an
+// access error (FSLW.SBE) at the next boundary, or instead of the
+// exception the instruction at WB takes (MC68060UM 8.4.6); it goes before
+// a trace or an interrupt.  (wb_refetch: below, not an exception.)
+wire wb_refetch;
+wire take_sbe    = sb_err && sb_empty &&
+                   ((adv_wb && wb_is_exc && !wb_refetch) || wb_bound || (stopped && !wb_v));
+wire take_irq    = irq_pend && !trace_due && !take_sbe && ((wb_bound && !xstk) || (stopped && !wb_v));
+wire take_trace  = trace_due && !take_sbe;
+assign sb_err_ack = take_sbe;
 // a speculative fetch fault (code 1) is no exception: WB refetches the
 // instruction once on demand, and only a second fault there is an access
 // error (rt_armed/rt_pc)
 // exceptions that stack the next instruction: the instruction completed
 wire wb_post_trap = (wb_exc >= 8'd32 && wb_exc < 8'd48) ||
                     wb_exc == 8'd5 || wb_exc == 8'd6 || wb_exc == 8'd7;
-wire wb_refetch  = adv_wb && wb_v && (wb_exc == EXC_IFS || wb_exc == EXC_IFSA);
+assign wb_refetch = adv_wb && wb_v && (wb_exc == EXC_IFS || wb_exc == EXC_IFSA);
 logic        rt_armed;
 logic [31:0] rt_pc;
-wire x_go        = (adv_wb && wb_is_exc && !wb_refetch) || take_trace || take_irq;
+wire x_go        = (adv_wb && wb_is_exc && !wb_refetch) || take_trace || take_irq || take_sbe;
 
 // register file write ports.  Front: the AG address updates and the EX
 // result.  Back: the WB commit (a result beats an address update), the
@@ -1237,10 +1248,15 @@ end
 wire wb_reset    = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd1);
 wire wb_mt       = (wb_u.op == OP_MISC) && (wb_u.cond >= 4'd3) && (wb_u.cond <= 4'd5);
 logic mt_seen;                // the DMU finished this WB uop's maintenance
-assign wb_hold = wb_v && !wb_is_exc &&
+// the store buffer empties before exception processing and before a
+// synchronizing instruction (MC68060UM 5.10, 8.4.6): WB waits with an
+// exception, a serializing uop, or an instruction's last uop when a trace
+// or an interrupt is due at its boundary
+wire sb_wait = !sb_empty && (wb_is_exc || wb_u.ser || (wb_u.last && (irq_pend || tr_now)));
+assign wb_hold = wb_v && ((!wb_is_exc &&
                  ((wb_st && !dm_st_rdy) || (wb_st && dm_st_fault) ||
                   (wb_reset && (!rst_issued || rsto_busy)) ||
-                  (wb_mt && !mt_seen));
+                  (wb_mt && !mt_seen))) || sb_wait);
 
 assign mt_v      = wb_v && wb_mt && !wb_is_exc && !mt_seen;
 assign mt_op     = (wb_u.cond == 4'd3) ? (wb_u.imm_b[5] ? 3'd2 : 3'd1) :
@@ -1315,6 +1331,17 @@ always_comb begin
 	x_kind = take_irq && !(adv_wb && wb_is_exc) ? EK_IRQ :
 	         (x_fmt == 4'h4) ? EK_FMT4 : (x_fmt == 4'h2 || x_fmt == 4'h3) ? EK_FMT2 : EK_FMT0;
 	x_ssp  = R_ISP;
+	// a store buffer bus error: an access error, the stacked address
+	// meaningless; the PC is the one the exception due here would stack,
+	// or where execution continues (8.4.6)
+	if (take_sbe) begin
+		x_vec  = 8'd2;
+		x_fmt  = 4'h4;
+		x_kind = EK_FMT4;
+		x_fslw = 32'h0000_2000;          // SBE
+		x_addr = 32'd0;
+		if (!(adv_wb && wb_is_exc)) x_pc = (stopped && !wb_v) ? stop_pc : wb_next;
+	end
 
 	// the SR inside the handler: S set, T cleared; an interrupt raises the
 	// mask to its level and clears M (the 68060 keeps M only as a flag)

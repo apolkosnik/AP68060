@@ -142,18 +142,23 @@ module ap68060_dmu
 	output logic        iatc_wfc2,
 	output atce_t       iatc_went,
 
-	// BIU client
-	output logic        b_req,
-	output busreq_t     b_breq,
-	output logic [127:0] b_wdata,
-	input  logic        b_gnt,
-	input  logic        b_done,
-	input  logic        b_err,
-	input  logic        b_rvalid,
+	// BIU client (the store buffer ahead of the engine)
+	output logic        bi_req,
+	output busreq_t     bi_breq,
+	output logic [127:0] bi_wdata,
+	input  logic        bi_gnt,
+	input  logic        bi_done,
+	input  logic        bi_err,
+	input  logic        bi_rvalid,
 	input  logic [31:0] b_rdata,
 	input  logic  [1:0] b_rbeat,
 	input  logic        b_ravec,
 	input  logic        b_rtci,
+
+	// store buffer (CACR.ESB, MC68060UM 5.9, 5.10, 8.4.6)
+	output logic        sb_empty,       // no buffered write left
+	output logic        sb_err,         // a buffered write ended in TEA (FSLW.SBE)
+	input  logic        sb_err_ack,     // ... the access error for it is taken
 
 	// bus snooper
 	input  logic        sn_req,         // level: the snooper wants the cache
@@ -597,7 +602,7 @@ typedef enum logic [5:0] {
 	E_IDLE,
 	E_S_START, E_S_XL, E_S_XLW, E_S_XL2, E_S_ACT, E_S_RD, E_S_RDW, E_S_RD2, E_S_BUSD,
 	E_S_NEXT, E_S_DONE, E_SP_W, E_SP_2, E_SP_3,
-	E_W_START, E_W_PART, E_W_DONE,
+	E_W_START, E_W_PART, E_W_DONE, E_SB,
 	E_M_START, E_M_PG, E_M_SCAN, E_M_SCANW, E_M_SCAN2, E_M_IC, E_M_DONE, E_M_CLR,
 	E_M_PLW, E_M_PL2, E_M_PLD,
 	E_FILL, E_FILLW, E_FILL_W, E_FILL_INS, E_PUSHV, E_PUSHVW, E_PUSHV_W, E_PUSHV_B,
@@ -801,6 +806,103 @@ assign st_rdy   = st_rdy_r || (wb_fast && !sn_frz) || (wfs_p1 && m4.x1.hit && !s
 assign st_fault = st_rdy_r && st_fault_r;
 
 //--------------------------------------------------------------------------
+// store buffer: a four-entry FIFO of bus write cycles (one entry per cycle,
+// up to four bytes) for writes to write-through and noncachable imprecise
+// pages while CACR.ESB is set.  The WB store completes once its pieces
+// are in; the buffer then writes them out ahead of every other bus cycle
+// of the DMU, and so ahead of the fetch's too (it is the BIU's first
+// client), as 5.10 requires: no other bus cycle passes a buffered write.
+// A TEA on one is recorded (sb_err) and the rest still go out (8.4.6).
+//--------------------------------------------------------------------------
+typedef struct packed {
+	logic [31:0] pa;
+	logic  [2:0] n;           // bytes: 1, 2 or 4 (an aligned bus cycle)
+	logic [31:0] wd;          // left aligned
+	logic  [1:0] tt;
+	logic  [2:0] tm;
+	logic  [1:0] upa;
+	logic        ci;
+} sbent_t;
+sbent_t      sb [4];
+logic  [2:0] sb_n;
+logic        sel_q;               // the BIU saw the store buffer's request last cycle
+logic        own_sb;              // the transaction in progress is the buffer's
+logic        sb_fly;              // the head is on the bus (granted, not done)
+wire         sb_room = (sb_n < 3'd4);
+wire         sb_push = (e_st == E_SB) && sb_room;
+// present the head while it is not on the bus already (the BIU may start
+// again in the clock its done comes); the engine's request waits while the
+// buffer holds anything, so no bus cycle of the engine passes a write
+wire         sb_sel  = (sb_n != 3'd0) && !sb_fly;
+wire         sb_pop  = own_sb && (bi_done || bi_err);
+assign       sb_empty = (sb_n == 3'd0);
+
+// the engine's view of the BIU port
+logic        b_req;
+busreq_t     b_breq;
+logic [127:0] b_wdata;
+wire         b_gnt    = bi_gnt && !sel_q;
+wire         b_done   = bi_done && !own_sb;
+wire         b_err    = bi_err && !own_sb;
+wire         b_rvalid = bi_rvalid && !own_sb;
+
+always_comb begin
+	bi_req   = sb_sel || (b_req && sb_n == 3'd0);
+	bi_breq  = b_breq;
+	bi_wdata = b_wdata;
+	// (the head stays presented while it is on the bus: the BIU reads its
+	// data again for a retry or the extra write hold)
+	if (sb_sel || sb_fly) begin
+		bi_breq       = '0;
+		bi_breq.addr  = sb[0].pa;
+		bi_breq.siz   = (sb[0].n == 3'd4) ? SIZ_L : (sb[0].n == 3'd2) ? SIZ_W : SIZ_B;
+		bi_breq.rd    = 1'b0;
+		bi_breq.tt    = sb[0].tt;
+		bi_breq.tm    = sb[0].tm;
+		bi_breq.upa   = sb[0].upa;
+		bi_breq.ci    = sb[0].ci;
+		bi_wdata      = {96'd0, (sb[0].n == 3'd1) ? {4{sb[0].wd[31:24]}} :
+		                        (sb[0].n == 3'd2) ? {2{sb[0].wd[31:16]}} : sb[0].wd};
+	end
+end
+
+always_ff @(posedge clk) begin
+	if (!nreset) begin
+		sb_n <= '0; sel_q <= 1'b0; own_sb <= 1'b0; sb_fly <= 1'b0; sb_err <= 1'b0;
+		for (int i = 0; i < 4; i++) sb[i] <= '0;
+	end
+	else begin
+		logic [2:0] n;
+		n = sb_n;
+		sel_q <= sb_sel;
+		if (bi_gnt) begin
+			own_sb <= sel_q;
+			sb_fly <= sel_q;
+		end
+		if (sb_pop) sb_fly <= 1'b0;
+		if (sb_pop) begin
+			for (int i = 0; i < 3; i++) sb[i] <= sb[i + 1];
+			n = n - 3'd1;
+			if (bi_err) sb_err <= 1'b1;
+		end
+		if (sb_push) begin
+			sbent_t e;
+			e.pa  = bo_pa;
+			e.n   = bo_np;
+			e.wd  = bo_wd;
+			e.tt  = bo.tt;
+			e.tm  = bo.tm;
+			e.upa = bo.upa;
+			e.ci  = bo.ci;
+			sb[n[1:0]] <= e;
+			n = n + 3'd1;
+		end
+		sb_n <= n;
+		if (sb_err_ack) sb_err <= 1'b0;
+	end
+end
+
+//--------------------------------------------------------------------------
 // BIU request from the engine's bus step
 //--------------------------------------------------------------------------
 logic e_breq;
@@ -829,7 +931,7 @@ end
 
 assign dm_hold1 = sn_frz || steal || steal_q ||
                   (e_st != E_IDLE && e_st != E_W_START &&
-                   e_st != E_W_PART && e_st != E_W_DONE);
+                   e_st != E_W_PART && e_st != E_W_DONE && e_st != E_SB);
 
 always_ff @(posedge clk) begin
 	st_rdy_r    <= 1'b0;
@@ -1397,8 +1499,21 @@ always_ff @(posedge clk) begin
 				bo_wd    <= e_acc;
 				bo_line  <= mv_line;
 				e_ret    <= E_W_DONE;
-				e_st     <= E_BUS;
+				// write-through and noncachable imprecise writes go through
+				// the store buffer when it is enabled (5.9); locked ones,
+				// MOVE16 and acknowledge cycles never do
+				e_st     <= (cacr[29] && !m4.r.lock && (m4.r.msz != SZ_Q) && (m4.r.ack == 2'd0) &&
+				             (e_x.cm == 2'b00 || e_x.cm == 2'b11)) ? E_SB : E_BUS;
 			end
+			end
+		end
+		E_SB: begin
+			// one bus cycle's piece a clock into the store buffer
+			if (sb_room) begin
+				bo_wd   <= bo_wd << (8 * bo_np);
+				bo_pa   <= bo_pa + {29'd0, bo_np};
+				bo_left <= bo_left - bo_np;
+				if (bo_left == bo_np) e_st <= E_W_DONE;
 			end
 		end
 		E_W_DONE: begin

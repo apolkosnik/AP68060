@@ -138,6 +138,7 @@ localparam int NC = 2;
 logic [NC-1:0] b_req, b_gnt, b_done, b_err;
 logic          b_own;
 logic          sn_ovf, sn_busy, sn_act;
+logic          sb_empty, sb_err, sb_err_ack;     // the DMU's store buffer
 busreq_t       b_breq [NC];
 logic [127:0]  b_wdata [NC];
 logic          b_rvalid;
@@ -256,6 +257,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES),
 	.dm_fvec(dm_fvec), .dm_faddr(dm_faddr), .dm_fslw(dm_fslw), .if_cause(if_cause),
 	.dm_st_v(dm_st_v), .dm_st_data(dm_st_data), .dm_st_rdy(dm_st_rdy),
 	.dm_st_fault(dm_st_fault), .dm_st_fslw(dm_st_fslw), .dm_lkend(dm_lkend),
+	.sb_empty(sb_empty), .sb_err(sb_err), .sb_err_ack(sb_err_ack),
 	.dm_hold1(dm_hold1), .mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope),
 	.mt_caches(mt_caches), .mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng),
 	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
@@ -293,9 +295,10 @@ ap68060_dmu dmu (
 	.iatc_flush_ng(iatc_flush_ng), .iatc_flush_la(iatc_flush_la),
 	.iatc_flush_fc2(iatc_flush_fc2), .iatc_wr(iatc_wr), .iatc_wla(iatc_wla),
 	.iatc_wfc2(iatc_wfc2), .iatc_went(iatc_went),
-	.b_req(b_req[0]), .b_breq(b_breq[0]), .b_wdata(b_wdata[0]),
-	.b_gnt(b_gnt[0]), .b_done(b_done[0]), .b_err(b_err[0]),
-	.b_rvalid(b_rvalid && b_rclient == 1'b0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
+	.bi_req(b_req[0]), .bi_breq(b_breq[0]), .bi_wdata(b_wdata[0]),
+	.bi_gnt(b_gnt[0]), .bi_done(b_done[0]), .bi_err(b_err[0]),
+	.bi_rvalid(b_rvalid && b_rclient == 1'b0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
+	.sb_empty(sb_empty), .sb_err(sb_err), .sb_err_ack(sb_err_ack),
 	.b_ravec(b_ravec), .b_rtci(b_rtci),
 	.sn_req(sn_req), .sn_pa(sn_pa), .sn_look(sn_look), .sn_hit(sn_hit),
 	.sn_dirty(sn_dirty), .sn_line(sn_line), .sn_inv(sn_inv), .sn_act(sn_act), .sn_wr(sn_wr),
