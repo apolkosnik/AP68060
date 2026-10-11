@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AP68060 microcode and decoder generator.
+"""AP68060 microcode and decoder generator (MC68060).
 
 Writes
   rtl/gen/ap68060_ucode_defs.svh   selector encodings shared with D2
@@ -13,7 +13,8 @@ indirection into a pointer load first, and repeats a MOVEM micro-instruction
 once per register in the mask.
 
 Operand selectors (a, b, d): symbolic names below, or a physical register
-'D0'..'D7', 'A0'..'A6', 'USP', 'ISP', 'MSP', 'T0'..'T13'.
+'D0'..'D7', 'A0'..'A6', 'USP', 'ISP' (the 68060's one supervisor stack),
+'T0'..'T13' (physical register 17 is unused: the 68060 has no MSP).
 
   EA0/EA1   the instruction's effective address: a register, the immediate,
             or memory (a load when used as a or b, a store when used as d;
@@ -23,7 +24,7 @@ Operand selectors (a, b, d): symbolic names below, or a physical register
   AX AY     A register in opword bits 11:9 / 2:0 (A7 mapped by S/M)
   IMM       the immediate field;  QUICK  opword 11:9 (0 -> 8)
   MOVEQ     sign-extended opword 7:0;  SHCNT  shift count (quick or Dx)
-  SP SSP    A7 / the supervisor stack of the exception
+  SP SSP    A7 / the supervisor stack (ISP)
   NPC       address of the next instruction;  PC  of this one
   ZERO      0;  CONST  the micro-instruction's constant
   X1R X1DL X1DH X1DU X2DC X2DU X2R   extension-word registers
@@ -56,20 +57,20 @@ for i in range(8):
     PHYS['D%d' % i] = i
 for i in range(7):
     PHYS['A%d' % i] = 8 + i
-PHYS.update(USP=15, ISP=16, MSP=17)
+PHYS.update(USP=15, ISP=16)
 for i in range(14):
     PHYS['T%d' % i] = 18 + i
 
 
 # selector encoding: 0-39 symbolic, 40-56 the physical registers USP, ISP,
-# MSP, T0-T13 (physical 15-31) that microcode may name directly
+# (17 unused), T0-T13 (physical 15-31) that microcode may name directly
 def sel(x):
     if x is None:
         return 0
     if x in SYMI:
         return SYMI[x]
     p = PHYS[x]
-    assert p >= 15, 'microcode names only USP/ISP/MSP/T0-T13: ' + x
+    assert p >= 15, 'microcode names only USP/ISP/T0-T13: ' + x
     return 40 + (p - 15)
 
 
@@ -94,7 +95,9 @@ DSEL = {n: i for i, n in enumerate(['CONST', 'IMM', 'NIMM', 'QUICK', 'NQUICK',
                                     'IMMC', 'SZB'])}
 MEM = {None: 0, 'LD': 1, 'ST': 2, 'RMW': 3}
 # EAP: the instruction's EA space (program space for PC-relative / #imm)
-MFC = {None: 0, 'SFC': 1, 'DFC': 2, 'SUP': 3, 'IACK': 4, 'EAP': 5}
+# BKPT: the breakpoint acknowledge read (TT=3, TM=0); LPS: the LPSTOP
+# broadcast write (TT=3, TM=0)
+MFC = {None: 0, 'SFC': 1, 'DFC': 2, 'SUP': 3, 'IACK': 4, 'EAP': 5, 'BKPT': 6, 'LPS': 7}
 BR = {None: 0, 'COND': 1, 'IMM': 2, 'EA': 3, 'A': 4, 'B': 5}
 # condition sources: opword cc (11:8), the opcode entry's, the extension
 # word's ({ext[10], ext[11]}: 64-bit, signed), or a constant
@@ -147,6 +150,7 @@ def J(cond, target):
 # condition); 'CCR' as ccr takes the entry's flag mask.
 
 R('ILLEGAL', U(last=1))          # exception set by D1 (vector in the record)
+R('UNIMPL', U(last=1))           # unimplemented integer instruction: D1, vector 61
 R('DEC_EXC', U(last=1))          # decode-time exception carrier
 
 # ALU <ea>,Dn / Dn,<ea> / #imm,<ea>
@@ -247,17 +251,12 @@ R('UNPK_M',
 # multiply / divide (word forms); the signed variant is the entry cond
 R('MULW', U(op='EOP', cond='EC', a='EA0', b='DX', d='DX', ccr='NZVC', last=1))
 R('DIVW', U(op='EOP', cond='EC', a='EA0', b='DX', d='DX', ccr='NZVC', last=1))
-# long forms: ext word Dl/Dq = 14:12, Dh/Dr = 2:0, bit 11 signed, bit 10
-# 64-bit.  Write order follows the 68040: MULx.L 64 writes Dh then Dl,
-# DIVx.L writes Dr then Dq (a shared register keeps low / quotient).
-R('MULL',
-  U(jc='EXT10', jt='MULL.2'),
-  U(op='MUL', cond='X1', sz='L', a='EA0', b='X1DL', d='X1DL', ccr='NZVC', last=1),
-  U(op='MUL', cond='X1', sz='L', a='EA0', b='X1DL', ccr='NZVC'),
-  U(op='MDRES', cond=0, d='X1DH'),
-  U(op='MDRES', cond=1, d='X1DL', last=1))
+# long forms: ext word Dl/Dq = 14:12, Dr = 2:0, bit 11 signed.  The 68060
+# has only the 32-bit forms: bit 10 (a 64-bit product or dividend) is the
+# unimplemented integer instruction exception, raised by D1.  DIVx.L
+# writes Dr then Dq (a shared register keeps the quotient).
+R('MULL', U(op='MUL', cond='X1', sz='L', a='EA0', b='X1DL', d='X1DL', ccr='NZVC', last=1))
 R('DIVL',
-  U(op='MDHI', a='X1DH'),
   U(op='DIV', cond='X1', sz='L', a='EA0', b='X1DL', ccr='NZVC'),
   U(op='MDRES', cond=0, d='X1DH'),
   U(op='MDRES', cond=1, d='X1DL', last=1))
@@ -305,8 +304,8 @@ R('UNLK',   U(op='MOV', sz='L', a='LD', ag='POPR', agb='AY', agw='SP', msz='L',
               mem='LD', d='AY', last=1))
 
 # status register
-R('MOVE_FROM_SR',  U(op='SPR', sz='W', const=0x10, b='EA0R', d='EA0', last=1))
-R('MOVE_FROM_CCR', U(op='SPR', sz='W', const=0x11, b='EA0R', d='EA0', last=1))
+R('MOVE_FROM_SR',  U(op='SPR', sz='W', const=0x20, b='EA0R', d='EA0', last=1))
+R('MOVE_FROM_CCR', U(op='SPR', sz='W', const=0x21, b='EA0R', d='EA0', last=1))
 R('MOVE_TO_CCR',   U(op='CCRLOG', cond=3, a='EA0', ccr='XNZVC', last=1))
 R('MOVE_TO_SR',    U(op='SRLOG', cond=3, a='EA0', ccr='XNZVC', last=1))
 R('CCR_LOG',       U(op='CCRLOG', cond='EC', a='IMM', ccr='XNZVC', last=1))
@@ -314,25 +313,37 @@ R('SR_LOG',        U(op='SRLOG', cond='EC', a='IMM', ccr='XNZVC', last=1))
 R('MOVE_TO_USP',   U(op='MOV', sz='L', a='AY', d='USP', last=1))
 R('MOVE_FROM_USP', U(op='MOV', sz='L', a='USP', d='AY', last=1))
 
-# TRAP #n, ILLEGAL and BKPT raise their exception from D1
+# TRAP #n and ILLEGAL raise their exception from D1.  BKPT runs the
+# breakpoint acknowledge cycle (TT=3, TM=0, A=0, a byte read; TA or TEA
+# both end it) and then takes the illegal instruction exception (MISC 9)
 R('TRAP',  U(last=1))
-R('BKPT',  U(last=1))
+R('BKPT',  U(op='MOV', sz='B', msz='B', a='LD', mem='LD', mfc='BKPT', ag='BASED', agb='ZERO',
+             const=0),
+           U(op='MISC', cond=9, last=1))
 R('NOP',   U(op='MISC', cond=0, ser=1, last=1))
 R('RESET', U(op='MISC', cond=1, ser=1, last=1))
 R('STOP',  U(op='MISC', cond=2, a='IMM', ser=1, last=1))
+# LPSTOP: the broadcast cycle (TT=3, TM=0, a word write of the new SR at
+# $FFFFFFFE, D31-D16 high), then the stopped state (low power, PST $16)
+R('LPSTOP', U(op='MOV', sz='W', msz='W', a='IMM', mem='ST', mfc='LPS', ag='BASED', agb='ZERO',
+              const=-2),
+            U(op='MISC', cond=8, a='IMM', ser=1, last=1))
+R('HALT',  U(op='MISC', cond=10, ser=1, last=1))
+R('PULSE', U(op='MISC', cond=11, last=1))
 
 # not yet implemented in this revision: they raise F-line/illegal through
 # D1 until their routines land (see doc/STATUS.md)
-# MOVEC: USP/MSP/ISP live in the register file, the rest are special
-# registers written at WB (serializing)
+# MOVEC: USP lives in the register file, the rest are special registers
+# written at WB (serializing).  D1 rejects the numbers the 68060 does not
+# have (ISP and MSP among them)
 R('MOVEC_RD',
   U(jc='CREG_RF', jt='MOVEC_RD.2'),
   U(op='SPR', sz='L', a='CREG', d='X1R', last=1),
-  U(op='MOV', sz='L', a='CREGR', d='X1R', last=1))
+  U(op='MOV', sz='L', a='USP', d='X1R', last=1))
 R('MOVEC_WR',
   U(jc='CREG_RF', jt='MOVEC_WR.2'),
   U(op='SPW', sz='L', a='X1R', b='CREG', ser=1, last=1),
-  U(op='MOV', sz='L', a='X1R', d='CREGR', ser=1, last=1))
+  U(op='MOV', sz='L', a='X1R', d='USP', ser=1, last=1))
 
 # MOVEM: one micro-instruction repeated per register (D2 loop); an empty
 # mask transfers nothing and leaves An alone
@@ -350,34 +361,6 @@ R('MOVEM_MR',
 R('MOVE16',
   U(op='MOV', sz='L', msz='Q', a='EA0', noupd=1),
   U(op='MOV', sz='L', msz='Q', d='EA1', upd2=1, last=1))
-
-# MOVEP: bytes at d16(Ay) + 0, 2 (, 4, 6), most significant first
-def _mpb(k, **kw):
-    return U(op='MOV', sz='B', msz='B', ag='BASED', agb='AY', dsel='IMMC',
-             const=2 * k, **kw)
-R('MOVEP_MR',
-  _mpb(0, a='LD', b='ZERO', d='T0'),
-  U(op='LSL', sz='L', a='CONST', const=8, b='T0', d='T0'),
-  _mpb(1, a='LD', b='T0', d='T0'),
-  U(jc='SZ_L', jt='MOVEP_MR.5'),
-  U(op='MOV', sz='W', a='T0', b='DX', d='DX', last=1),
-  U(op='LSL', sz='L', a='CONST', const=8, b='T0', d='T0'),
-  _mpb(2, a='LD', b='T0', d='T0'),
-  U(op='LSL', sz='L', a='CONST', const=8, b='T0', d='T0'),
-  _mpb(3, a='LD', b='T0', d='T0'),
-  U(op='MOV', sz='L', a='T0', d='DX', last=1))
-R('MOVEP_RM',
-  U(jc='SZ_L', jt='MOVEP_RM.4'),
-  U(op='LSR', sz='L', a='CONST', const=8, b='DX', d='T0'),
-  _mpb(0, a='T0', mem='ST'),
-  _mpb(1, a='DX', mem='ST', last=1),
-  U(op='LSR', sz='L', a='CONST', const=24, b='DX', d='T0'),
-  _mpb(0, a='T0', mem='ST'),
-  U(op='LSR', sz='L', a='CONST', const=16, b='DX', d='T0'),
-  _mpb(1, a='T0', mem='ST'),
-  U(op='LSR', sz='L', a='CONST', const=8, b='DX', d='T0'),
-  _mpb(2, a='T0', mem='ST'),
-  _mpb(3, a='DX', mem='ST', last=1))
 
 # bit fields.  BFSET latches offset (BFO) and width (BFW) in EX and returns
 # the signed byte offset of the field (offset >> 3).  The memory form works
@@ -426,46 +409,16 @@ R('CAS',
   U(op='LATCH', sz='L', a='X1DH'),
   U(op='CAS', a='X1DU', b='EA0', d='X1DH', mem='RMW', ag='EA0', lock=1, locke=1,
     ccr='NZVC', last=1))
-# CAS2: two locked reads, the compare leaves eq in EX; the first write
-# only on a match, the second always (Du2 or the second value read, with
-# LOCKE); on a mismatch Dc1/Dc2 take the values read
-R('CAS2',
-  U(op='MOV', a='LD', d='T0', ag='BASED', agb='X1R', lock=1),
-  U(op='MOV', a='LD', d='T1', ag='BASED', agb='X2R', lock=1),
-  U(op='CAS2C', cond=0, a='X1DH', b='T0', ccr='NZVC'),
-  U(op='CAS2C', cond=1, a='X2DC', b='T1', ccr='NZVC'),
-  U(op='CAS2W', cond=0, a='X1DU', mem='ST', ag='BASED', agb='X1R', lock=1),
-  U(op='CAS2W', cond=1, a='X2DU', b='T1', mem='ST', ag='BASED', agb='X2R', lock=1, locke=1),
-  U(op='CAS2R', a='T0', b='X1DH', d='X1DH'),
-  U(op='CAS2R', a='T1', b='X2DC', d='X2DC', last=1))
-
-# CHK2/CMP2 <ea>,Rn: bounds at EA and EA + size; cond 'CHK2' carries
-# {Rn is a data register, CHK2}
-R('CHK2',
-  U(ag='LEA0', agw='T1'),
-  U(op='MOV', sz='L', a='LD', d='T0', ag='BASED', agb='T1', const=0),
-  U(op='MOV', sz='L', a='LD', d='T2', ag='BASED', agb='T1', dsel='SZB'),
-  U(op='LATCH', sz='L', a='T0'),
-  U(op='CHK2B', cond='CHK2', a='T2', b='X1R', ccr='ZC', last=1))
-
-# RTE: SR, PC and the format word; RTEF turns the format into the frame
-# length (exception 14 on an unknown format; format $1 marks a throwaway
-# frame), SP += length, then RTE loads SR and jumps -- for a throwaway
-# frame back to this RTE, which then runs on the stack the new SR selects
-# A format $7 frame also gives its EA and SSW (cond 11: these two reads
-# exist only for format $7, decided at AG once RTEF has executed): with SSW
-# CM set the MOVEM at the frame's PC continues from the stacked EA (MISC 6
-# arms it; MC68040UM 8.4.6.5).
+# RTE: the format word first (exception 14 on a format the 68060 does not
+# use: $0 8, $2 and $3 12, $4 16 bytes), then SR and PC; SP += length and
+# RTE loads SR and jumps.  The 68060 restarts every faulted instruction,
+# so no frame carries state back.
 R('RTE',
-  U(op='MOV', sz='W', msz='W', a='LD', d='T1', ag='BASED', agb='SP', const=0),
-  U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2),
   U(op='MOV', sz='W', msz='W', a='LD', d='T3', ag='BASED', agb='SP', const=6),
   U(op='RTEF', sz='W', a='T3', d='T0'),
+  U(op='MOV', sz='W', msz='W', a='LD', d='T1', ag='BASED', agb='SP', const=0),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2),
   U(ag='ADDT0', agb='SP', agw='SP'),
-  U(op='MOV', sz='L', msz='L', a='LD', d='T4', ag='BASED', agb='SP', const=-52, cond=11),
-  U(op='MOV', sz='L', msz='W', a='LD', b='ZERO', d='T5', ag='BASED', agb='SP', const=-48,
-    cond=11),
-  U(op='MISC', cond=6, sz='L', a='T4', b='T5'),
   U(op='RTE', sz='W', a='T1', b='T2', last=1))
 # RTR: CCR = (SP)+ word, PC = (SP)+ long
 R('RTR',
@@ -492,14 +445,14 @@ R('MOVES',
 # address register, B the operation word (scope, caches, variant)
 R('CACHE_OP', U(op='MISC', cond=3, sz='L', a='AY', b='OPW', ser=1, last=1))
 R('PFLUSH',   U(op='MISC', cond=4, sz='L', a='AY', b='OPW', ser=1, last=1))
-R('PTEST',    U(op='MISC', cond=5, sz='L', a='AY', b='OPW', ser=1, last=1))
+# PLPAR/PLPAW (An): the translation of An (space: DFC) replaces An
+R('PLPA',     U(op='MISC', cond=5, sz='L', a='AY', b='OPW', d='AY', ser=1, last=1))
 
 # ------------------------------------------------------------------ FPU
 # The FPU interface (rtl/ap68060_fpif.sv) runs the OP_FPU uops in EX; the
 # microcode moves the data.  Every routine starts with CHK (A = extension
 # word, B = operation word).  Dynamic transfers are cancelled at AG (dyn):
-# 1 FMOVEM slot dynk, 2 FSAVE word dynk, 3 FRESTORE word dynk, 4 FMOVEM
-# control slot dynk (FPCR, FPSR, FPIAR).
+# 1 FMOVEM slot dynk, 4 FMOVEM control slot dynk (FPCR, FPSR, FPIAR).
 FC = dict(CHK=0, DISP=1, GET=2, END=3, CRR=4, CRW=5, LIST=6, MVR=7, MVW=8,
           COND=9, DBCC=10, SV0=11, SVW=12, RS0=13, RSW=14, EAL=15)
 
@@ -666,42 +619,40 @@ R('FBCC',    FCHK(), F('COND', br='COND', last=1))
 R('FSCC',    FCHK(), F('COND', sz='B', b='EA0R', d='EA0', last=1))
 R('FDBCC',   FCHK(), F('DBCC', b='DY', d='DY', br='COND', last=1))
 R('FTRAPCC', FCHK(), F('COND', last=1))
-# FSAVE: the frame by the FPU state (NULL, IDLE, UNIMP, BUSY); -(An)
-# writes below An and moves An once every word is out
+# FSAVE: the 68060 frame is always three long words (NULL, IDLE, EXCP);
+# -(An) writes below An and moves An once every word is out
 R('FSAVE',
   FCHK(),
   F('SV0', d='T0'),
-  U(ag='ADDC', agb='T0', agw='T10', const=0),                  # AG waits for SV0: the frame size is latched
   U(jc='EA0_APD', jt='FSAVE_PD.0'),
   U(ag='LEA0', agw='T11'),
-  *[F('SVW', a='CONST', const=4 * k, msz='L', mem='ST', ag='BASED', agb='T11', dyn=2, dynk=k)
-    for k in range(25)],
+  *[F('SVW', a='CONST', const=4 * k, msz='L', mem='ST', ag='BASED', agb='T11')
+    for k in range(3)],
   F('END', last=1))
 R('FSAVE_PD',
   U(ag='ADDT0', agb='AY', agw='T11'),
-  *[F('SVW', a='CONST', const=4 * k, msz='L', mem='ST', ag='BASED', agb='T11', dyn=2, dynk=k)
-    for k in range(25)],
+  *[F('SVW', a='CONST', const=4 * k, msz='L', mem='ST', ag='BASED', agb='T11')
+    for k in range(3)],
   F('END', ag='ADDC', agb='T11', agw='AY', const=0, last=1))
-# FRESTORE: the header decides the frame (anything unknown: format error);
-# every word is read before the FPU state changes; (An)+ moves at the end
+# FRESTORE: the format word decides (anything but $00/$60/$E0: format
+# error); every word is read before the FPU state changes; (An)+ moves at
+# the end
 R('FRESTORE',
   FCHK(),
   U(jc='EA0_AIP', jt='FREST_PI.0'),
   U(ag='LEA0', agw='T11'),
   U(op='MOV', sz='L', msz='L', a='LD', d='T0', ag='BASED', agb='T11', mem='LD'),
   F('RS0', a='T0', d='T0'),
-  U(ag='ADDC', agb='T0', agw='T10', const=0),                  # AG waits for RS0
-  *[F('RSW', a='LD', b='CONST', const=4 * k, msz='L', mem='LD', ag='BASED', agb='T11',
-      dyn=3, dynk=k) for k in range(1, 25)],
+  *[F('RSW', a='LD', b='CONST', const=4 * k, msz='L', mem='LD', ag='BASED', agb='T11')
+    for k in range(1, 3)],
   F('END', last=1))
 R('FREST_PI',
   U(ag='ADDC', agb='AY', agw='T11', const=0),
   U(op='MOV', sz='L', msz='L', a='LD', d='T0', ag='BASED', agb='T11', mem='LD'),
   F('RS0', a='T0', d='T0'),
-  U(ag='ADDC', agb='T0', agw='T10', const=0),                  # AG waits for RS0
-  *[F('RSW', a='LD', b='CONST', const=4 * k, msz='L', mem='LD', ag='BASED', agb='T11',
-      dyn=3, dynk=k) for k in range(1, 25)],
-  F('END', ag='ADDT0', agb='AY', agw='AY', last=1))
+  *[F('RSW', a='LD', b='CONST', const=4 * k, msz='L', mem='LD', ag='BASED', agb='T11')
+    for k in range(1, 3)],
+  F('END', ag='ADDC', agb='T11', agw='AY', const=12, last=1))
 
 # exception routines.  At entry the back end has set S, cleared T, and
 # written: T8 vector address, T9 PC to stack, T10 old SR, T11 address
@@ -719,22 +670,14 @@ R('EXC_FMT2',
   U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='SSP', const=-12, msz='W', mem='ST', mfc='SUP'),
   U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
     a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
-_f7 = [U(op='MOV', sz='L', a='ZERO', ag='BASED', agb='SSP', const=-4 * (k + 1),
-         msz='L', mem='ST', mfc='SUP') for k in range(10)]
-_f7[7] = U(op='MOV', sz='L', a='T7', ag='BASED', agb='SSP', const=-32,
-          msz='L', mem='ST', mfc='SUP')                    # WB3D
-_f7[8] = U(op='MOV', sz='L', a='T6', ag='BASED', agb='SSP', const=-36,
-          msz='L', mem='ST', mfc='SUP')                    # WB3A
-R('EXC_FMT7',
-  *_f7,                                                     # PD3..WB3A area
-  U(op='MOV', sz='L', a='T11', ag='BASED', agb='SSP', const=-40, msz='L', mem='ST', mfc='SUP'),  # FA
-  U(op='MOV', sz='L', a='ZERO', ag='BASED', agb='SSP', const=-44, msz='L', mem='ST', mfc='SUP'), # WB2S WB1S
-  U(op='MOV', sz='W', a='ZERO', ag='BASED', agb='SSP', const=-46, msz='W', mem='ST', mfc='SUP'), # WB3S
-  U(op='MOV', sz='W', a='T13', ag='BASED', agb='SSP', const=-48, msz='W', mem='ST', mfc='SUP'),  # SSW
-  U(op='MOV', sz='L', a='T5',  ag='BASED', agb='SSP', const=-52, msz='L', mem='ST', mfc='SUP'),  # EA
-  U(op='MOV', sz='W', a='T12', ag='BASED', agb='SSP', const=-54, msz='W', mem='ST', mfc='SUP'),
-  U(op='MOV', sz='L', a='T9',  ag='BASED', agb='SSP', const=-58, msz='L', mem='ST', mfc='SUP'),
-  U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='SSP', const=-60, msz='W', mem='ST', mfc='SUP'),
+# format $4 (access error; floating-point disabled): T11 the fault address
+# (the EA), T13 the FSLW (the PC of the faulted instruction)
+R('EXC_FMT4',
+  U(op='MOV', sz='L', a='T13', ag='BASED', agb='SSP', const=-4, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T11', ag='BASED', agb='SSP', const=-8, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T12', ag='BASED', agb='SSP', const=-10, msz='W', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='L', a='T9',  ag='BASED', agb='SSP', const=-14, msz='L', mem='ST', mfc='SUP'),
+  U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='SSP', const=-16, msz='W', mem='ST', mfc='SUP'),
   U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
     a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
 R('EXC_RESET',
@@ -755,23 +698,6 @@ R('EXC_IRQ',
   U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='ISP', const=-8, msz='W', mem='ST', mfc='SUP'),
   U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
     a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
-# with M set (68020-68040): format $0 on the master stack, then a format $1
-# throwaway frame on the interrupt stack with S set in its SR
-R('EXC_IRQM',
-  U(op='IACKV', cond=0, sz='L', msz='B', a='LD', d='T12', mem='LD', mfc='IACK',
-    ag='BASED', agb='ZERO', const=-1),
-  U(op='IACKV', cond=1, sz='L', d='T8'),
-  U(op='MOV', sz='W', a='T12', ag='BASED', agb='MSP', const=-2, msz='W', mem='ST', mfc='SUP'),
-  U(op='MOV', sz='L', a='T9',  ag='BASED', agb='MSP', const=-6, msz='L', mem='ST', mfc='SUP'),
-  U(op='MOV', sz='W', a='T10', ag='BASEDU', agb='MSP', const=-8, msz='W', mem='ST', mfc='SUP'),
-  U(op='OR', sz='W', a='CONST', const=0x1000, b='T12', d='T7'),
-  U(op='OR', sz='W', a='CONST', const=0x2000, b='T10', d='T6'),
-  U(op='MOV', sz='W', a='T7',  ag='BASED', agb='ISP', const=-2, msz='W', mem='ST', mfc='SUP'),
-  U(op='MOV', sz='L', a='T9',  ag='BASED', agb='ISP', const=-6, msz='L', mem='ST', mfc='SUP'),
-  U(op='MOV', sz='W', a='T6',  ag='BASEDU', agb='ISP', const=-8, msz='W', mem='ST', mfc='SUP'),
-  U(op='MOV', sz='L', ag='BASED', agb='T8', const=0, msz='L', mem='LD', mfc='SUP',
-    a='LD', br='A', cond=15, last=1))     # cond 15: the handler fetch
-
 # ------------------------------------------------------------ entry params
 EOP = {
     'OR': 'OR', 'AND': 'AND', 'SUB': 'SUB', 'ADD': 'ADD', 'EOR': 'EOR',
@@ -885,8 +811,8 @@ def emit():
             f.write('localparam logic [2:0] DS_%s = 3\'d%d;\n' % (n, i))
         for n, i in JC.items():
             f.write('localparam logic [5:0] JC_%s = 6\'d%d;\n' % (n, i))
-        for n in ['EXC_FMT0', 'EXC_FMT2', 'EXC_FMT7', 'EXC_RESET', 'EXC_IRQ', 'EXC_IRQM',
-                  'DEC_EXC', 'BCC', 'BSR', 'DBCC', 'FBCC', 'FDBCC', 'FPU_GEN',
+        for n in ['EXC_FMT0', 'EXC_FMT2', 'EXC_FMT4', 'EXC_RESET', 'EXC_IRQ',
+                  'DEC_EXC', 'UNIMPL', 'LPSTOP', 'BCC', 'BSR', 'DBCC', 'FBCC', 'FDBCC', 'FPU_GEN',
                   'TRAP', 'BKPT', 'ILLEGAL', 'MOVEM_RM', 'MOVEM_MR',
                   'MOVEC_RD', 'MOVEC_WR', 'JSR', 'JSR_K', 'JMP', 'RTS',
                   'FPU_K_IND', 'FPU_K_IN1', 'FPU_K_IN2', 'FPU_K_IN4', 'FPU_K_IN8',

@@ -14,11 +14,11 @@
 module ap68060
 	import ap68060_pkg::*;
 #(
-	parameter logic [7:0] FPU_REVISION = 8'h41,  // FSAVE frames: $41, or $40 (44-byte UNIMP)
 	// area options (doc/STATUS.md has what each costs in ALMs and cycles)
 	parameter bit         FPU_PIPE     = 1,      // the FPU's arithmetic pipeline (0: the state machine alone)
 	parameter bit         LOOP_PRED    = 1,      // D1's loop exit predictor
-	parameter bit         EARLY_RES    = 1       // AG's early results for younger uops' base and index
+	parameter bit         EARLY_RES    = 1,      // AG's early results for younger uops' base and index
+	parameter logic [7:0] PCR_REV      = 8'h06   // PCR revision number
 )(
 
 	input  logic        clk,
@@ -65,7 +65,7 @@ module ap68060
 	input  logic        cdis_n,       // CDIS: disable the caches (contents kept)
 	input  logic        mdis_n,       // MDIS: disable page translation
 	output logic        ipend_n,      // IPEND
-	output logic  [3:0] pst,          // PST3-PST0 (MC68040UM table 5-6)
+	output logic  [4:0] pst,          // PST4-PST0 (MC68060UM table 2-7), every CLK
 
 	// debug / test
 	output logic [31:0] dbg_pc,
@@ -89,28 +89,18 @@ always_ff @(posedge clk)
 wire cdis = cdis_s[1];
 wire mdis = mdis_s[1];
 
-// IPEND and PST change on bus clock edges.  PST shows the end of each
-// instruction for one bus clock (the last one when several end within
-// it), else the present status.
-logic        irq_pending, pst_ev, pst_b;
-logic  [3:0] pst_code, pst_st, pst_bc;
+// IPEND and PST change on any processor clock, whatever CLKEN says
+// (MC68060UM 7.1); PST is $10 in reset (table 2-8)
+logic        irq_pending;
+logic  [4:0] pst5;
 always_ff @(posedge clk) begin
 	if (!nreset) begin
 		ipend_n <= 1'b1;
-		pst     <= 4'h8;
-		pst_b   <= 1'b0;
-		pst_bc  <= 4'h8;
+		pst     <= 5'h10;
 	end
 	else begin
-		if (pst_ev) begin
-			pst_b  <= 1'b1;
-			pst_bc <= pst_code;
-		end
-		if (bclk_en) begin
-			ipend_n <= !irq_pending;
-			pst     <= pst_ev ? pst_code : pst_b ? pst_bc : pst_st;
-			pst_b   <= 1'b0;
-		end
+		ipend_n <= !irq_pending;
+		pst     <= pst5;
 	end
 end
 
@@ -201,9 +191,10 @@ logic        q_odd;
 logic        dm_hold1, mt_v, mt_ng, mt_wr, mt_done;
 logic  [2:0] mt_op, mt_fc;
 logic  [1:0] mt_scope, mt_caches;
-logic [31:0] mt_addr, mt_mmusr, urp, srp, dm_st_faddr;
+logic [31:0] mt_addr, mt_pa, mt_fslw, urp, srp, dm_st_faddr;
+logic        mt_fault, dm_lkend;
 logic  [2:0] iack_lvl;
-logic        dm_iack;
+logic  [1:0] dm_ack;
 
 logic        dm_req, adv_dc1, adv_dc2, adv_ex, adv_wb;
 logic [31:0] dm_va;
@@ -219,13 +210,14 @@ logic        dm_dc2_rdy, dm_fault, dm_st_v, dm_st_rdy, dm_st_fault;
 logic [31:0] dm_ldata, dm_faddr, dm_st_data, dm_ldata_al;
 logic        dm_ldata_alv;
 logic  [7:0] dm_fvec;
-logic [15:0] dm_fssw, dm_st_fssw;
+logic [31:0] dm_fslw, dm_st_fslw;
 
 logic  [1:0] uq_n;
 uop_t        uq0;
 logic        uo_rdy;
 
-ap68060_backend #(.FPU_REVISION(FPU_REVISION), .FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES)) be (
+ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES),
+                  .PCR_REV(PCR_REV)) be (
 	.clk(clk), .nreset(nreset),
 	.in_v(uq_n != 2'd0), .in_u(uq0), .in_rdy(uo_rdy),
 	.redir_v(redir_v), .redir_pc(redir_pc), .flush(flush), .fe_flush(fe_flush),
@@ -234,19 +226,20 @@ ap68060_backend #(.FPU_REVISION(FPU_REVISION), .FPU_PIPE(FPU_PIPE), .EARLY_RES(E
 	.ucond_v(ucond_v), .ucond(ucond),
 	.sr(sr), .vbr(vbr), .cacr(cacr), .sfc(sfc), .dfc(dfc),
 	.dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem), .dm_msz(dm_msz),
-	.dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke), .dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_iack(dm_iack), .dm_older(dm_older),
+	.dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke), .dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .dm_older(dm_older),
 	.bht_we(bht_we), .bht_wa(bht_wa), .bht_dis(bht_dis),
 	.lp_we(lp_we), .lp_wa(lp_wa), .lp_tk(lp_tk), .lp_mp(lp_mp), .sn_ihit(sn_ihit),
-	.tw_busy(tw_busy), .pst_ev(pst_ev), .pst_code(pst_code), .pst_st(pst_st),
+	.tw_busy(tw_busy), .pst5(pst5),
 	.irq_pending(irq_pending),
 	.adv_dc1(adv_dc1), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
 	.dm_dc2_rdy(dm_dc2_rdy), .dm_ldata(dm_ldata), .dm_ldata_al(dm_ldata_al), .dm_ldata_alv(dm_ldata_alv), .dm_fault(dm_fault),
-	.dm_fvec(dm_fvec), .dm_faddr(dm_faddr), .dm_fssw(dm_fssw),
+	.dm_fvec(dm_fvec), .dm_faddr(dm_faddr), .dm_fslw(dm_fslw),
 	.dm_st_v(dm_st_v), .dm_st_data(dm_st_data), .dm_st_rdy(dm_st_rdy),
-	.dm_st_fault(dm_st_fault), .dm_st_fssw(dm_st_fssw),
+	.dm_st_fault(dm_st_fault), .dm_st_fslw(dm_st_fslw), .dm_lkend(dm_lkend),
 	.dm_hold1(dm_hold1), .mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope),
 	.mt_caches(mt_caches), .mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng),
-	.mt_wr(mt_wr), .mt_done(mt_done), .mt_mmusr(mt_mmusr), .dm_st_faddr(dm_st_faddr),
+	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
+	.dm_st_faddr(dm_st_faddr),
 	.urp(urp), .srp(srp),
 	.ipl(ipl_s2), .iack_lvl(iack_lvl), .rsto_req(rsto_req), .rsto_busy(rsto_busy),
 	.kill_now(kill_now), .adv_ag(adv_ag),
@@ -258,17 +251,17 @@ ap68060_dmu dmu (
 	.clk(clk), .nreset(nreset),
 	.adv_ag(adv_ag), .dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem),
 	.dm_msz(dm_msz), .dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke),
-	.dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_iack(dm_iack), .iack_lvl(iack_lvl),
+	.dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .iack_lvl(iack_lvl),
 	.dm_older(dm_older),
 	.adv_dc1(adv_dc1), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
 	.kill_now(kill_now), .dm_hold1(dm_hold1),
 	.dc2_rdy(dm_dc2_rdy), .ldata(dm_ldata), .ldata_al(dm_ldata_al), .ldata_alv(dm_ldata_alv), .fault(dm_fault), .fvec(dm_fvec),
-	.faddr(dm_faddr), .fssw(dm_fssw),
+	.faddr(dm_faddr), .fslw(dm_fslw),
 	.st_v(dm_st_v), .st_data(dm_st_data), .st_rdy(dm_st_rdy),
-	.st_fault(dm_st_fault), .st_fssw(dm_st_fssw), .st_faddr(dm_st_faddr),
+	.st_fault(dm_st_fault), .st_fslw(dm_st_fslw), .st_faddr(dm_st_faddr), .lkend(dm_lkend),
 	.mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope), .mt_caches(mt_caches),
 	.mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng), .mt_wr(mt_wr),
-	.mt_done(mt_done), .mt_mmusr(mt_mmusr),
+	.mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
 	.cacr(cacr), .tc(tc), .urp(urp), .srp(srp),
 	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1),
 	.cdis(cdis), .mdis(mdis), .tw_busy(tw_busy),
@@ -373,7 +366,7 @@ ap68060_decode #(.LOOP_PRED(LOOP_PRED)) dec (
 ap68060_useq useq (
 	.clk(clk), .nreset(nreset), .flush(fe_flush),
 	.rq_n(rq_n), .rq0(rq0), .rq1(rq1), .rq_pop(rq_pop),
-	.smode(sr[13]), .master(sr[12]),
+		.smode(sr[13]),
 	.exc_go(exc_go), .exc_kind(exc_kind), .exc_ssp(exc_ssp),
 	.uq_n(uq_n), .uq0(uq0), .uq_pop(uo_rdy && uq_n != 2'd0)
 );

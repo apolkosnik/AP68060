@@ -200,8 +200,7 @@ function automatic logic jcond(input logic [4:0] jc, input logic [3:0] e0,
 		JC_BOTH_MEM: jcond = m0 && m1;
 		JC_MASK0:    jcond = (ext1 == 16'd0);
 		JC_X1A:      jcond = ext1[15];
-		JC_CREG_RF:  jcond = (ext1[11:0] == 12'h800) || (ext1[11:0] == 12'h803) ||
-		                     (ext1[11:0] == 12'h804);
+		JC_CREG_RF:  jcond = (ext1[11:0] == 12'h800);    // USP
 		JC_FP_OC0:   jcond = (ext1[15:13] == 3'b000);
 		default:     jcond = 1'b0;
 	endcase
@@ -223,6 +222,13 @@ function automatic logic [2:0] fp_immlen(input logic [15:0] cmd);
 		3'd5:       fp_immlen = 3'd4;   // D
 		default:    fp_immlen = 3'd0;
 	endcase
+endfunction
+
+// the 68060's control registers: SFC DFC CACR TC ITT0 ITT1 DTT0 DTT1 BUSCR
+// ($000-$008), USP VBR ($800 $801), URP SRP PCR ($806-$808)
+function automatic logic movec_ok(input logic [11:0] r);
+	movec_ok = (r <= 12'h008) || (r == 12'h800) || (r == 12'h801) ||
+	           (r == 12'h806) || (r == 12'h807) || (r == 12'h808);
 endfunction
 
 function automatic logic has_ext(input logic [3:0] i);
@@ -578,17 +584,28 @@ always_comb begin
 		end
 
 		if (pd0.legal) begin
-			if (a0.priv && !smode)
+			// (68060, WinUAE's order: a control register number the 68060
+			// does not have is an illegal instruction in either mode, and
+			// LPSTOP checks its extension word before the privilege)
+			if ((a0.rt == UA_MOVEC_RD || a0.rt == UA_MOVEC_WR) && !movec_ok(win[1][11:0]))
+				nrec.exc = 8'd4;
+			else if (a0.rt == UA_LPSTOP && win[1] != 16'h01C0)
+				nrec.exc = 8'd11;
+			else if (a0.priv && !smode)
+				nrec.exc = 8'd8;
+			// STOP and LPSTOP whose new SR leaves supervisor mode: privilege
+			// violation at once (the 68060)
+			else if ((opw == 16'h4E72 || a0.rt == UA_LPSTOP) && !nrec.imm[13])
 				nrec.exc = 8'd8;
 			else if (a0.rt == UA_TRAP)
 				nrec.exc = 8'd32 + {4'd0, opw[3:0]};
-			else if ((a0.rt == UA_MOVEC_RD || a0.rt == UA_MOVEC_WR) &&
-			         !((win[1][11:3] == 9'h000) ||
-			           (win[1][11:3] == 9'h100 && win[1][2:0] != 3'd2)))
-				// 68040 control registers: $000-$007 and $800-$807 except CAAR
+			else if (a0.rt == UA_ILLEGAL)
 				nrec.exc = 8'd4;
-			else if (a0.rt == UA_ILLEGAL || a0.rt == UA_BKPT)
-				nrec.exc = 8'd4;
+			// unimplemented integer instructions: MOVEP, CHK2/CMP2, CAS2, and
+			// MULx.L / DIVx.L with a 64-bit product or dividend (ext bit 10)
+			else if (a0.rt == UA_UNIMPL ||
+			         ((opw[15:7] == 9'b0100_1100_0) && win[1][10]))
+				nrec.exc = 8'd61;
 		end
 		if (flt) nrec.exc = f_code;
 		if (nrec.exc != 8'd0) begin

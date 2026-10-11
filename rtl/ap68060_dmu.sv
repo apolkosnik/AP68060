@@ -65,7 +65,7 @@ module ap68060_dmu
 	input  logic        dm_locke,
 	input  logic        dm_super,
 	input  logic        dm_noalloc,
-	input  logic        dm_iack,
+	input  logic  [1:0] dm_ack,         // acknowledge cycle: 1 IACK, 2 BKPT, 3 LPSTOP
 	input  logic  [2:0] iack_lvl,
 	input  logic        dm_older,       // uops older than DC2 still in EX or WB
 	input  logic        adv_dc1,
@@ -81,15 +81,16 @@ module ap68060_dmu
 	output logic        fault,
 	output logic  [7:0] fvec,
 	output logic [31:0] faddr,
-	output logic [15:0] fssw,
+	output logic [31:0] fslw,
 	input  logic        st_v,
 	input  logic [31:0] st_data,
 	output logic        st_rdy,
 	output logic        st_fault,
-	output logic [15:0] st_fssw,
+	output logic [31:0] st_fslw,
+	output logic        lkend,          // a LOCKE write completed
 	output logic [31:0] st_faddr,
 
-	// WB maintenance: CINV/CPUSH/PFLUSH/PTEST
+	// WB maintenance: CINV/CPUSH/PFLUSH/PLPA
 	input  logic        mt_v,
 	input  logic  [2:0] mt_op,          // MT_*
 	input  logic  [1:0] mt_scope,       // 1 line, 2 page, 3 all
@@ -97,9 +98,11 @@ module ap68060_dmu
 	input  logic [31:0] mt_addr,
 	input  logic  [2:0] mt_fc,          // DFC (PTEST/PFLUSH)
 	input  logic        mt_ng,          // PFLUSHN/PFLUSHAN: spare global entries
-	input  logic        mt_wr,          // PTESTW
+	input  logic        mt_wr,          // PLPAW
 	output logic        mt_done,
-	output logic [31:0] mt_mmusr,
+	output logic [31:0] mt_pa,          // PLPA: the physical address
+	output logic        mt_fault,       // ... or an access error, with
+	output logic [31:0] mt_fslw,        // ... its FSLW
 
 	// control registers
 	input  logic [31:0] cacr,
@@ -160,7 +163,7 @@ module ap68060_dmu
 	input  logic [31:0] sn_wword        // ...this long word on every long word
 );
 
-localparam logic [2:0] MT_CINV = 3'd1, MT_CPUSH = 3'd2, MT_PFLUSH = 3'd3, MT_PTEST = 3'd4;
+localparam logic [2:0] MT_CINV = 3'd1, MT_CPUSH = 3'd2, MT_PFLUSH = 3'd3, MT_PLPA = 3'd4;
 
 wire tc_e  = tc[15] && !mdis;
 wire tc_p  = tc[14];
@@ -179,7 +182,7 @@ typedef struct packed {
 	logic        locke;
 	logic        smode;    // FC2
 	logic        noalloc;
-	logic        iack;
+	logic  [1:0] ack;      // acknowledge cycle (TT=3): 1 IACK, 2 BKPT, 3 LPSTOP
 } req_t;
 
 // translation and lookup result of one access part
@@ -192,6 +195,7 @@ typedef struct packed {
 	logic  [1:0] upa;
 	logic        hit;      // the line is in the cache
 	logic  [1:0] way;
+	logic [31:0] why;      // flt: its FSLW cause bits (TTR SP WP PF TWE)
 } xres_t;
 
 typedef struct packed {
@@ -463,11 +467,17 @@ function automatic xres_t xlate(input logic [31:0] la, input logic s, input logi
 		x.cm  = tt0 ? dtt0[6:5] : dtt1[6:5];
 		x.upa = tt0 ? dtt0[9:8] : dtt1[9:8];
 		x.flt = wr && (tt0 ? dtt0[2] : dtt1[2]);
+		x.why = FSLW_TTR | FSLW_WP;
 	end
 	else if (!tc_e) begin
-		x.ok = 1'b1;
-		x.pa = la;
-		x.cm = 2'b00;          // cachable, write-through (MC68040UM 3.1.2)
+		// the default transparent translation (MC68060UM 4.1.2): cache
+		// mode DCO, UPA DUO, write protection DWO of the TCR
+		x.ok  = 1'b1;
+		x.pa  = la;
+		x.cm  = tc[9:8];
+		x.upa = tc[7:6];
+		x.flt = wr && tc[5];
+		x.why = FSLW_WP;
 	end
 	else if (hitv) begin
 		x.pa  = {e.pa[19:1], tc_p ? la[12] : e.pa[0], la[11:0]};
@@ -476,6 +486,8 @@ function automatic xres_t xlate(input logic [31:0] la, input logic s, input logi
 		if (!e.r || (e.s && !s) || (wr && e.w)) begin
 			x.flt = 1'b1;      // nonresident, supervisor only, write protected
 			x.ok  = 1'b1;
+			x.why = e.b ? (FSLW_TWE | FSLW_LK) : !e.r ? FSLW_PF :
+			        (e.s && !s) ? FSLW_SP : FSLW_WP;
 		end
 		else if (wr && !e.m) x.walk = 1'b1;   // first write: set M (3.3)
 		else x.ok = 1'b1;
@@ -493,10 +505,12 @@ endfunction
 
 // DC1
 wire        m1_wr  = (m1.mem == M_ST) || (m1.mem == M_RMW);
+// the FSLW RW field of the DC2 access: read, write, read-modify-write
+wire  [1:0] m2_rw  = (m2.r.mem == M_LD) ? 2'b10 : (m2.r.mem == M_ST) ? 2'b01 : 2'b11;
 always_comb begin
 	x_dc1 = xlate(m1.a, m1.smode, m1_wr, atc_hit, atc_e,
 	              tq_a[0], tq_a[1], tq_a[2], tq_a[3], lvd_q);
-	if (m1.iack) begin
+	if (m1.ack != 2'd0) begin
 		// CPU space (interrupt acknowledge) is never translated nor cached
 		x_dc1     = '0;
 		x_dc1.ok  = 1'b1;
@@ -508,10 +522,10 @@ wire  [4:0] m1_end   = {1'b0, m1.a[3:0]} + {2'b00, nbytes(m1.msz)};
 wire        m1_split = (m1.msz != SZ_Q) && (m1_end > 5'd16);
 wire        m1_sfast = ((m1.mem == M_LD) || (m1.mem == M_ST && x_dc1.cm == 2'b01)) &&
                        m1_split && x_dc1.ok && !x_dc1.flt && x_dc1.hit &&
-                       !x_dc1.cm[1] && dc_en && !m1.iack && !m1.lock;
+                       !x_dc1.cm[1] && dc_en && (m1.ack == 2'd0) && !m1.lock;
 wire        m1_fast  = ((m1.mem == M_LD) || (m1.mem == M_RMW && !m1.lock)) &&
                        x_dc1.ok && !x_dc1.flt && x_dc1.hit &&
-                       !x_dc1.cm[1] && dc_en && !m1.iack &&
+                       !x_dc1.cm[1] && dc_en && (m1.ack == 2'd0) &&
                        (m1.msz != SZ_Q) && !m1_split;
 
 //--------------------------------------------------------------------------
@@ -564,6 +578,7 @@ typedef enum logic [5:0] {
 	E_S_NEXT, E_S_DONE, E_SP_W, E_SP_2, E_SP_3,
 	E_W_START, E_W_PART, E_W_DONE,
 	E_M_START, E_M_PG, E_M_SCAN, E_M_SCANW, E_M_SCAN2, E_M_IC, E_M_DONE, E_M_CLR,
+	E_M_PLW, E_M_PL2, E_M_PLD,
 	E_FILL, E_FILLW, E_FILL_W, E_FILL_INS, E_PUSHV, E_PUSHVW, E_PUSHV_W, E_PUSHV_B,
 	E_BUS, E_BUS_W,
 	E_TW_START, E_TW_DESC, E_TW_DESCW, E_TW_DLK, E_TW_DBUS, E_TW_EVAL, E_TW_UPD, E_TW_UPD_W,
@@ -577,7 +592,7 @@ logic        e_wst_done;          // the WB store is done (until WB advances)
 logic [31:0] e_ldata;
 logic        e_flt;
 logic [31:0] e_faddr;
-logic [15:0] e_fssw;
+logic [31:0] e_fslw;
 logic        e_part;              // working on part 1 of a split access
 xres_t       e_x;                 // translation of the current part
 logic [31:0] e_va;                // logical address of the current part
@@ -605,7 +620,7 @@ typedef struct packed {
 	logic        ci;
 	logic        lock;
 	logic        locke;
-	logic        iack;
+	logic  [1:0] ack;             // acknowledge cycle (see req_t)
 	logic  [1:0] tln;
 } bop_t;
 bop_t        bo;
@@ -645,7 +660,8 @@ logic  [7:0] ms_i;                // set*4 + way
 typedef enum logic [1:0] { TW_ROOT, TW_PTR, TW_PAGE, TW_IND } twl_t;
 twl_t        tw_lvl;
 logic [31:0] tw_va;
-logic        tw_s, tw_wr, tw_pt, tw_i;   // FC2, write access, PTEST, I-side
+logic        tw_s, tw_wr, tw_pt, tw_i;   // FC2, write access, PLPA, I-side
+logic [31:0] tw_cause;            // FSLW bits of a failed search (PTA PTB IL PF TWE LK)
 logic [31:0] tw_da;               // descriptor address
 logic [31:0] tw_d;                // descriptor
 logic        tw_wp;               // accumulated write protect
@@ -695,9 +711,14 @@ function automatic logic store_holds(input logic [5:0] set, input logic [1:0] wa
 	               b.x.pa[9:4] == set && b.x.way == way);
 endfunction
 
-// SSW of an access error (MC68040UM figure 8-6)
-function automatic logic [15:0] mk_ssw(input logic atc, input logic lk, input logic rd,
-                                       input logic [1:0] msz, input logic [2:0] fc);
+// FSLW of an access error (MC68060UM figure 8-6; the SIZE coding is the
+// SIZ pins', see the package): the cause bits, LK, RW (2'b10 read, 2'b01
+// write, 2'b11 read-modify-write), the size, TT (MOVE16 01, else normal:
+// the 68060 reports MOVES as a normal access of its function code) and TM,
+// the function code
+function automatic logic [31:0] mk_fslw(input logic [31:0] cause, input logic lk,
+                                        input logic [1:0] rw, input logic [1:0] msz,
+                                        input logic [2:0] fc);
 	logic [1:0] sz;
 	case (msz)
 		SZ_B: sz = 2'b01;
@@ -705,9 +726,8 @@ function automatic logic [15:0] mk_ssw(input logic atc, input logic lk, input lo
 		SZ_L: sz = 2'b00;
 		default: sz = 2'b11;
 	endcase
-	// a MOVE16 (line operand) reports TT = 01, the MOVE16 access
-	mk_ssw = {4'b0000, 1'b0, atc, lk, rd, 1'b0, sz,
-	          (msz == SZ_Q) ? TT_MOVE16 : fc_tt(fc), fc_tm(fc)};
+	mk_fslw = cause | (lk ? FSLW_LK : 32'd0) |
+	          {7'd0, rw, sz, (msz == SZ_Q) ? TT_MOVE16 : TT_NORMAL, fc, 16'd0};
 endfunction
 
 //--------------------------------------------------------------------------
@@ -758,18 +778,23 @@ logic e_breq;
 always_comb begin
 	b_req  = e_breq;
 	b_breq = '0;
-	b_breq.addr  = bo.iack ? 32'hFFFF_FFFF : bo_pa;
-	b_breq.siz   = bo.iack ? SIZ_B : bo.line ? SIZ_LINE : bo_siz;
+	// acknowledge cycles (TT=3): IACK at $FFFFFFFF, a byte, TM = the level;
+	// the breakpoint acknowledge (a byte read at 0) and the LPSTOP
+	// broadcast (a word write at $FFFFFFFE) have TM = 0
+	b_breq.addr  = (bo.ack == 2'd1) ? 32'hFFFF_FFFF : bo_pa;
+	b_breq.siz   = (bo.ack == 2'd1) ? SIZ_B : bo.line ? SIZ_LINE : bo_siz;
 	b_breq.rd    = bo.rd;
-	b_breq.tt    = bo.iack ? TT_ACK : bo.tt;
-	b_breq.tm    = bo.iack ? iack_lvl : bo.tm;
+	b_breq.tt    = (bo.ack != 2'd0) ? TT_ACK : bo.tt;
+	b_breq.tm    = (bo.ack == 2'd1) ? iack_lvl : (bo.ack != 2'd0) ? 3'd0 : bo.tm;
 	b_breq.tln   = bo.tln;
 	b_breq.upa   = bo.upa;
 	b_breq.ci    = bo.ci;
 	b_breq.lock  = bo.lock;
 	b_breq.locke = bo.locke && !bo.rd && (bo.line || bo_left == bo_np);
+	// (the LPSTOP broadcast drives D31-D16 high, the new SR on D15-D0)
 	b_wdata      = bo.line ? bo_line :
-	               {96'd0, (bo_np == 3'd1) ? {4{bo_wd[31:24]}} :
+	               {96'd0, (bo.ack == 2'd3) ? {16'hFFFF, bo_wd[31:16]} :
+	                       (bo_np == 3'd1) ? {4{bo_wd[31:24]}} :
 	                       (bo_np == 3'd2) ? {2{bo_wd[31:16]}} : bo_wd};
 end
 
@@ -780,6 +805,7 @@ assign dm_hold1 = sn_frz || steal || steal_q ||
 always_ff @(posedge clk) begin
 	st_rdy_r    <= 1'b0;
 	mt_done   <= 1'b0;
+	lkend     <= 1'b0;
 	iw_done   <= 1'b0;
 	atc_wr    <= 1'b0;
 	atc_fall  <= 1'b0;
@@ -795,7 +821,7 @@ always_ff @(posedge clk) begin
 		m1 <= '0; m2 <= '0; m3 <= '0; m4 <= '0;
 		e_st <= E_M_CLR; e_ret <= E_IDLE; e_sret <= E_IDLE; e_wret <= E_IDLE;
 		e_dc2_done <= 1'b0; e_wst_done <= 1'b0;
-		e_ldata <= '0; e_flt <= 1'b0; e_faddr <= '0; e_fssw <= '0;
+		e_ldata <= '0; e_flt <= 1'b0; e_faddr <= '0; e_fslw <= '0;
 		e_part <= 1'b0; e_x <= '0; e_va <= '0; e_n <= '0; e_acc <= '0; e_fromline <= 1'b0;
 		e_breq <= 1'b0;
 		bo <= '0; bo_wd <= '0; bo_line <= '0; bo_err <= 1'b0; bo_rd <= '0;
@@ -806,15 +832,16 @@ always_ff @(posedge clk) begin
 		mv_line <= '0;
 		ms_i <= '0;
 		sc_set <= '0; sc_lv <= '0; sc_ld <= '0;
-		tw_lvl <= TW_ROOT; tw_va <= '0; tw_s <= 1'b0; tw_wr <= 1'b0; tw_pt <= 1'b0;
+		tw_lvl <= TW_ROOT; tw_va <= '0; tw_s <= 1'b0; tw_wr <= 1'b0; tw_pt <= 1'b0; tw_cause <= '0;
 		tw_i <= 1'b0; tw_da <= '0; tw_d <= '0; tw_wp <= 1'b0; tw_fail <= 1'b0;
 		tw_berr <= 1'b0; tw_pd <= '0;
 		tset_b <= '0; tway_b <= '0; twd_b <= '0;
 		dw_set <= '0; dw_way <= '0; dw_be <= '0; dw_src <= '0; dw_word <= '0;
 		ic_inv <= 1'b0; ic_inv_scope <= '0; ic_inv_pa <= '0;
 		rrc <= 2'd0;
-		st_fault_r <= 1'b0; st_fssw <= '0; st_faddr <= '0;
-		mt_mmusr <= '0;
+		st_fault_r <= 1'b0; st_fslw <= '0; st_faddr <= '0;
+		mt_pa <= '0; mt_fault <= 1'b0; mt_fslw <= '0;
+		lkend <= 1'b0;
 		atc_wla <= '0; atc_wfc2 <= 1'b0; atc_went <= '0; atc_fng <= 1'b0;
 		iatc_flush_ng <= 1'b0; iatc_flush_la <= '0; iatc_flush_fc2 <= 1'b0;
 		iatc_wla <= '0; iatc_wfc2 <= 1'b0; iatc_went <= '0;
@@ -857,7 +884,7 @@ always_ff @(posedge clk) begin
 			m1.locke   <= dm_locke;
 			m1.smode   <= dm_super;
 			m1.noalloc <= dm_noalloc;
-			m1.iack    <= dm_iack;
+			m1.ack     <= dm_ack;
 			m1_stale   <= (dw && dw_src != 2'd0 && dw_set == dm_va[9:4]) || !e_quiet;
 		end
 		else begin
@@ -1052,7 +1079,7 @@ always_ff @(posedge clk) begin
 			xres_t x;
 			x = xlate(e_va, m2.r.smode, (m2.r.mem != M_LD), atc_hit, atc_e,
 			          tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_q);
-			if (m2.r.iack) begin
+			if (m2.r.ack != 2'd0) begin
 				x    = '0;
 				x.ok = 1'b1;
 				x.pa = e_va;
@@ -1083,7 +1110,7 @@ always_ff @(posedge clk) begin
 		else begin
 			logic cach, alloc, rd, move16;
 			move16 = (m2.r.msz == SZ_Q);
-			cach   = dc_en && !e_x.cm[1] && !m2.r.lock && !m2.r.iack && !move16;
+			cach   = dc_en && !e_x.cm[1] && !m2.r.lock && (m2.r.ack == 2'd0) && !move16;
 			alloc  = cach && !m2.r.noalloc;
 			rd     = (m2.r.mem == M_LD) || (m2.r.mem == M_RMW);
 			if (e_x.flt) begin
@@ -1091,8 +1118,8 @@ always_ff @(posedge clk) begin
 				// FA is the operand's first byte even when a later part
 				// faulted; MA marks an ATC fault on the second page
 				e_faddr <= m2.r.a;
-				e_fssw  <= mk_ssw(1'b1, m2.r.lock, m2.r.mem == M_LD, m2.r.msz, m2.r.fc) |
-				           (e_part ? 16'h0800 : 16'h0000);
+				e_fslw  <= mk_fslw(e_x.why, m2.r.lock, m2_rw, m2.r.msz, m2.r.fc) |
+				           (e_part ? FSLW_MA : 32'd0);
 				e_st    <= E_S_DONE;
 			end
 			else if (e_fromline) begin
@@ -1103,7 +1130,7 @@ always_ff @(posedge clk) begin
 				e_x.cm  <= 2'b11;
 				e_st    <= E_S_NEXT;
 			end
-			else if (rd && !e_part && !m2.r.iack && (e_x.cm[1] || m2.r.lock) && dm_older) begin
+			else if (rd && !e_part && (m2.r.ack == 2'd0) && (e_x.cm[1] || m2.r.lock) && dm_older) begin
 				// a serialized read (a noncachable serialized page, or a
 				// locked access) waits until every earlier instruction has
 				// completed: pending writes are on the bus first, and
@@ -1187,7 +1214,7 @@ always_ff @(posedge clk) begin
 					bo.ci    <= e_x.cm[1];
 					bo.lock  <= m2.r.lock;
 					bo.locke <= 1'b0;
-					bo.iack  <= m2.r.iack;
+					bo.ack   <= m2.r.ack;
 					bo.tln   <= 2'd0;
 					bo_pa    <= move16 ? {e_x.pa[31:4], 4'd0} : e_x.pa;
 					bo_left  <= move16 ? 3'd4 : e_n;
@@ -1211,14 +1238,16 @@ always_ff @(posedge clk) begin
 		end
 		E_S_BUSD: begin
 			// the bus read finished
-			if (bo_err && !m2.r.iack) begin
+			// (an acknowledge cycle's TEA is no access error: IACK takes the
+			// spurious vector, BKPT the illegal instruction exception)
+			if (bo_err && (m2.r.ack == 2'd0)) begin
 				e_flt   <= 1'b1;
 				e_faddr <= m2.r.a;
-				e_fssw  <= mk_ssw(1'b0, m2.r.lock, 1'b1, m2.r.msz, m2.r.fc);
+				e_fslw  <= mk_fslw(FSLW_RE, m2.r.lock, m2_rw, m2.r.msz, m2.r.fc);
 				e_st    <= E_S_DONE;
 			end
 			else begin
-				if (m2.r.iack)
+				if (m2.r.ack == 2'd1)
 					// IACK: [7:0] vector, [8] AVEC, [9] TEA = spurious
 					e_acc <= {22'd0, bo_err, bo_avec && !bo_err, bo_rd[7:0]};
 				else if (m2.r.msz == SZ_Q)
@@ -1290,7 +1319,7 @@ always_ff @(posedge clk) begin
 				bo.ci    <= e_x.cm[1];
 				bo.lock  <= m4.r.lock;
 				bo.locke <= m4.r.locke && (!m4.split || e_part);
-				bo.iack  <= 1'b0;
+				bo.ack   <= m4.r.ack;
 				bo.tln   <= 2'd0;
 				bo_pa    <= (m4.r.msz == SZ_Q) ? {e_x.pa[31:4], 4'd0} : e_x.pa;
 				bo_left  <= (m4.r.msz == SZ_Q) ? 3'd4 : e_n;
@@ -1304,7 +1333,8 @@ always_ff @(posedge clk) begin
 			if (bo_err) begin
 				st_rdy_r     <= 1'b1;
 				st_fault_r   <= 1'b1;
-				st_fssw    <= mk_ssw(1'b0, m4.r.lock, 1'b0, m4.r.msz, m4.r.fc);
+				st_fslw    <= mk_fslw(FSLW_WE, m4.r.lock, (m4.r.mem == M_RMW) ? 2'b11 : 2'b01,
+				                      m4.r.msz, m4.r.fc);
 				st_faddr   <= m4.r.a;
 				e_wst_done <= 1'b1;
 				e_st       <= E_IDLE;
@@ -1330,12 +1360,20 @@ always_ff @(posedge clk) begin
 		//==============================================================
 		E_M_START: begin
 			case (mt_op)
-				MT_PFLUSH, MT_PTEST: begin
-					// both ATCs; by page, or all (N: spare global entries).
-					// PTEST first discards the page's entry in both ATCs.
-					atc_fng       <= (mt_op == MT_PFLUSH) && mt_ng;
-					iatc_flush_ng <= (mt_op == MT_PFLUSH) && mt_ng;
-					if (mt_op == MT_PFLUSH && mt_scope == 2'd3) begin
+				MT_PLPA: begin
+					// PLPA: look the address up (the D-ATC, through the
+					// stolen port), in the space of the DFC
+					steal  <= 1'b1;
+					st_la  <= mt_addr;
+					st_fc2 <= mt_fc[2];
+					mt_fault <= 1'b0;
+					e_st   <= E_M_PLW;
+				end
+				MT_PFLUSH: begin
+					// both ATCs; by page, or all (N: spare global entries)
+					atc_fng       <= mt_ng;
+					iatc_flush_ng <= mt_ng;
+					if (mt_scope == 2'd3) begin
 						atc_fall       <= 1'b1;
 						iatc_flush_all <= 1'b1;
 						e_st <= E_M_DONE;
@@ -1380,28 +1418,71 @@ always_ff @(posedge clk) begin
 			// port stays stolen (E_M_DONE / the walk's end release it)
 			atc_fpage       <= 1'b1;
 			iatc_flush_page <= 1'b1;
-			if (mt_op == MT_PTEST) begin
-				// a transparent translation answers without a search
-				logic t0, t1, it0, it1, hitt, wpt, isp;
-				isp = (mt_fc[1:0] == 2'b10);
-				t0  = ttr_hit(dtt0, mt_addr, mt_fc[2]);
-				t1  = ttr_hit(dtt1, mt_addr, mt_fc[2]);
-				it0 = ttr_hit(itt0, mt_addr, mt_fc[2]);
-				it1 = ttr_hit(itt1, mt_addr, mt_fc[2]);
-				hitt = isp ? (it0 || it1) : (t0 || t1);
-				wpt  = isp ? (it0 ? itt0[2] : itt1[2]) : (t0 ? dtt0[2] : dtt1[2]);
-				if (hitt) begin
-					mt_mmusr <= (mt_wr && wpt) ? 32'h0000_0800 : 32'h0000_0003;
-					e_st <= E_M_DONE;
+			e_st <= E_M_DONE;
+		end
+		E_M_PLW: e_st <= E_M_PL2;       // the ATC reads the stolen address
+		E_M_PL2: begin
+			// PLPA (MC68060UM 4.7.3): a transparent translation (a TTR of
+			// the space, or no paged translation: the TCR's defaults)
+			// answers the address itself; a D-ATC hit with the access's
+			// rights its translation; anything else a table search, which
+			// loads the ATC (program space: the I-ATC) and gives the page.
+			// The faults are the access's: TTR/default write protection,
+			// supervisor or write protection, invalid descriptors.
+			logic t0, t1, it0, it1, hitt, wpt, isp;
+			isp = (mt_fc[1:0] == 2'b10);
+			t0  = ttr_hit(dtt0, mt_addr, mt_fc[2]);
+			t1  = ttr_hit(dtt1, mt_addr, mt_fc[2]);
+			it0 = ttr_hit(itt0, mt_addr, mt_fc[2]);
+			it1 = ttr_hit(itt1, mt_addr, mt_fc[2]);
+			hitt = isp ? (it0 || it1) : (t0 || t1);
+			wpt  = isp ? (it0 ? itt0[2] : itt1[2]) : (t0 ? dtt0[2] : dtt1[2]);
+			mt_pa   <= mt_addr;
+			mt_fslw <= mk_fslw(32'd0, 1'b0, mt_wr ? 2'b01 : 2'b10, SZ_L, mt_fc);
+			if (hitt) begin
+				if (mt_wr && wpt) begin
+					mt_fault <= 1'b1;
+					mt_fslw  <= mk_fslw(FSLW_TTR | FSLW_WP, 1'b0, 2'b01, SZ_L, mt_fc);
 				end
-				else begin
-					tw_va <= mt_addr; tw_s <= mt_fc[2]; tw_wr <= mt_wr;
-					tw_pt <= 1'b1; tw_i <= isp;
-					e_ret <= E_M_DONE;
-					e_st  <= E_TW_START;
-				end
+				e_st <= E_M_DONE;
 			end
-			else e_st <= E_M_DONE;
+			else if (!tc_e) begin
+				if (mt_wr && !isp && tc[5]) begin
+					mt_fault <= 1'b1;
+					mt_fslw  <= mk_fslw(FSLW_WP, 1'b0, 2'b01, SZ_L, mt_fc);
+				end
+				e_st <= E_M_DONE;
+			end
+			else if (!isp && atc_hit && atc_e.r && !atc_e.b && !(mt_wr && !atc_e.m)) begin
+				mt_pa <= {atc_e.pa[19:1], tc_p ? mt_addr[12] : atc_e.pa[0], mt_addr[11:0]};
+				if ((atc_e.s && !mt_fc[2]) || (mt_wr && atc_e.w)) begin
+					mt_fault <= 1'b1;
+					mt_fslw  <= mk_fslw((atc_e.s && !mt_fc[2]) ? FSLW_SP : FSLW_WP, 1'b0,
+					                    mt_wr ? 2'b01 : 2'b10, SZ_L, mt_fc);
+				end
+				e_st <= E_M_DONE;
+			end
+			else begin
+				tw_va <= mt_addr; tw_s <= mt_fc[2]; tw_wr <= mt_wr;
+				tw_pt <= 1'b1; tw_i <= isp;
+				e_ret <= E_M_PLD;
+				e_st  <= E_TW_START;
+			end
+		end
+		E_M_PLD: begin
+			// the search's outcome: a failed search faults with its cause,
+			// else the page's protection, else the physical address
+			mt_pa <= {(tc_p ? {tw_pd[31:13], mt_addr[12]} : tw_pd[31:12]), mt_addr[11:0]};
+			if (tw_fail) begin
+				mt_fault <= 1'b1;
+				mt_fslw  <= mk_fslw(tw_cause, 1'b0, mt_wr ? 2'b01 : 2'b10, SZ_L, mt_fc);
+			end
+			else if ((tw_pd[7] && !tw_s) || (tw_wr && tw_wp)) begin
+				mt_fault <= 1'b1;
+				mt_fslw  <= mk_fslw((tw_pd[7] && !tw_s) ? FSLW_SP : FSLW_WP, 1'b0,
+				                    tw_wr ? 2'b01 : 2'b10, SZ_L, mt_fc);
+			end
+			e_st <= E_M_DONE;
 		end
 		E_M_SCAN: begin
 			tset_b <= ms_i[7:2];
@@ -1490,7 +1571,7 @@ always_ff @(posedge clk) begin
 			bo.line <= 1'b1; bo.rd <= 1'b1; bo.tt <= TT_NORMAL;
 			bo.tm <= m2.r.smode ? TM_SDATA : TM_UDATA;
 			bo.upa <= e_x.upa; bo.ci <= 1'b0; bo.lock <= 1'b0; bo.locke <= 1'b0;
-			bo.iack <= 1'b0; bo.tln <= f_way;
+			bo.ack <= 2'd0; bo.tln <= f_way;
 			bo_pa   <= {f_tag, f_set, e_va[3:2], 2'b00};
 			bo_left <= 3'd4;
 			e_ret   <= E_FILL_INS;
@@ -1526,7 +1607,7 @@ always_ff @(posedge clk) begin
 				// the operand's long word did not arrive: an access fault
 				e_flt   <= 1'b1;
 				e_faddr <= m2.r.a;
-				e_fssw  <= mk_ssw(1'b0, 1'b0, m2.r.mem == M_LD, m2.r.msz, m2.r.fc);
+				e_fslw  <= mk_fslw(FSLW_RE, 1'b0, m2_rw, m2.r.msz, m2.r.fc);
 				e_st    <= E_S_DONE;
 			end
 			else if (bo_tci) begin
@@ -1568,7 +1649,7 @@ always_ff @(posedge clk) begin
 		E_PUSHV_B: begin
 			bo.line <= 1'b1; bo.rd <= 1'b0; bo.tt <= TT_NORMAL; bo.tm <= TM_PUSH;
 			bo.upa <= 2'd0; bo.ci <= 1'b0; bo.lock <= 1'b0; bo.locke <= 1'b0;
-			bo.iack <= 1'b0; bo.tln <= pv_tln;
+			bo.ack <= 2'd0; bo.tln <= pv_tln;
 			bo_pa   <= {pv_lpa, 4'd0};
 			bo_left <= 3'd4;
 			bo_line <= pv_line;
@@ -1616,12 +1697,15 @@ always_ff @(posedge clk) begin
 					bo_avec <= b_ravec;
 				end
 			end
+			// the last write of a locked sequence (LOCKE) is out
+			if ((b_err || b_done) && bo.locke && !bo.rd && (bo.line || bo_left == bo_pn))
+				lkend <= 1'b1;
 			if (b_err) begin
 				bo_err <= 1'b1;
 				e_st   <= e_ret;
 			end
 			else if (b_done) begin
-				if (bo.line || bo.iack) e_st <= e_ret;
+				if (bo.line || bo.ack != 2'd0) e_st <= e_ret;
 				else begin
 					if (!bo.rd) bo_wd <= bo_wd << (8 * bo_pn);
 					bo_pa   <= bo_pa + {29'd0, bo_pn};
@@ -1641,6 +1725,7 @@ always_ff @(posedge clk) begin
 			tw_wp   <= 1'b0;
 			tw_fail <= 1'b0;
 			tw_berr <= 1'b0;
+			tw_cause <= 32'd0;
 			tw_da   <= {(tw_s ? srp[31:9] : urp[31:9]), 9'd0} + {23'd0, tw_ri, 2'b00};
 			e_st    <= E_TW_DESC;
 		end
@@ -1666,7 +1751,7 @@ always_ff @(posedge clk) begin
 				bo.line <= 1'b0; bo.rd <= 1'b1; bo.tt <= TT_NORMAL;
 				bo.tm <= tw_i ? TM_TBL_CODE : TM_TBL_DATA;
 				bo.upa <= 2'd0; bo.ci <= 1'b0; bo.lock <= 1'b0; bo.locke <= 1'b0;
-				bo.iack <= 1'b0; bo.tln <= 2'd0;
+				bo.ack <= 2'd0; bo.tln <= 2'd0;
 				bo_pa   <= tw_da;
 				bo_left <= 3'd4;
 				e_wret  <= e_ret;
@@ -1677,9 +1762,10 @@ always_ff @(posedge clk) begin
 		E_TW_DBUS: begin
 			e_ret <= e_wret;
 			if (bo_err) begin
-				tw_fail <= 1'b1;
-				tw_berr <= 1'b1;
-				e_st    <= E_TW_DONE;
+				tw_fail  <= 1'b1;
+				tw_berr  <= 1'b1;
+				tw_cause <= FSLW_TWE | FSLW_LK;
+				e_st     <= E_TW_DONE;
 			end
 			else begin
 				tw_d <= bo_rd;
@@ -1690,8 +1776,9 @@ always_ff @(posedge clk) begin
 			case (tw_lvl)
 				TW_ROOT, TW_PTR: begin
 					if (!tw_d[1]) begin
-						tw_fail <= 1'b1;           // invalid table descriptor
-						e_st    <= E_TW_DONE;
+						tw_fail  <= 1'b1;          // invalid table descriptor
+						tw_cause <= (tw_lvl == TW_ROOT) ? FSLW_PTA : FSLW_PTB;
+						e_st     <= E_TW_DONE;
 					end
 					else begin
 						tw_wp <= tw_wp | tw_d[2];
@@ -1713,8 +1800,9 @@ always_ff @(posedge clk) begin
 				default: begin
 					// page descriptor (or the one an indirect points to)
 					if (tw_d[1:0] == 2'b00 || (tw_lvl == TW_IND && tw_d[1:0] == 2'b10)) begin
-						tw_fail <= 1'b1;
-						e_st    <= E_TW_DONE;
+						tw_fail  <= 1'b1;
+						tw_cause <= (tw_d[1:0] == 2'b10) ? FSLW_IL : FSLW_PF;
+						e_st     <= E_TW_DONE;
 					end
 					else if (tw_d[1:0] == 2'b10) begin
 						tw_lvl <= TW_IND;
@@ -1755,7 +1843,7 @@ always_ff @(posedge clk) begin
 			bo.tm   <= tw_i ? TM_TBL_CODE : TM_TBL_DATA;
 			bo.upa  <= 2'd0; bo.ci <= 1'b1;
 			bo.lock <= lk; bo.locke <= lk;
-			bo.iack <= 1'b0; bo.tln <= 2'd0;
+			bo.ack <= 2'd0; bo.tln <= 2'd0;
 			bo_pa   <= tw_da;
 			bo_left <= 3'd4;
 			bo_wd   <= nd;
@@ -1770,9 +1858,10 @@ always_ff @(posedge clk) begin
 		E_TW_UPD_W: begin
 			e_ret <= e_wret;
 			if (bo_err) begin
-				tw_fail <= 1'b1;
-				tw_berr <= 1'b1;
-				e_st    <= E_TW_DONE;
+				tw_fail  <= 1'b1;
+				tw_berr  <= 1'b1;
+				tw_cause <= FSLW_TWE | FSLW_LK;
+				e_st     <= E_TW_DONE;
 			end
 			else if (tw_lvl == TW_ROOT) begin
 				tw_lvl <= TW_PTR;
@@ -1817,14 +1906,6 @@ always_ff @(posedge clk) begin
 				end
 			end
 			iw_ent <= e;
-			if (tw_pt) begin
-				// MMUSR: page frame (8K: bit 12 clear), B G U1 U0 S CM M - W T R
-				mt_mmusr <= tw_berr ? 32'h0000_0800 :
-				            tw_fail ? 32'h0000_0000 :
-				            ((tc_p ? {tw_pd[31:13], 13'd0} : {tw_pd[31:12], 12'd0}) |
-				             {21'd0, tw_pd[10], tw_pd[9:8], tw_pd[7], tw_pd[6:5],
-				              tw_pd[4], 1'b0, tw_wp, 1'b0, 1'b1});
-			end
 			steal <= 1'b0;
 			e_st  <= e_ret;
 		end
@@ -2005,7 +2086,7 @@ assign ldata_alv = e_dc2_done ||
 assign fault   = e_dc2_done && e_flt;
 assign fvec    = 8'd2;
 assign faddr   = e_faddr;
-assign fssw    = e_fssw;
+assign fslw    = e_fslw;
 
 // the valid copies' reads: DC1's lookup; the engine state's set (a
 // split's next line, the slow path's, the scan's, the walk's descriptor,

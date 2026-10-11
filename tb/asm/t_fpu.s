@@ -1,10 +1,13 @@
-; AP040 FPU test: data movement stage (milestone H2)
+; AP68060 FPU test (from the AP040 milestone H suite, converted to the
+; MC68060's FPU: MC68060UM section 6)
 ;   FMOVE in all formats and directions, FMOVEM (registers and control),
-;   condition codes, FBcc/FScc/FDBcc, FSAVE/FRESTORE frames, and the
-;   unimplemented-instruction trap (vector 11, format $2)
+;   condition codes, FBcc, FINT/FINTRZ, the unimplemented instructions
+;   (FScc, FDBcc, FTRAPcc, FMOVECR, transcendentals: vector 11, format $2),
+;   unsupported data types (vector 55: format $0 before an instruction, $3
+;   after a store, $2 for packed decimal), unimplemented effective
+;   addresses (vector 60), the EXCP state and its three-long-word FSAVE
+;   frames, and the nonmaskable OVFL/UNFL traps.
 ;   word write to $F102 = $BAD0 on failure, $600D when all tests passed
-;   Arithmetic opmodes still trap at this stage: test 60+ pins that and
-;   moves to hardware checks when the arithmetic engine lands.
 
 FAILREG		equ	$F100
 DONEREG		equ	$F102
@@ -36,6 +39,18 @@ unsup_resume	equ	$3610
 unsup_pc	equ	$3614
 bsun_resume	equ	$3618
 bsun_pc	equ	$361C
+; 68060 additions
+exp_ea		equ	$3A40	; vector 11: the expected frame address field ...
+exp_ea_v	equ	$3A44	; ... checked when this word is set
+unimp_pc	equ	$3A48	; vector 11: the stacked PC
+unsup_fmt	equ	$3A4C	; vector 55: the frame's format/offset word
+exc_fw		equ	$3A50	; arithmetic handlers: frame format/offset word
+exc_sv		equ	$3A54	; ... and their FSAVE frame (12 bytes)
+cnt_fpunfl	equ	$3A60
+cnt_fpinex	equ	$3A62
+cnt_ea60	equ	$3A64	; vector 60 (unimplemented effective address)
+ea60_resume	equ	$3A68	; vector 60: where to resume (the frame names the instruction)
+ea60_pc		equ	$3A6C
 
 failt	macro
 	move.w	#\1,d7
@@ -80,15 +95,19 @@ ok\@:
 	dc.l	unexp		; vectors 33-47
 	endr
 	dc.l	h_fpbsun	; 48 signaling unordered conditional
-	dc.l	unexp		; 49 FP inexact
+	dc.l	h_fpinex	; 49 FP inexact
 	dc.l	h_fpdz		; 50 enabled FP divide-by-zero
-	dc.l	unexp		; 51 FP underflow
+	dc.l	h_fpunfl	; 51 FP underflow (always traps on the 68060)
 	dc.l	h_fpoperr	; 52 FP operand error
-	dc.l	h_fpovfl	; 53 FP overflow
+	dc.l	h_fpovfl	; 53 FP overflow (always traps on the 68060)
 	dc.l	h_fpsnan	; 54 enabled signaling NaN
-	dc.l	h_fpunsup	; 55 unimplemented data type
-	rept	200
-	dc.l	unexp		; vectors 56-255
+	dc.l	h_fpunsup	; 55 unsupported data type
+	rept	4
+	dc.l	unexp		; vectors 56-59
+	endr
+	dc.l	h_ea60		; 60 unimplemented effective address
+	rept	195
+	dc.l	unexp		; vectors 61-255
 	endr
 
 	org	$400
@@ -110,6 +129,10 @@ start:
 	clr.w	(cnt_fpovfl).l
 	clr.w	(cnt_ill4).l
 	clr.w	(save_unimp).l
+	clr.w	(cnt_fpunfl).l
+	clr.w	(cnt_fpinex).l
+	clr.w	(cnt_ea60).l
+	clr.w	(exp_ea_v).l
 
 ;-------------------------------------------------- reset register state
 ; FP0-FP7 power up as the default nonsignaling NaN: positive, exponent
@@ -254,31 +277,85 @@ fb4:
 fb5:
 	fnop
 
-; FBcc/FNOP do not update FPIAR on the 68040.  This mirrors the cputest
-; FBcc/0001.dat failure seen on hardware (F280 9360 at $42050000).
+; FBcc (and FNOP, which is FBF.W) records its own address in FPIAR on the
+; 68060 (WinUAE fpuop_bcc: fpiar = the FBcc), unlike the 68040.
 	fmove.l	#-1,fpiar
+fbpi0:
 	fbf.w	fbpi1
 fbpi1:
 	fmove.l	fpiar,d0
-	chkl	d0,-1,76
+	lea	fbpi0(pc),a0
+	cmp.l	a0,d0
+	beq.s	fbpi2
+	failt	76
+fbpi2:
+	fmove.l	#-1,fpiar
+fbpi3:
 	fnop
 	fmove.l	fpiar,d0
-	chkl	d0,-1,77
+	lea	fbpi3(pc),a0
+	cmp.l	a0,d0
+	beq.s	fbpi4
+	failt	77
+fbpi4:
 
-;-------------------------------------------------- FScc / FDBcc
+;-------------------------------------------------- FScc / FDBcc / FTRAPcc
+; unimplemented on the 68060 (MC68060UM table 6-11): vector 11, format $2,
+; the stacked PC the next instruction, nothing written, no register
+; updated.  The frame's address field (WinUAE fpuop_scc/dbcc/trapcc):
+; FScc's operand address (zero for Dn; -(An) already decremented),
+; FDBcc's extension word and displacement, zero for FTRAPcc.  FPIAR
+; names the instruction.
 	fcmp.x	fp1,fp0		; greater
+	move.w	(cnt_fpunimp).l,d6
 	moveq	#0,d5
+	move.l	#$202C,(exp_fmt).l
+	clr.l	(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+fscc_op1:
 	fsgt	d5
-	and.l	#$FF,d5
-	chkl	d5,$FF,33
-	fslt	d5
-	and.l	#$FF,d5
-	chkl	d5,0,34
-
+fscc_nx1:
+	chkl	d5,0,33		; nothing written
+	move.l	(unimp_pc).l,d0
+	chkl	d0,fscc_nx1,670
+	fmove.l	fpiar,d0
+	chkl	d0,fscc_op1,671
+	lea	($3300).l,a2
+	move.b	#$5A,($32FF).l
+	move.l	#$32FF,(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+	fslt	-(a2)
+	cmp.l	#$3300,a2	; -(An) not applied
+	beq.s	fscc_ok2
+	failt	34
+fscc_ok2:
+	move.b	($32FF).l,d0
+	cmp.b	#$5A,d0
+	beq.s	fscc_ok3
+	failt	672
+fscc_ok3:
 	moveq	#3,d4
+	move.l	#fdb1-(fdb_op+4),d0
+	and.l	#$FFFF,d0	; extension word $0000 (F), the displacement
+	move.l	d0,(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+fdb_op:
+	fdbf	d4,fdb1
 fdb1:
-	fdbf	d4,fdb1		; false: pure count loop
-	chkl	d4,$FFFF,35	; exits at -1 (word)
+	chkl	d4,3,35		; the count is not touched
+	move.l	(unimp_pc).l,d0
+	chkl	d0,fdb1,673
+	clr.l	(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+	dc.w	$F27A,$000F,$1234	; ftrapt.w #$1234
+ftr_nx:
+	move.l	(unimp_pc).l,d0
+	chkl	d0,ftr_nx,674	; the next instruction, past the operand
+	move.w	(cnt_fpunimp).l,d0
+	sub.w	d6,d0
+	and.l	#$FFFF,d0
+	chkl	d0,4,675
+	sub.w	#4,(cnt_fpunimp).l
 
 ;-------------------------------------------------- FMOVEM registers
 	fmove.l	#111,fp0
@@ -311,56 +388,80 @@ fdb1:
 	fmove.l	#0,fpcr
 	fmove.l	#0,fpsr
 
-; Dynamic FMOVEM masks must adjust (An)+ by the selected register count,
-; not by the extension word's register-number field.
+; A dynamic FMOVEM list is an unimplemented effective address on the
+; 68060: vector 60, format $0, the stacked PC the instruction, nothing
+; moved and the address register unchanged.
 	fmove.l	#333,fp7
 	move.l	#$80,d0
 	lea	($3300).l,a0
+	lea	fmvdyn1(pc),a1
+	move.l	a1,(ea60_resume).l
+fmvdyn_op:
 	fmovem.x	d0,-(a0)
-	cmp.l	#$32F4,a0
-	beq.s	fmvdyn1
-	failt	59
 fmvdyn1:
-	move.l	($32F4).l,d1
-	chkl	d1,$40070000,60
+	cmp.l	#$3300,a0
+	beq.s	fmvdyn2
+	failt	59
+fmvdyn2:
+	chkcnt	cnt_ea60,1,60
+	move.l	(ea60_pc).l,d0
+	chkl	d0,fmvdyn_op,676
 
 ;-------------------------------------------------- FSAVE / FRESTORE
+; the 68060 frame is always three long words (MC68060UM 6.7): format $00
+; NULL, $60 IDLE, $E0 EXCP in bits 15-8 of the first
 	lea	($3290).l,a1
-	fsave	-(a1)		; FPU used: 4-byte IDLE frame
-	cmp.l	#$328C,a1
+	fsave	-(a1)		; FPU used: IDLE frame
+	cmp.l	#$3284,a1
 	beq.s	fs1
 	failt	40
 fs1:
-	move.l	($328C).l,d0
-	chkl	d0,$41000000,41
+	move.l	($3284).l,d0
+	and.l	#$0000FFFF,d0
+	chkl	d0,$00006000,41
 	frestore	(a1)+	; restore the idle state
+	cmp.l	#$3290,a1
+	beq.s	fs1b
+	failt	677
+fs1b:
+	clr.l	-(a1)
+	clr.l	-(a1)
 	clr.l	-(a1)
 	frestore	(a1)+	; NULL frame: reset
-	lea	($3298).l,a2
+	lea	($32A0).l,a2
 	fsave	-(a2)		; back to NULL
 	move.l	($3294).l,d0
+	and.l	#$0000FF00,d0
 	chkl	d0,0,42
 	frestore	(a2)+
 	; Restoring IDLE into a NULL FPU must make a subsequent FSAVE emit IDLE.
-	; The old RTL accepted the header but left fpu_used clear.
-	move.l	#$41000000,($328C).l
-	lea	($328C).l,a1
+	move.l	#$00006000,($3284).l
+	clr.l	($3288).l
+	clr.l	($328C).l
+	lea	($3284).l,a1
 	frestore	(a1)+
-	lea	($3298).l,a2
+	lea	($32A0).l,a2
 	fsave	-(a2)
 	cmp.l	#$3294,a2
 	beq.s	fs_idle_pd_ok
 	failt	284
 fs_idle_pd_ok:
 	move.l	(a2),d0
-	chkl	d0,$41000000,285
+	and.l	#$0000FF00,d0
+	chkl	d0,$00006000,285
+	; a format other than $00, $60, $E0 is a format error (vector 14);
+	; the frame's other bits do not matter
+	move.l	#$12340000,(a2)
+	frestore	(a2)	; $00 with junk above: NULL, accepted
 	clr.l	(a2)
+	clr.l	4(a2)
+	clr.l	8(a2)
 	frestore	(a2)		; return to NULL before the vector-11 checks
 
 ;-------------------------------- unimplemented instructions (vector 11)
 	; cputest FABS.B/0001: an address-register-direct source is not a
-	; legal floating-point EA.  The 68040 reports a standard format-$0
-	; F-line exception, not vector 4 and not an FPSP format-$2 frame.
+	; legal floating-point EA.  A hardware opmode reports a standard
+	; format-$0 F-line exception, not vector 4 and not a format-$2 frame.
 	fmove.l	#77,fp1
 	dc.w	$F208,$5898	; invalid fabs.b a0,fp1 encoding
 	chkcnt	cnt_fpline,1,76
@@ -376,9 +477,7 @@ fs_idle_pd_ok:
 	chkl	d0,88,79
 
 	; An invalid FMOVE-out DESTINATION is an F-line with no FPIAR side
-	; effect: opclass 011 records FPIAR only once the store's EA has been
-	; accepted (WinUAE fpuop_arithmetic case 3 reaches maybe_set_fpiar
-	; only after put_fp_value succeeds).  AP040 used to write FPIAR here.
+	; effect (WinUAE fpuop_arithmetic case 3: put_fp_value fails first).
 	fmove.l	#-1,fpiar
 	dc.w	$F208,$6C00	; fmove.p fp0,a0 -- An is not a destination
 	chkcnt	cnt_fpline,3,324
@@ -386,16 +485,21 @@ fs_idle_pd_ok:
 	chkl	d0,-1,325	; FPIAR untouched by the rejected store
 	subq.w	#1,(cnt_fpline).l	; keep the absolute counts below intact
 
-	; An FPSP-emulated opmode with an ILLEGAL EA still reports through the
+	; An unimplemented opmode with an ILLEGAL EA still reports through the
 	; unimplemented-instruction route (vector 11, format $2, PC of the
-	; following instruction), not as a plain format-$0 F-line: WinUAE's
-	; get_fp_value runs fault_if_unimplemented_680x0 before it rejects a
-	; Dn or An source.  FABS with the same EA stays a format-$0 F-line
-	; (tests 76-79 above) because FABS is hardware.
+	; following instruction, address field zero): WinUAE's get_fp_value
+	; runs fault_if_unimplemented_680x0 before it rejects a Dn or An
+	; source.  FABS with the same EA stays a format-$0 F-line (tests
+	; 76-79 above) because FABS is hardware -- and so is FINT on the 68060.
 	move.l	#$202C,(exp_fmt).l
-	dc.w	$F201,$4881	; fint.x a1,fp1 -- An source, FPSP opmode
+	clr.l	(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+	dc.w	$F209,$488E	; fsin.x a1,fp1 -- An source, unimplemented opmode
 	chkcnt	cnt_fpunimp,1,326
 	subq.w	#1,(cnt_fpunimp).l
+	dc.w	$F209,$4881	; fint.x a1,fp1 -- FINT is hardware: F-line
+	chkcnt	cnt_fpline,3,678
+	subq.w	#1,(cnt_fpline).l
 
 	; A store whose destination cannot hold the format is an F-line with
 	; no FPIAR side effect, exactly like the An/PC-relative destinations.
@@ -406,393 +510,11 @@ fs_idle_pd_ok:
 	chkl	d0,-1,328
 	subq.w	#1,(cnt_fpline).l
 
-	; A packed STORE through (An)+ is post-instruction too: the address
-	; register update stands across the datatype fault.  It also MUST
-	; prepare the BUSY frame before vector 55: NeXT's real FPSP otherwise
-	; sees IDLE and dispatches using unrelated old kernel-stack contents.
-	fmove.l	#7,fp0
-	lea	($3340).l,a0
-	move.l	a0,d2
-	move.l	#0,(unsup_resume).l
-	fmove.p	fp0,(a0)+	; unsupported data type, post-instruction
-	move.l	a0,d0
-	sub.l	d2,d0
-	chkl	d0,12,329
-	move.l	(unsup_fhdr).l,d0
-	chkl	d0,$41600000,650
-	move.l	(unsup_fsave+64).l,d0
-	chkl	d0,$6C000000,651	; packed static store command
-	move.l	(unsup_fsave+72).l,d0
-	chkl	d0,$04100000,652	; E1 and T
-	move.l	(unsup_fsave+88).l,d0
-	chkl	d0,$40010000,653	; ETEMP = extended +7
-	move.l	(unsup_fsave+92).l,d0
-	chkl	d0,$E0000000,654
-	move.l	(unsup_fsave+80).l,d0
-	chkl	d0,$E0000000,655	; FPTEMP also carries the source
-	subq.w	#1,(cnt_fpunsup).l
-
-	; libsys_s.B.shlib __dbltopdfp uses this dynamic-k form.
-	moveq	#-1,d0
-packed_dynamic:
-	dc.w	$F210,$7C00	; fmove.p fp0,(a0){d0}
-	move.l	(unsup_fsave+64).l,d0
-	chkl	d0,$7C000000,656
-	move.l	(unsup_fsave+40).l,d0
-	chkl	d0,packed_dynamic,657
-	subq.w	#1,(cnt_fpunsup).l
-
-	; A packed source is split between FPTEMP_LO and ETEMP_HI/LO.
-	; Use nonzero words throughout: an empty placeholder frame must fail.
-	move.l	#$40010001,($3340).l
-	move.l	#$23456789,($3344).l
-	move.l	#$01234567,($3348).l
-	fmove.p	($3340).l,fp1
-	move.l	(unsup_fsave+84).l,d0
-	chkl	d0,$40010001,658
-	move.l	(unsup_fsave+92).l,d0
-	chkl	d0,$23456789,659
-	move.l	(unsup_fsave+96).l,d0
-	chkl	d0,$01234567,660
-	move.l	(unsup_fsave+60).l,d0
-	chkl	d0,$E0000000,661	; packed tag
-	subq.w	#1,(cnt_fpunsup).l
-
-	; An emulated opcode with the same packed source uses the short
-	; unimplemented frame, retaining E1 and the identical split payload.
-	move.w	#1,(save_unimp).l
-	move.l	#$202C,(exp_fmt).l
-	fint.p	($3340).l,fp2
-	move.l	(unimp_frame+$18).l,d0
-	chkl	d0,$04000000,662
-	move.l	(unimp_frame+$24).l,d0
-	chkl	d0,$40010001,663
-	move.l	(unimp_frame+$2C).l,d0
-	chkl	d0,$23456789,664
-	move.l	(unimp_frame+$30).l,d0
-	chkl	d0,$01234567,665
-	subq.w	#1,(cnt_fpunimp).l
-	clr.w	(save_unimp).l
-
-	fmove.l	#7,fp0		; FPU in use again
-	move.l	#$202C,(exp_fmt).l
-	move.w	#1,(save_unimp).l
-	dc.w	$F200,$000E	; fsin.x fp0: transcendental, FPSP route
-	chkcnt	cnt_fpunimp,1,43
-	move.l	(unimp_frame+$00).l,d0
-	chkl	d0,$41300000,260	; revision $41, 48-byte payload
-	move.l	(unimp_frame+$04).l,d0
-	chkl	d0,$00260000,261	; CMDREG3B mapping of command $000E
-	move.l	(unimp_frame+$08).l,d0
-	chkl	d0,0,262		; reserved
-	move.l	(unimp_frame+$0C).l,d0
-	chkl	d0,0,263		; normalized STAG, no GRS/WBT bits
-	move.l	(unimp_frame+$10).l,d0
-	chkl	d0,$000E0000,264	; CMDREG1B
-	move.l	(unimp_frame+$14).l,d0
-	chkl	d0,0,265		; normalized DTAG
-	move.l	(unimp_frame+$18).l,d0
-	chkl	d0,0,266		; E1=E3=T=0: the exception-pending bits
-					; belong to the ARITHMETIC frame, not to the
-					; unimplemented-instruction frame.  WinUAE
-					; sets E1 only in
-					; fpsr_check_arithmetic_exception and for a
-					; packed operand in fp_unimp_datatype;
-					; fp_unimp_instruction leaves them zero.
-					; This assertion previously read $04000000
-					; and encoded the RTL's error rather than
-					; checking it.
-	move.l	(unimp_frame+$1C).l,d0
-	chkl	d0,$40010000,267	; FPTEMP destination = +7.0
-	move.l	(unimp_frame+$20).l,d0
-	chkl	d0,$E0000000,268
-	move.l	(unimp_frame+$24).l,d0
-	chkl	d0,0,269
-	move.l	(unimp_frame+$28).l,d0
-	chkl	d0,$40010000,270	; ETEMP source = +7.0
-	move.l	(unimp_frame+$2C).l,d0
-	chkl	d0,$E0000000,271
-	move.l	(unimp_frame+$30).l,d0
-	chkl	d0,0,272
-
-	; FRESTORE must consume the complete frame.  Saving the restored pending
-	; state through -(An) must subtract all 52 bytes and reproduce the frame.
-	lea	(unimp_frame).l,a1
-	frestore	(a1)+
-	cmp.l	#unimp_frame+$34,a1
-	beq.s	unimp_pi_ok
-	failt	273
-unimp_pi_ok:
-	fsave	-(a1)
-	cmp.l	#unimp_frame,a1
-	beq.s	unimp_pd_ok
-	failt	274
-unimp_pd_ok:
-	move.l	(a1),d0
-	chkl	d0,$41300000,275
-	move.l	$10(a1),d0
-	chkl	d0,$000E0000,276
-	move.l	$28(a1),d0
-	chkl	d0,$40010000,277
-
-	; Memory-source software operations must capture the converted source,
-	; not merely the raw 32-bit input window.  FINT.L #5,fp2 is opclass 2,
-	; format long, destination FP2, opmode $01.
-	dc.w	$F23C,$4101
-	dc.l	5
-	chkcnt	cnt_fpunimp,2,278
-	move.l	(unimp_frame+$04).l,d0
-	chkl	d0,$01010000,279	; CMDREG3B
-	move.l	(unimp_frame+$10).l,d0
-	chkl	d0,$41010000,280	; CMDREG1B
-	move.l	(unimp_frame+$0C).l,d0
-	chkl	d0,0,281		; normalized long-integer source
-	move.l	(unimp_frame+$28).l,d0
-	chkl	d0,$40010000,282	; ETEMP = extended +5.0
-	move.l	(unimp_frame+$2C).l,d0
-	chkl	d0,$A0000000,283
-	fmovecr	#0,fp1		; constant ROM: also not hardware
-	chkcnt	cnt_fpunimp,3,44
-
-; FRAME SIGNATURE for the AIBB shape: FINTRZ.X FP1,FP2 is the exact
-; instruction AIBB's BeachBall uses to convert before FMOVE.L FPn,Dn,
-; and the FPSP dispatches on this frame's contents.  cputest never
-; FSAVEs an unimplemented instruction, so nothing else in this suite
-; can see these fields changing.  XOR the whole 48-byte payload into
-; one longword: any field drift moves it.
-	fmove.l	#7,fp1
-	move.l	#$202C,(exp_fmt).l
-	move.w	#1,(save_unimp).l
-	dc.w	$F200,$0883	; fintrz.x fp1,fp2
-	moveq	#0,d0
-	lea	(unimp_frame).l,a0
-	moveq	#11,d1
-fsig_lp:
-	move.l	(a0)+,d2
-	eor.l	d2,d0
-	dbra	d1,fsig_lp
-	move.l	d0,d3
-	swap	d3
-	eor.w	d3,d0			; fold the 48-byte XOR to 16 bits
-	and.l	#$FFFF,d0
-	chkl	d0,$0000F6CE,199	; FINTRZ unimp-frame signature
-	sub.w	#1,(cnt_fpunimp).l
-
-;------------------------------------------- unimplemented-frame fields
-; The FPSP DISPATCHES on these fields, and cputest never FSAVEs an
-; unimplemented instruction -- so a corpus run cannot see any of them
-; drift.  A wrong E1 here once hung AIBB forever (the FPSP took the
-; arithmetic path instead of emulate-and-advance), which is why every
-; case below re-checks the exception-pending bits.
-;
-; CMDREG3B is WinUAE's swizzle of the extension word:
-;     (cmd & $03C3) | ((cmd & $0038) >> 1) | ((cmd & $0004) << 3)
-; Each case states the hand-computed value so a mapping change shows up
-; as a specific field rather than a signature mismatch.
-
-FRAMECHK	macro	; \1=extword \2=cmdreg3b \3=base test number
-	fmove.l	#7,fp0
-	fmove.l	#3,fp1
-	move.l	#$202C,(exp_fmt).l
-	move.w	#1,(save_unimp).l
-	dc.w	$F200,\1
-	move.l	(unimp_frame+$00).l,d0
-	chkl	d0,$41300000,\3	; frame id: revision $41, 48-byte
-	move.l	(unimp_frame+$10).l,d0
-	chkl	d0,(\1)<<16,\3+1	; CMDREG1B = the extension word
-	move.l	(unimp_frame+$04).l,d0
-	chkl	d0,(\2)<<16,\3+2	; CMDREG3B = the swizzle
-	move.l	(unimp_frame+$18).l,d0
-	chkl	d0,0,\3+3		; E1=E3=T=0 on an unimp INSTRUCTION
-	sub.w	#1,(cnt_fpunimp).l
-	endm
-
-	; FINTRZ.X FP1,FP2 -- AIBB's BeachBall converts with exactly this
-	; before FMOVE.L FPn,Dn, and it is what the hardware trace showed.
-	FRAMECHK	$0503,$0103,200
-	; FTWOTOX.X FP0,FP0 -- opmode bit 4 exercises the >>1 half
-	FRAMECHK	$0011,$0009,204
-	; FETOX.X FP0,FP0
-	FRAMECHK	$0010,$0008,208
-	; FREM FP0,FP0 -- dyadic, opmode bit 2 exercises the <<3 half
-	FRAMECHK	$0025,$0031,212
-
-;--------------------------------------- FSAVE/FRESTORE frame round trip
-; A frame handed back by FRESTORE must come out of the next FSAVE
-; unchanged.  The FPSP saves, inspects, restores and returns; if a field
-; is dropped or re-derived on the way through, the state it resumes with
-; is not the state it saved.
-	fmove.l	#7,fp0
-	move.l	#$202C,(exp_fmt).l
-	move.w	#1,(save_unimp).l
-	dc.w	$F200,$0503	; fintrz.x fp1,fp2: leaves a frame
-	frestore (unimp_frame).l	; hand it back
-	fsave	(frame_b).l		; and take it again
-	lea	(unimp_frame).l,a0
-	lea	(frame_b).l,a1
-	moveq	#11,d1
-frt_lp:
-	move.l	(a0)+,d2
-	cmp.l	(a1)+,d2
-	beq.s	frt_ok
-	failt	216			; frame changed across FRESTORE+FSAVE
-frt_ok:
-	dbra	d1,frt_lp
-	move.l	(frame_b).l,d0
-	chkl	d0,$41300000,217	; and it is still the UNIMP frame
-	sub.w	#1,(cnt_fpunimp).l
-
-; Consecutive transcendentals on DIFFERENT registers.  Hardware reported an
-; exception on the SECOND of a back-to-back FSIN.X pair (HRTmon caught it at
-; the FSIN.X FP1 following an FSIN.X FP0), the same "first one works, the
-; next one traps" shape as the unimplemented-state re-signal bug.  Each must
-; take its own vector-11 trap and leave a frame naming ITS destination
-; register: CMDREG1B carries the register field, so a stale frame from the
-; previous instruction shows up here.
-	fmove.l	#7,fp0
-	fmove.l	#9,fp1
-	fmove.l	#11,fp2
-	move.l	#$202C,(exp_fmt).l
-	move.w	(cnt_fpunimp).l,d5
-	move.w	#1,(save_unimp).l
-	dc.w	$F200,$000E	; fsin.x fp0
-	move.l	(unimp_frame+$10).l,d0
-	chkl	d0,$000E0000,189	; CMDREG1B: opclass 0, src X, dst FP0
-	move.w	#1,(save_unimp).l
-	dc.w	$F200,$048E	; fsin.x fp1  (src FP1, dst FP1)
-	move.l	(unimp_frame+$10).l,d0
-	chkl	d0,$048E0000,190	; ...dst FP1, not a stale FP0 frame
-	move.w	#1,(save_unimp).l
-	dc.w	$F200,$090E	; fsin.x fp2  (src FP2, dst FP2)
-	move.l	(unimp_frame+$10).l,d0
-	chkl	d0,$090E0000,191	; ...dst FP2
-	move.w	(cnt_fpunimp).l,d0
-	sub.w	d5,d0
-	and.l	#$FFFF,d0
-	chkl	d0,3,192		; exactly three traps, one per instruction
-	; cnt_fpunimp is a RUNNING total that later tests assert exact values
-	; of, so hand it back unchanged (the same idiom the FSIN test above
-	; uses for cnt_fpunsup).
-	sub.w	#3,(cnt_fpunimp).l
-
-; A vector-11 trap whose handler does NOT acknowledge the frame must not
-; leave the FPU re-signalling on the next VALID instruction.  Hardware
-; showed exactly that: an FSIN.X trapped to HRTmon (which has no FPSP and
-; does not FSAVE), and a later FMUL.L -- a hardware opcode the 68040
-; executes directly -- came back as another $202C Line-F.  Only a frame
-; placed by FRESTORE may re-signal; a trap the core raised itself must
-; not.  This is the shape of the bug fixed in dbf6ad78, re-pinned here
-; with the field's own instruction pair.
-	move.w	(cnt_fpunimp).l,d5
-	move.w	#1,(nosave_unimp).l
-	fmove.l	#7,fp0
-	dc.w	$F200,$000E	; fsin.x fp0: traps, handler does NOT FSAVE
-	fmove.l	#3,fp1
-	dc.w	$F23C,$4023	; fmul.l #$20AB,fp0 -- HARDWARE op, must execute
-	dc.l	$000020AB
-	clr.w	(nosave_unimp).l
-	move.w	(cnt_fpunimp).l,d0
-	sub.w	d5,d0
-	and.l	#$FFFF,d0
-	chkl	d0,1,193		; ONE trap: the FSIN only, not the FMUL
-	fmove.l	fp0,d0
-	chkl	d0,$0000E4AD,194	; and the FMUL actually multiplied (7*$20AB)
-	sub.w	#1,(cnt_fpunimp).l
-
-; The field case used FTWOTOX.X, not FSIN.X, immediately before the FMUL.
-; Both are unimplemented transcendentals but they are different opmodes
-; ($11 vs $0E), so pin the reported pair exactly rather than a relative.
-	move.w	(cnt_fpunimp).l,d5
-	move.w	#1,(nosave_unimp).l
-	fmove.l	#7,fp0
-	dc.w	$F200,$0011	; ftwotox.x fp0: traps, handler does NOT FSAVE
-	dc.w	$F23C,$4023	; fmul.l #$20AB,fp0 -- HARDWARE op, must execute
-	dc.l	$000020AB
-	clr.w	(nosave_unimp).l
-	move.w	(cnt_fpunimp).l,d0
-	sub.w	d5,d0
-	and.l	#$FFFF,d0
-	chkl	d0,1,195		; ONE trap: the FTWOTOX only
-	fmove.l	fp0,d0
-	chkl	d0,$0000E4AD,196	; the FMUL executed after it
-	sub.w	#1,(cnt_fpunimp).l
-
-;----------- single-step over an unimplemented FP instruction (218-221)
-; HRTmon steps by setting T1 and waiting for the vector-9 trace.  On a
-; 68040 the F-line exception CANCELS the pending trace but stacks the SR
-; with T1 intact (WinUAE exception_check_trace: every Exception() clears
-; the pending trace and the live T bits; the frame keeps the old SR);
-; the handler runs untraced, its RTE restores T1, and the instruction at
-; the resume point executes and traces.  The step comes back.  Hardware
-; showed it NOT coming back on exactly this instruction, so pin the
-; whole chain: one vector-11 trap, then exactly one trace whose stacked
-; PC is after the resume instruction.
-	move.l	#h_trace9,($24).l
-	clr.w	(cnt_trc9).l
-	move.w	(cnt_fpunimp).l,d5
-	fmove.l	#7,fp1
-	move.l	#$202C,(exp_fmt).l
-	move.w	#1,(save_unimp).l
-	move.w	#$0000,-(sp)
-	pea	(t1site).l
-	move.w	#$A000,-(sp)	; S set, T1 set: enter the site single-stepping
-	rte
-t1site:
-	dc.w	$F200,$0503	; fintrz.x fp1,fp2: vector 11 with T1 pending
-t1next:
-	nop			; the $202C frame resumes here, T1 restored
-t1after:
-	move.w	(cnt_trc9).l,d0
-	chkl	d0,1,218	; the step CAME BACK: exactly one trace
-	move.l	(trc9_pc).l,d0
-	chkl	d0,t1after,219	; ...taken after the resume instruction
-	move.w	(cnt_fpunimp).l,d0
-	sub.w	d5,d0
-	and.l	#$FFFF,d0
-	chkl	d0,1,220	; and exactly one vector-11 trap
-	sub.w	#1,(cnt_fpunimp).l
-
-; the same step with an FPSP-shaped handler: FSAVE, inspect, FRESTORE,
-; RTE.  The restored frame must not eat the trace either.
-	move.w	(cnt_fpunimp).l,d5
-	clr.w	(cnt_trc9).l
-	move.w	#1,(restore_unimp).l
-	fmove.l	#7,fp1
-	move.w	#$0000,-(sp)
-	pea	(t2site).l
-	move.w	#$A000,-(sp)
-	rte
-t2site:
-	dc.w	$F200,$0503	; fintrz.x fp1,fp2
-	nop
-t2after:
-	clr.w	(restore_unimp).l
-	move.w	(cnt_trc9).l,d0
-	chkl	d0,1,221	; the step still comes back through FRESTORE
-	sub.w	#1,(cnt_fpunimp).l
-	move.l	#unexp,($24).l
-
-; THE FIELD CASE.  Same pair, but the handler FSAVEs and FRESTOREs the
-; frame -- what a debugger or a partial FPSP does.  A restored frame must
-; not re-signal the unimplemented trap: hardware showed $202C Line-F on
-; the FMUL.L, a hardware opcode the FPU executes directly, immediately
-; after an FTWOTOX.X trap whose handler had restored the frame.
-; WinUAE reads fpu_exp_state only in FSAVE/FRESTORE, never at dispatch;
-; what FRESTORE re-arms is an ARITHMETIC vector, never vector 11.
-	move.w	(cnt_fpunimp).l,d5
-	move.w	#1,(restore_unimp).l
-	fmove.l	#7,fp0
-	dc.w	$F200,$0011	; ftwotox.x fp0: traps, handler FSAVE+FRESTORE
-	dc.w	$F23C,$4023	; fmul.l #$20AB,fp0 -- must EXECUTE, not re-trap
-	dc.l	$000020AB
-	clr.w	(restore_unimp).l
-	move.w	(cnt_fpunimp).l,d0
-	sub.w	d5,d0
-	and.l	#$FFFF,d0
-	chkl	d0,1,197		; ONE trap: the restored frame did not re-signal
-	fmove.l	fp0,d0
-	chkl	d0,$0000E4AD,198	; and the FMUL produced 7*$20AB
-	sub.w	#1,(cnt_fpunimp).l
+; the packed, unimplemented-instruction, FINT and frame batteries live in
+; their own section at $C000: the main code section must stay below
+; $3200, where the test data area begins
+	jmp	unimp_battery
+unimp_return:
 
 ;-------------------------------------------------- arithmetic (stage H3)
 	fmove.l	#123,fp0
@@ -876,9 +598,23 @@ t2after:
 	clr.l	($32D8).l
 	fmove.x	($32D0).l,fp5
 	fmove.l	#0,fpsr
+	clr.w	(cnt_fpunfl).l
 	fmove.s	fp5,($32DC).l
 	move.l	($32DC).l,d0
 	chkl	d0,$00400000,65
+	; UNFL is nonmaskable on the 68060 (MC68060UM 6.6.5): a store writes
+	; its default result, then takes vector 51 post-instruction (format
+	; $3, the destination's address); the handler's FSAVE sees the EXCP
+	; frame with vector code 3
+	chkcnt	cnt_fpunfl,1,690
+	moveq	#0,d0
+	move.w	(exc_fw).l,d0
+	chkl	d0,$30CC,691
+	move.l	(fp_exc_ea).l,d0
+	chkl	d0,$32DC,692
+	move.l	(exc_sv).l,d0
+	and.l	#$0000FFFF,d0
+	chkl	d0,$0000E003,693
 	; Tininess is detected BEFORE rounding, so an EXACT subnormal store
 	; still raises UNFL.  This check was missing: the test looked only at
 	; the stored datum, so `inx && tiny-after-rounding` gating hid it.
@@ -899,13 +635,16 @@ t2after:
 	fmove.s	fp5,($32DC).l
 	move.l	($32DC).l,d0
 	chkl	d0,$00800000,182	; carried up to the minimum normal
+	chkcnt	cnt_fpunfl,2,694	; tininess before rounding: UNFL, trapped
 	fmove.l	fpsr,d0
 	and.l	#$00000A28,d0
 	chkl	d0,$00000A28,183	; UNFL+INEX2 status, both accrued
 	fmove.l	#0,fpsr
 
-; A denormal extended source is an unimplemented data type on the 68040.
-; It takes the vector-55 datatype trap so the FPSP can inspect the operand.
+; A denormal extended source is an unsupported data type: vector 55 as a
+; PRE-instruction exception (MC68060UM 6.5.2: format $0, the stacked PC
+; the instruction itself, the address register as it was); the FPU is in
+; the EXCP state, vector code 7, the operand in the frame.
 	fmove.l	#99,fp0
 	clr.l	($32D0).l
 	clr.l	($32D4).l
@@ -915,37 +654,43 @@ t2after:
 denx_op:
 	fmove.x	($32D0).l,fp0
 denx_cont:
-	; The handler ran FSAVE.  A real FPSP needs the offending datatype in
-	; a BUSY frame; this used to be an IDLE frame ($41000000) carrying no
-	; CMDREG, ETEMP or tags, and nothing tested it because the handler
-	; only counted the trap.
 	move.l	(unsup_fhdr).l,d0
-	chkl	d0,$41600000,184	; $41/$60 BUSY, not IDLE
-	move.l	(unsup_fsave+96).l,d0
-	chkl	d0,$00000001,185	; ETEMP holds the denormal operand
-	move.l	(unsup_fsave+88).l,d0
-	chkl	d0,$00000000,186	; ...and its sign/exponent longword
-	move.l	(unsup_fsave+60).l,d0
-	and.l	#$E0000000,d0
-	chkl	d0,$80000000,187	; STAG = 4: denormal/unnormal
-	move.l	(unsup_fsave+40).l,d0
-	chkl	d0,denx_op,188		; FPIARCU addresses the faulting op
+	chkl	d0,$0000E007,184	; EXCP, UNSUP, operand exponent 0
+	move.l	(unsup_fsave+8).l,d0
+	chkl	d0,$00000001,185	; the denormal operand
+	move.l	(unsup_fsave+4).l,d0
+	chkl	d0,$00000000,186
+	moveq	#0,d0
+	move.w	(unsup_fmt).l,d0
+	chkl	d0,$00DC,187		; format $0, vector 55
+	fmove.l	fpiar,d0
+	chkl	d0,denx_op,188		; FPIAR addresses the faulting op
 	chkcnt	cnt_fpunsup,1,66
 	move.l	(unsup_pc).l,d0
-	chkl	d0,denx_cont,76	; post-instruction: the FOLLOWING PC
+	chkl	d0,denx_op,76	; pre-instruction: the instruction's own PC
 	fmove.l	fp0,d0
 	chkl	d0,99,67
 
-; Enabled hardware exceptions use their architectural vectors and inhibit
-; destination writeback.  The handler returns to the following instruction.
+; Enabled hardware exceptions use their architectural vectors; enabled
+; DZ, SNAN and OPERR inhibit the register destination's writeback.  The
+; exception is taken before the NEXT floating-point instruction (format
+; $0, its PC); the FPU stays in the EXCP state, re-taking it, until the
+; handler's FSAVE (MC68060UM 6.6), which the handler then returns past.
 	fmove.l	#$400,fpcr	; enable divide-by-zero
 	fmove.l	#7,fp6
 	fmove.l	#0,fp7
 	fdiv.x	fp7,fp6
-	fnop			; synchronize: enabled FPU exceptions are
-				; delivered pre-instruction at the next FPU
-				; dispatch (68040 FPSP model)
+dz_nop:
+	fnop			; the exception is taken here
 	chkcnt	cnt_fpdz,1,68
+	moveq	#0,d0
+	move.w	(exc_fw).l,d0
+	chkl	d0,$00C8,695		; format $0, vector 50
+	move.l	(fp_exc_ea).l,d0	; (the handlers record the stacked PC
+	chkl	d0,dz_nop,696		; of a format-$0 frame here)
+	move.l	(exc_sv).l,d0
+	and.l	#$0000FFFF,d0
+	chkl	d0,$0000E002,697	; EXCP, DZ
 	fmove.l	fpsr,d0
 	and.l	#$00000400,d0
 	chkl	d0,$400,70
@@ -958,8 +703,10 @@ denx_cont:
 	move.l	#$7F800001,($32DC).l
 	fmove.l	#$4000,fpcr
 	fmove.s	($32DC).l,fp0
-	fnop			; synchronize the deferred enabled-SNAN trap
+	fnop			; the deferred enabled-SNAN trap
 	chkcnt	cnt_fpsnan,1,71
+	move.l	(exc_sv).l,d0
+	chkl	d0,$7FFFE006,698	; EXCP, SNAN; the operand's exponent
 	fmove.l	fpsr,d0
 	and.l	#$00004000,d0
 	chkl	d0,$4000,72
@@ -984,16 +731,11 @@ fbsun1:
 	chkl	d0,$8000,75
 	fmove.l	#0,fpcr
 
-;--------------------------- unsupported data types (vector 55, format $3)
-; EVERY datatype fault stacks format $3 with the FOLLOWING instruction's
-; PC -- sources as well as stores.  It is a post-instruction exception in
-; both directions; only the EA field distinguishes them (the source
-; address, zero for a register or immediate source with no address, or
-; the destination address for a store).  These expectations used to name
-; the faulting instruction instead: the v20 corpus masked the stacked PC
-; out of every frame comparison, so nothing contradicted that reading
-; until the v24 corpus checked it (WinUAE fpp.cpp: "simplification:
-; always mid/post-instruction exception").
+;--------------------------- unsupported data types (vector 55)
+; A denormal or unnormal SOURCE is a pre-instruction exception (format $0,
+; the instruction's PC, (An)+/-(An) not applied); a STORE of one is
+; post-instruction (format $3, the destination's address); packed decimal
+; is format $2 either way (MC68060UM 6.5.2).
 	fmove.l	#1,fp0			; keep the FPU in a known state
 	move.l	#$00000000,($3300).l	; denormal extended: exp 0, mantissa set
 	move.l	#$00010000,($3304).l
@@ -1007,16 +749,16 @@ den_src_op:
 den_src_cont:
 	chkcnt	cnt_fpunsup,1,80
 	move.l	(unsup_pc).l,d0
-	chkl	d0,den_src_cont,81	; post-instruction: the FOLLOWING PC
+	chkl	d0,den_src_op,81	; pre-instruction: its own PC
+	move.l	#$EEEEEEEE,($3320).l
 	fmove.p	fp0,($3320).l		; packed decimal store: data type
 	chkcnt	cnt_fpunsup,2,83
 	move.l	(unsup_fa).l,d0
-	chkl	d0,$3320,82		; format-$3 carries destination EA
+	chkl	d0,$3320,82		; format $2 carries the destination's address
+	move.l	($3320).l,d0
+	chkl	d0,$EEEEEEEE,699	; nothing stored
 
-; A datatype fault is POST-instruction, so an (An)+ source leaves the
-; address register INCREMENTED by the operand size.  WinUAE applies the
-; increment in get_fp_value when the EA is computed and only the 68060
-; undoes it (mmufixup); the v24 corpus checks it, v20 did not.
+; a pre-instruction datatype fault leaves an (An)+ source register alone
 	lea	($3300).l,a3		; the denormal extended operand above
 	move.l	a3,d2
 	lea	pinc_cont(pc),a0
@@ -1026,7 +768,7 @@ pinc_op:
 pinc_cont:
 	move.l	a3,d0
 	sub.l	d2,d0
-	chkl	d0,12,323		; (An)+ update stands across the fault
+	chkl	d0,0,323		; (An)+ not applied
 	subq.w	#1,(cnt_fpunsup).l	; keep the absolute counts below intact
 
 	move.l	#$40000000,($3310).l	; unnormal: exponent set, msb of
@@ -1146,8 +888,13 @@ unnorm_cont:
 	move.l	#$00000000,($33A8).l
 	fmove.x	($3390).l,fp0
 	fmove.x	($33A0).l,fp1
+	clr.w	(cnt_fpunfl).l
 	fmul.x	fp1,fp0			; 2^-16393: subnormal
-	fmovem.x	fp0,($33B0).l
+	fmovem.x	fp0,($33B0).l	; UNFL (nonmaskable) is taken here, the
+	chkcnt	cnt_fpunfl,1,700	; register written first
+	moveq	#0,d0
+	move.w	(exc_fw).l,d0
+	chkl	d0,$00CC,701		; pre-instruction, vector 51
 	move.l	($33B0).l,d0
 	chkl	d0,0,93			; sign 0, exponent field 0
 	move.l	($33B4).l,d0
@@ -1172,6 +919,7 @@ unnorm_cont:
 	fmove.x	($33A0).l,fp3
 	fmul.x	fp3,fp2
 	fmovem.x	fp2,($33C0).l
+	chkcnt	cnt_fpunfl,1,702	; not tiny: no trap
 	move.l	($33C0).l,d0
 	chkl	d0,0,97
 	move.l	($33C4).l,d0
@@ -1211,11 +959,12 @@ den_s_op:
 	fabs.s	($3400).l,fp1
 den_s_cont:
 	chkcnt	cnt_fpunsup,1,100
-	; A memory source faults with a format-$3 frame carrying the SOURCE
-	; address, not the bare format-$0 frame the 68040 UM section 9.6.2
-	; describes.  cputest FABS.D expects 30,dc plus EA $4201037A.
-	move.l	(unsup_fa).l,d0
-	chkl	d0,$3400,137
+	; a memory source faults before the instruction: format $0, its PC
+	moveq	#0,d0
+	move.w	(unsup_fmt).l,d0
+	chkl	d0,$00DC,137
+	move.l	(unsup_pc).l,d0
+	chkl	d0,den_s_op,703
 
 	move.l	#$00001200,($3410).l	; denormalized double
 	move.l	#$D400003F,($3414).l
@@ -1346,8 +1095,13 @@ den_xadd_cont:
 	fmove.x	($3450).l,fp1
 	fmove.l	#0,fpsr
 	fmove.l	#$50,fpcr		; single precision, round toward zero
+	clr.w	(cnt_fpovfl).l
 	fmul.x	fp1,fp0			; 2^200: past single, inside extended
-	fmove.l	#0,fpcr
+	fmove.l	#0,fpcr			; OVFL (nonmaskable) is taken here
+	chkcnt	cnt_fpovfl,1,704
+	move.l	(exc_sv).l,d0
+	and.l	#$0000FFFF,d0
+	chkl	d0,$0000E005,705	; EXCP, OVFL
 	fmove.l	fpsr,d0
 	and.l	#$00001040,d0
 	chkl	d0,$1040,120		; OVFL and its accrued bit
@@ -1370,8 +1124,10 @@ den_xadd_cont:
 	fmove.x	($3480).l,fp3
 	fmove.l	#0,fpsr
 	fmove.l	#$40,fpcr		; single precision, round to nearest
+	clr.w	(cnt_fpunfl).l
 	fmul.x	fp3,fp2			; the product is still 2^-127
 	fmove.l	#0,fpcr
+	chkcnt	cnt_fpunfl,1,706
 	fmove.l	fpsr,d0
 	and.l	#$00000800,d0
 	chkl	d0,$800,123		; UNFL, though extended holds the value
@@ -1398,6 +1154,7 @@ den_xadd_cont:
 	fmove.l	#$50,fpcr		; single precision, round toward zero
 	fmove.x	($34A0).l,fp4
 	fmove.l	#0,fpcr
+	chkcnt	cnt_fpovfl,2,707
 	fmove.l	fpsr,d0
 	and.l	#$00001040,d0
 	chkl	d0,$1040,126		; OVFL and its accrued bit
@@ -1473,15 +1230,21 @@ h_fpunimp:
 	beq.s	h_fpline
 	cmp.w	(exp_fmt+2).l,d6
 	bne	hfail
-	; A real FPSP handler must acknowledge every pending UNIMP state before
-	; it can safely use the FPU again.  Save all format-$2 cases; save_unimp
-	; merely marks the one whose complete payload is checked above.
+	move.l	2(sp),(unimp_pc).l
+	tst.w	(exp_ea_v).l	; the address field, when the test names it
+	beq.s	h_fpunimp_ea
+	clr.w	(exp_ea_v).l
+	move.l	8(sp),d6
+	cmp.l	(exp_ea).l,d6
+	bne	hfail
+h_fpunimp_ea:
+	; an M68060SP-shaped handler saves the state first
 	tst.w	(nosave_unimp).l
 	bne.s	h_fpunimp_nosave
 	fsave	(unimp_frame).l
 	tst.w	(restore_unimp).l
 	beq.s	h_fpunimp_nosave
-	frestore (unimp_frame).l	; hand the frame back, FPSP-style
+	frestore (unimp_frame).l	; hand the frame back
 h_fpunimp_nosave:
 	clr.w	(save_unimp).l
 	addq.w	#1,(cnt_fpunimp).l
@@ -1492,83 +1255,99 @@ h_fpline:
 	addq.w	#1,(cnt_fpline).l
 	rte
 
+; vector 55: format $0 before an instruction (the stacked PC is the
+; instruction: the test names where to resume), $3 after a store and $2
+; for packed decimal (the stacked PC is the next instruction, the address
+; field the operand's)
 h_fpunsup:
 	move.w	6(sp),d6
-	cmp.w	#$30DC,d6	; EVERY datatype fault: format $3, vector 55
-	bne	hfail		; (register/immediate sources stack EA = 0)
-	move.l	8(sp),d6	; effective address field
-	move.l	d6,(unsup_fa).l
-	; A store stacks the following PC and resumes by itself.  A SOURCE
-	; fault stacks the FP instruction's own PC, so the test has to step
-	; over it; those tests arm unsup_resume, which is consumed here.
-	tst.l	(unsup_resume).l
+	move.w	d6,(unsup_fmt).l
+	move.l	2(sp),(unsup_pc).l
+	cmp.w	#$00DC,d6
+	beq.s	h_fpunsup_pre
+	cmp.w	#$30DC,d6
 	beq.s	h_fpunsup_post
-	move.l	2(sp),d6
-	move.l	d6,(unsup_pc).l
+	cmp.w	#$20DC,d6
+	bne	hfail
+h_fpunsup_post:
+	move.l	8(sp),(unsup_fa).l
+	bra.s	h_fpunsup_save
+h_fpunsup_pre:
+	tst.l	(unsup_resume).l
+	beq	hfail		; the instruction would only fault again
 	move.l	(unsup_resume).l,2(sp)
 	clr.l	(unsup_resume).l
-h_fpunsup_post:
-	; Capture what a real FPSP handler would see.  This test previously
-	; only counted the trap, so the state the handler needs -- CMDREG,
-	; ETEMP/FPTEMP, tags -- was never examined and could be absent
-	; without any test noticing.
-	lea	(unsup_fsave).l,a1
-	fsave	(a1)
-	move.l	(unsup_fsave).l,d6
-	move.l	d6,(unsup_fhdr).l
-	; No FRESTORE: AP040 re-arms a restored BUSY frame, so replaying it
-	; here would re-trap.  FSAVE alone leaves the FPU idle, which is all
-	; this inspection needs.  (Restoring a BUSY frame is audit finding 6
-	; and is a separate piece of work.)
+h_fpunsup_save:
+	; the FSAVE an M68060SP handler starts with: it leaves the EXCP state
+	fsave	(unsup_fsave).l
+	move.l	(unsup_fsave).l,(unsup_fhdr).l
 	addq.w	#1,(cnt_fpunsup).l
 	rte
 
-h_fpdz:
-	move.w	6(sp),d6
-	cmp.w	#$00C8,d6	; format $0, vector 50 offset
+; vector 60: format $0, the stacked PC the instruction
+h_ea60:
+	cmpi.w	#$00F0,6(sp)
 	bne	hfail
-	addq.w	#1,(cnt_fpdz).l
+	move.l	2(sp),(ea60_pc).l
+	tst.l	(ea60_resume).l
+	beq	hfail
+	move.l	(ea60_resume).l,2(sp)
+	clr.l	(ea60_resume).l
+	addq.w	#1,(cnt_ea60).l
+	rte
+
+; the arithmetic exceptions: format $0 before the next FPU instruction or
+; $3 after a store.  Record the frame (the address field for $3, the
+; stacked PC for $0), FSAVE (which leaves the EXCP state: without it the
+; next FPU instruction takes the exception again) and count.
+FPXH	macro	; \1=vector offset \2=counter
+	move.w	6(sp),d6
+	move.w	d6,(exc_fw).l
+	and.w	#$0FFF,d6
+	cmp.w	#\1,d6
+	bne	hfail
+	move.w	6(sp),d6
+	and.w	#$F000,d6
+	beq.s	fpxh0\@
+	cmp.w	#$3000,d6
+	bne	hfail
+	move.l	8(sp),(fp_exc_ea).l
+	bra.s	fpxh1\@
+fpxh0\@:
+	move.l	2(sp),(fp_exc_ea).l
+fpxh1\@:
+	fsave	(exc_sv).l
+	addq.w	#1,(\2).l
+	endm
+
+h_fpdz:
+	FPXH	$00C8,cnt_fpdz
 	rte
 
 h_fpbsun:
-	move.w	6(sp),d6
-	cmp.w	#$00C0,d6	; format $0, vector 48 offset
-	bne	hfail
-	move.l	2(sp),d6
-	move.l	d6,(bsun_pc).l
-	move.l	(bsun_resume).l,2(sp)	; avoid retriggering the pre-exception
-	addq.w	#1,(cnt_fpbsun).l
+	FPXH	$00C0,cnt_fpbsun
+	move.l	2(sp),(bsun_pc).l
+	move.l	(bsun_resume).l,2(sp)	; past the conditional
 	rte
 
 h_fpsnan:
-	move.w	6(sp),d6
-	cmp.w	#$00D8,d6	; format $0, vector 54 offset
-	bne	hfail
-	addq.w	#1,(cnt_fpsnan).l
+	FPXH	$00D8,cnt_fpsnan
 	rte
 
-; enabled store exceptions arrive post-instruction in a format $3 frame
-; whose EA names the destination (0 for a register); capture it so the
-; test can verify against the store address
 h_fpoperr:
-	move.w	6(sp),d6
-	cmp.w	#$30D0,d6	; format $3, vector 52 offset
-	bne	hfail
-	move.l	8(sp),(fp_exc_ea).l
-	addq.w	#1,(cnt_fpoperr).l
+	FPXH	$00D0,cnt_fpoperr
 	rte
 
 h_fpovfl:
-	move.w	6(sp),d6
-	cmp.w	#$30D4,d6	; format $3, vector 53 (post-instruction store)
-	beq.s	hov_ok3
-	cmp.w	#$00D4,d6	; format $0, vector 53 (pre-instruction pend)
-	bne	hfail
-	addq.w	#1,(cnt_fpovfl).l
+	FPXH	$00D4,cnt_fpovfl
 	rte
-hov_ok3:
-	move.l	8(sp),(fp_exc_ea).l
-	addq.w	#1,(cnt_fpovfl).l
+
+h_fpunfl:
+	FPXH	$00CC,cnt_fpunfl
+	rte
+
+h_fpinex:
+	FPXH	$00C4,cnt_fpinex
 	rte
 
 hfail:
@@ -1705,8 +1484,9 @@ fcmpd_op:
 	fcmp.x	fp5,fp6
 fcmpd_cont:
 	chkcnt	cnt_fpunsup,1,152
-	move.l	(unsup_fa).l,d0
-	chkl	d0,0,240		; register operands: format $3 with EA = 0
+	moveq	#0,d0
+	move.w	(unsup_fmt).l,d0
+	chkl	d0,$00DC,240		; before the instruction: format $0
 
 ;------------------- FSGLMUL/FSGLDIV keep the EXTENDED exponent range
 ; roundSigAndPackFloatx80 has no expOffset: 2^100 squared is 2^200 with
@@ -1727,10 +1507,10 @@ fcmpd_cont:
 	move.l	($3714).l,d0
 	chkl	d0,$80000000,155
 
-;------------------------------ the 040 FPCR keeps all sixteen low bits
+;----------------------------- the 68060 FPCR has no bits 3-0 (or 31-16)
 	fmove.l	#$FFFFFFFF,fpcr
 	fmove.l	fpcr,d0
-	chkl	d0,$0000FFFF,156	; WinUAE fpcr_mask = 0xffff for the 040
+	chkl	d0,$0000FFF0,156	; WinUAE fpcr_mask = 0xfff0 for the 060
 	fmove.l	#0,fpcr
 
 ;--------------- FMOVECR: vector 11, FPSR exception byte NOT cleared
@@ -1741,7 +1521,7 @@ fcmpd_cont:
 	move.l	#$202C,(exp_fmt).l
 fmovecr_op:
 	dc.w	$F200,$5C00		; fmovecr #$00,fp0
-	chkcnt	cnt_fpunimp,4,157
+	chkcnt	cnt_fpunimp,2,157
 	fmove.l	fpsr,d0
 	and.l	#$0000FF08,d0
 	chkl	d0,$4008,158		; exception byte preserved
@@ -1778,7 +1558,7 @@ nex_ok:
 	dc.w	$F200,$0078
 	chkcnt	cnt_ill4,1,163
 
-;------------------------- FBcc/FScc predicate bit 5 aliases, no trap
+;------------------------- FBcc predicate bit 5 aliases, no trap
 	move.w	(cnt_fpunimp).l,d5
 	dc.w	$F2A0,$0002		; fbf.w with bit 5 set: never taken
 	move.w	(cnt_fpunimp).l,d6
@@ -1786,19 +1566,25 @@ nex_ok:
 	beq.s	alias_ok1
 	failt	164
 alias_ok1:
-	move.w	(cnt_fpunimp).l,d5	; the alias must not trap either
-	moveq	#0,d1
-	dc.w	$F241,$0020		; fsf.b d1 with bit 5 set: aliases FSF
-	and.l	#$FF,d1
-	chkl	d1,0,165
+	; FScc is unimplemented on the 68060: the alias traps like FSF
+	move.w	(cnt_fpunimp).l,d5
+	move.l	#$202C,(exp_fmt).l
+	moveq	#-1,d1
+	dc.w	$F241,$0020		; fsf.b d1 with bit 5 set
+	chkl	d1,-1,165		; nothing written
 	move.w	(cnt_fpunimp).l,d6
-	cmp.w	d5,d6
+	sub.w	d5,d6
+	cmp.w	#1,d6
 	beq.s	alias_ok2
 	failt	207
 alias_ok2:
+	sub.w	#1,(cnt_fpunimp).l
 
-;------------------------------- FMOVEM 68040 register-mapping quirks
-; a LOAD maps mask bit 7 to FP0 regardless of the mode field
+;------------------------------- FMOVEM register mapping (68060)
+; The 68060 ignores the mode field (WinUAE fpuop_arithmetic: "68060 simply
+; ignores MODE field completely"): -(An) moves list bit 0 = FP7 first,
+; descending; every other EA list bit 7 = FP0 first, ascending; the words
+; of a register are never reversed (the 68040's quirks are gone).
 	fmove.l	#123,fp7		; write through fp7, then reload into fp0
 	fmovem.x	fp7,($3720).l
 	fmove.l	#0,fp0
@@ -1808,43 +1594,45 @@ alias_ok2:
 	chkl	d0,123,166		; landed in FP0, not FP7
 	fmove.l	fp7,d0
 	chkl	d0,123,167		; FP7 untouched by the reload
-; a STORE to a control EA with the predec-convention mode writes each
-; register's three longwords REVERSED: low mantissa, high, exponent
-	fmove.l	#123,fp7
+; a STORE to a control EA with the predecrement mode: bit 7 = FP0 still,
+; in the normal word order
+	fmove.l	#123,fp0
+	fmove.l	#45,fp7
 	move.l	#0,($3730).l
 	move.l	#0,($3734).l
 	move.l	#0,($3738).l
 	lea	($3730).l,a3
-	dc.w	$F213,$E080		; fmovem.x #$80,(a3): mode 00 store, FP7
+	dc.w	$F213,$E080		; fmovem.x #$80,(a3): mode 00 store
 	move.l	($3730).l,d0
-	chkl	d0,0,168		; low mantissa first
+	chkl	d0,$40050000,168	; FP0's exponent word first
 	move.l	($3734).l,d0
-	chkl	d0,$F6000000,169	; high mantissa
+	chkl	d0,$F6000000,169
 	move.l	($3738).l,d0
-	chkl	d0,$40050000,170	; exponent word last
-; -(An) store with the POSTINC-convention mode: bit7 maps to FP0, the
-; walk descends, and the longwords are reversed as well
-	fmove.l	#111,fp0
-	fmove.l	#222,fp1
+	chkl	d0,0,170
+; -(An) store with the postincrement mode: bit i = FPi, descending
+	fmove.l	#111,fp6
+	fmove.l	#222,fp7
 	lea	($3760).l,a3
 	dc.w	$F223,$F0C0		; fmovem.x #$C0,-(a3): mode 10 through predec
 	cmp.l	#$3748,a3
 	beq.s	mvq_ok1
 	failt	171
 mvq_ok1:
-	move.l	($3748).l,d0		; FP1 at the bottom, reversed
-	chkl	d0,0,172
+	move.l	($3748).l,d0		; FP6 at the bottom, normal order
+	chkl	d0,$40050000,172
 	move.l	($374C).l,d0
 	chkl	d0,$DE000000,173
 	move.l	($3750).l,d0
-	chkl	d0,$40060000,174
-	move.l	($3754).l,d0		; FP0 above it, reversed
-	chkl	d0,0,175
+	chkl	d0,0,174
+	move.l	($3754).l,d0		; FP7 above it
+	chkl	d0,$40060000,175
 	move.l	($3758).l,d0
 	chkl	d0,$DE000000,176
 	move.l	($375C).l,d0
-	chkl	d0,$40050000,177
-; canonical predec store (mode 00): normal word order, FP0 lowest
+	chkl	d0,0,177
+; canonical predec store (mode 00): FP0 lowest
+	fmove.l	#111,fp0
+	fmove.l	#222,fp1
 	lea	($3790).l,a3
 	dc.w	$F223,$E003		; fmovem.x fp0/fp1,-(a3): mode 00 predec
 	cmp.l	#$3778,a3
@@ -1894,14 +1682,23 @@ mvq_ok4:
 	beq.s	cr_ok1
 	failt	186
 cr_ok1:
-; an immediate source may load several registers back to back
+; an immediate source for more than one register is an unimplemented
+; effective address on the 68060: vector 60, format $0, nothing loaded
+	fmove.l	#0,fpcr
+	fmove.l	#0,fpsr
+	lea	cr_imm2(pc),a0
+	move.l	a0,(ea60_resume).l
 	dc.w	$F23C,$9800		; fmovem.l #:#,fpcr/fpsr
 	dc.l	$00000010
 	dc.l	$0F000000
+cr_imm2:
 	fmove.l	fpcr,d0
-	chkl	d0,$10,187
+	chkl	d0,0,187
 	fmove.l	fpsr,d0
-	chkl	d0,$0F000000,188
+	chkl	d0,0,188
+	moveq	#0,d0
+	move.w	(cnt_ea60).l,d0
+	chkl	d0,5,708
 	fmove.l	#0,fpcr
 	fmove.l	#0,fpsr
 ; malformed control-register encodings are F-line traps
@@ -1922,2617 +1719,2617 @@ cr_ok2:
 	failt	190
 cr_ok3:
 
-;-------------- the full 68040 conditional-predicate table, 16 x 32
+;-------------- the full conditional-predicate table, 16 x 32
 ; every FPSR condition-code combination against every predicate, checked
-; against WinUAE's condition_table_040_060 verbatim.  Predicates >= $10
-; also set BSUN+AE_IOP when NAN is set, which is why the FPSR is written
-; fresh for every row.
+; against WinUAE's condition_table_040_060 verbatim, through FBcc (FScc is
+; unimplemented on the 68060).  Predicates >= $10 also set BSUN+AE_IOP
+; when NAN is set, which is why the FPSR is written fresh for every row.
 	fmove.l	#$00000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$CCCCCCCC,191
 	fmove.l	#$01000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$FF00FF00,192
 	fmove.l	#$02000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$CCCCCCCC,193
 	fmove.l	#$03000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$FF00FF00,194
 	fmove.l	#$04000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$AAAAAAAA,195
 	fmove.l	#$05000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$BF2ABF2A,196
 	fmove.l	#$06000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$AAAAAAAA,197
 	fmove.l	#$07000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$BF2ABF2A,198
 	fmove.l	#$08000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$F0F0F0F0,199
 	fmove.l	#$09000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$FF00FF00,200
 	fmove.l	#$0A000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$F0F0F0F0,201
 	fmove.l	#$0B000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$FF00FF00,202
 	fmove.l	#$0C000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$AAAAAAAA,203
 	fmove.l	#$0D000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$BF2ABF2A,204
 	fmove.l	#$0E000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$AAAAAAAA,205
 	fmove.l	#$0F000000,fpsr
 	moveq	#0,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001F	; fs<1F>.b d1
-	and.l	#1,d1
+	dc.w	$F29F,$0004,$6002	; fb<1F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001E	; fs<1E>.b d1
-	and.l	#1,d1
+	dc.w	$F29E,$0004,$6002	; fb<1E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001D	; fs<1D>.b d1
-	and.l	#1,d1
+	dc.w	$F29D,$0004,$6002	; fb<1D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001C	; fs<1C>.b d1
-	and.l	#1,d1
+	dc.w	$F29C,$0004,$6002	; fb<1C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001B	; fs<1B>.b d1
-	and.l	#1,d1
+	dc.w	$F29B,$0004,$6002	; fb<1B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$001A	; fs<1A>.b d1
-	and.l	#1,d1
+	dc.w	$F29A,$0004,$6002	; fb<1A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0019	; fs<19>.b d1
-	and.l	#1,d1
+	dc.w	$F299,$0004,$6002	; fb<19>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0018	; fs<18>.b d1
-	and.l	#1,d1
+	dc.w	$F298,$0004,$6002	; fb<18>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0017	; fs<17>.b d1
-	and.l	#1,d1
+	dc.w	$F297,$0004,$6002	; fb<17>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0016	; fs<16>.b d1
-	and.l	#1,d1
+	dc.w	$F296,$0004,$6002	; fb<16>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0015	; fs<15>.b d1
-	and.l	#1,d1
+	dc.w	$F295,$0004,$6002	; fb<15>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0014	; fs<14>.b d1
-	and.l	#1,d1
+	dc.w	$F294,$0004,$6002	; fb<14>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0013	; fs<13>.b d1
-	and.l	#1,d1
+	dc.w	$F293,$0004,$6002	; fb<13>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0012	; fs<12>.b d1
-	and.l	#1,d1
+	dc.w	$F292,$0004,$6002	; fb<12>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0011	; fs<11>.b d1
-	and.l	#1,d1
+	dc.w	$F291,$0004,$6002	; fb<11>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0010	; fs<10>.b d1
-	and.l	#1,d1
+	dc.w	$F290,$0004,$6002	; fb<10>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000F	; fs<0F>.b d1
-	and.l	#1,d1
+	dc.w	$F28F,$0004,$6002	; fb<0F>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000E	; fs<0E>.b d1
-	and.l	#1,d1
+	dc.w	$F28E,$0004,$6002	; fb<0E>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000D	; fs<0D>.b d1
-	and.l	#1,d1
+	dc.w	$F28D,$0004,$6002	; fb<0D>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000C	; fs<0C>.b d1
-	and.l	#1,d1
+	dc.w	$F28C,$0004,$6002	; fb<0C>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000B	; fs<0B>.b d1
-	and.l	#1,d1
+	dc.w	$F28B,$0004,$6002	; fb<0B>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$000A	; fs<0A>.b d1
-	and.l	#1,d1
+	dc.w	$F28A,$0004,$6002	; fb<0A>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0009	; fs<09>.b d1
-	and.l	#1,d1
+	dc.w	$F289,$0004,$6002	; fb<09>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0008	; fs<08>.b d1
-	and.l	#1,d1
+	dc.w	$F288,$0004,$6002	; fb<08>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0007	; fs<07>.b d1
-	and.l	#1,d1
+	dc.w	$F287,$0004,$6002	; fb<07>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0006	; fs<06>.b d1
-	and.l	#1,d1
+	dc.w	$F286,$0004,$6002	; fb<06>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0005	; fs<05>.b d1
-	and.l	#1,d1
+	dc.w	$F285,$0004,$6002	; fb<05>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0004	; fs<04>.b d1
-	and.l	#1,d1
+	dc.w	$F284,$0004,$6002	; fb<04>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0003	; fs<03>.b d1
-	and.l	#1,d1
+	dc.w	$F283,$0004,$6002	; fb<03>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0002	; fs<02>.b d1
-	and.l	#1,d1
+	dc.w	$F282,$0004,$6002	; fb<02>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0001	; fs<01>.b d1
-	and.l	#1,d1
+	dc.w	$F281,$0004,$6002	; fb<01>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	lsl.l	#1,d2
 	moveq	#0,d1
-	dc.w	$F241,$0000	; fs<00>.b d1
-	and.l	#1,d1
+	dc.w	$F280,$0004,$6002	; fb<00>.w *+6
+	moveq	#1,d1
 	or.l	d1,d2
 	chkl	d2,$BF2ABF2A,206
 	fmove.l	#0,fpsr
@@ -4640,9 +4437,8 @@ cr_ok3:
 	move.l	($3714).l,d0
 	chkl	d0,$80000000,233
 
-;================== vector-55 frames for operands with no address
-; A register source stacks format $3 with the EA field ZERO (cputest
-; FDMOVE.S Dn frame: 00,00,xx,xx,00,00,30,dc,00,00,00,00)
+;================== vector-55 for operands with no address
+; A register source faults before the instruction: format $0, its PC
 	fmove.l	#1,fp5
 	move.l	#0,(cnt_fpunsup).l
 	move.l	#$EEEEEEEE,(unsup_fa).l
@@ -4656,24 +4452,25 @@ fregea_op:
 	fadd.x	fp6,fp5			; register source: no address
 fregea_cont:
 	chkcnt	cnt_fpunsup,1,234
-	move.l	(unsup_fa).l,d0
-	chkl	d0,0,235		; EA field is zero
+	moveq	#0,d0
+	move.w	(unsup_fmt).l,d0
+	chkl	d0,$00DC,235		; format $0
 	move.l	(unsup_pc).l,d0
-	chkl	d0,fregea_cont,236	; post-instruction: the FOLLOWING PC
+	chkl	d0,fregea_op,236	; pre-instruction: its own PC
+	fmove.l	fp5,d0
+	chkl	d0,1,237		; nothing computed
 
-; an immediate source also has no address: EA = 0 (cputest FABS.P #imm)
-	move.l	#$EEEEEEEE,(unsup_fa).l
+; an extended immediate is an unimplemented effective address (vector 60)
+; before its value is looked at
 	lea	fimm_cont(pc),a0
-	move.l	a0,(unsup_resume).l
+	move.l	a0,(ea60_resume).l
 fimm_op:
 	dc.w	$F23C,$4880		; fmove.x #<denormal>,fp1
 	dc.l	$00000000,$00000000,$00000001
 fimm_cont:
-	chkcnt	cnt_fpunsup,2,237
-	move.l	(unsup_fa).l,d0
-	chkl	d0,0,238
-	move.l	(unsup_pc).l,d0
-	chkl	d0,fimm_cont,239
+	chkcnt	cnt_fpunsup,1,238
+	move.l	(ea60_pc).l,d0
+	chkl	d0,fimm_op,239
 
 ;================== memory-indirect FP operands (cputest FDIV.W ([0]))
 ; full-extension EAs with base suppress and memory indirection feed the
@@ -4845,8 +4642,9 @@ fpubench_loop:
 	move.l	#$00000000,($3708).l
 	fmovem.x	($3700).l,fp0
 	fmove.l	#0,fpsr
+	clr.w	(cnt_fpovfl).l
 	fadd.x	fp1,fp0			; +3: absorbed, INEX2
-	fmul.x	fp2,fp0			; x4: OVFL -> +inf
+	fmul.x	fp2,fp0			; x4: OVFL -> +inf, trapped at the next
 	fsub.x	fp1,fp0
 	fdiv.x	fp2,fp0
 	fmul.x	fp1,fp0
@@ -4860,6 +4658,8 @@ fpubench_loop:
 	chkl	d0,0,263		; created infinity: zero mantissa
 	fmove.l	fpsr,d0
 	chkl	d0,$02000048,264	; I code; accrued OVFL+INEX only
+	chkcnt	cnt_fpovfl,1,709	; the one OVFL trap, the handler's FSAVE
+					; ending the EXCP state
 
 ;=========== pointer-rewrite ([0]) sequences -- cputest per-test behavior
 ; cputest rewrites the indirect pointer at absolute 0 immediately before
@@ -5104,13 +4904,10 @@ soak_done:
 	chkl	d0,$FFFFFFFF,297
 
 ;-------------------------------------------------- enabled store exceptions
-; FMOVE FPn,<ea> is an arithmetic instruction: an exception enabled in
-; FPCR must trap post-instruction (format $3, stacked PC = next opcode,
-; EA = destination).  The 040 integer-store SNAN/OPERR set does NOT
-; write the destination (WinUAE fault_if_68040_integer_nonmaskable
-; returns before the store); float-format stores write the default
-; result first (WinUAE put_fp_value, then the post check).  Disabled
-; exceptions keep completing in hardware with the default result.
+; FMOVE FPn,<ea> traps post-instruction (format $3, stacked PC = next
+; opcode, EA = destination) after writing the destination as if the trap
+; were disabled -- the integer OPERR saturation included (MC68060UM
+; 6.6.3.2; the 68040's suppressed integer store is gone).
 	fmove.l	#0,fpcr
 	fmove.l	#$7FFFFFFF,fp0
 	fadd.x	fp0,fp0		; 2^32-2: exceeds any 32-bit signed integer
@@ -5118,20 +4915,20 @@ soak_done:
 	clr.w	(cnt_fpovfl).l
 	move.l	#$CAFEBABE,($32A0).l
 	fmove.l	#$2000,fpcr	; enable OPERR
-	fmove.l	fp0,($32A0).l	; integer overflow: v52, store suppressed
+	fmove.l	fp0,($32A0).l	; integer overflow: saturated, then v52
 	fmove.l	#0,fpcr
 	chkcnt	cnt_fpoperr,1,298
 	move.l	($32A0).l,d0
-	chkl	d0,$CAFEBABE,299	; destination untouched
+	chkl	d0,$7FFFFFFF,299	; the saturated default
 	move.l	(fp_exc_ea).l,d0
 	chkl	d0,$32A0,300	; format $3 frame carries the EA
 
 	move.l	#$12345678,d4
 	fmove.l	#$2000,fpcr
-	fmove.l	fp0,d4		; suppressed: d4 unchanged
+	fmove.l	fp0,d4		; written too
 	fmove.l	#0,fpcr
 	chkcnt	cnt_fpoperr,2,301
-	chkl	d4,$12345678,302
+	chkl	d4,$7FFFFFFF,302
 	move.l	(fp_exc_ea).l,d0
 	chkl	d0,0,303	; register destination: frame EA is zero
 
@@ -5148,38 +4945,29 @@ soak_done:
 	move.l	(fp_exc_ea).l,d0
 	chkl	d0,$32A0,306
 
-;--------------------------------------- FSAVE pending-exception frames
-; An e1-class deferred exception (here: enabled SNAN from a released
-; load) is EXTRACTED by FSAVE as a $41/$30 frame instead of trapping,
-; exactly as on a real 040 running FPSP: E1 set, CMDREG1B = the op,
-; ETEMP = the operand, GRS=7/WBTE15 for SNAN.  FRESTORE of that frame
-; re-arms the pend, delivered pre-instruction at the next dispatch; if
-; the enables were cleared before the restore, the state executes
-; through silently.  The e3 class (OVFL/UNFL/INEX from the arithmetic
-; ops) keeps the documented FSAVE-trap behavior until Tier 2.
+;--------------------------------------- FSAVE of the EXCP state
+; An exception pending for the next FPU instruction is the EXCP state:
+; FSAVE takes no exception, it saves it ($E0 with the vector code and the
+; exception operand) and leaves it (MC68060UM 6.7).  FRESTORE of that
+; frame puts the FPU back in the state, and the next FPU instruction takes
+; the exception -- whatever the enables say by then (WinUAE fpuop_restore:
+; fp_exp_pend = 48 + v).
 	fmove.l	#$4000,fpcr	; enable SNAN
 	fmove.l	#5,fp2
 	move.l	#$7F800001,($32DC).l
 	clr.w	(cnt_fpsnan).l
 	fmove.s	($32DC).l,fp2	; released; SNAN trap becomes pending
 	lea	($3800).l,a3
-	fsave	(a3)		; extraction: NO trap may fire here
+	fsave	(a3)		; NO trap may fire here
 	chkcnt	cnt_fpsnan,0,307
 	move.l	($3800).l,d0
-	chkl	d0,$41300000,308	; a $30 frame, not IDLE/NULL
-	move.l	($3818).l,d0
-	and.l	#$06100000,d0	; E1 bit26 set, E3 bit25 clear, T bit20 clear
-	chkl	d0,$04000000,309
-	move.l	($3810).l,d0
-	chkl	d0,$45000000,310	; CMDREG1B = fmove.s mem,fp2
-	move.l	($380C).l,d0
-	and.l	#$03800000,d0	; GRS = 7 for SNAN
-	chkl	d0,$03800000,311
-	move.l	($3814).l,d0
-	and.l	#$00100000,d0	; WBTE15 set for SNAN
-	chkl	d0,$00100000,312
-	move.l	($3828).l,d0
-	chkl	d0,$7FFF0000,313	; ETEMP = the signaling operand
+	chkl	d0,$7FFFE006,308	; EXCP, SNAN, the operand's exponent
+	move.l	($3804).l,d0
+	chkl	d0,$00000100,309	; the signaling operand's mantissa: the
+					; single's payload, the quiet bit and (as
+					; the FPU loads a NaN) the integer bit clear
+	fnop			; the state was left: nothing taken
+	chkcnt	cnt_fpsnan,0,310
 
 	; FRESTORE re-arms: the next FPU dispatch delivers pre-instruction
 	frestore	(a3)
@@ -5188,14 +4976,34 @@ soak_done:
 	fmove.l	fp2,d0
 	chkl	d0,5,315		; writeback stayed inhibited
 
-	; enables cleared before the restore: the state executes through
+	; enables cleared before the restore: still taken
 	fmove.l	#0,fpcr
 	frestore	(a3)
 	fnop
-	chkcnt	cnt_fpsnan,1,316
+	chkcnt	cnt_fpsnan,2,316
 	fmove.l	#7,fp3
 	fmove.l	fp3,d0
 	chkl	d0,7,317		; FPU dispatches normally again
+
+	; a restored IDLE frame ($E0 with bit 15 cleared, the M68060SP's way
+	; back to normal operation) takes nothing
+	move.w	#$6006,2(a3)
+	frestore	(a3)
+	fnop
+	chkcnt	cnt_fpsnan,2,311
+	; an EXCP frame with vector code 7 re-arms the unsupported data type,
+	; taken pre-instruction (format $0) at the next FPU instruction
+	move.w	#$E007,2(a3)
+	frestore	(a3)
+	lea	rs55_c(pc),a0
+	move.l	a0,(unsup_resume).l
+	clr.w	(cnt_fpunsup).l
+rs55_op:
+	fmove.l	#1,fp3
+rs55_c:
+	chkcnt	cnt_fpunsup,1,312
+	move.l	(unsup_pc).l,d0
+	chkl	d0,rs55_op,313
 
 	; cputest fbasic FADD.L, reproduced exactly: the hardware round adds
 	; the longword -659575266 to FP5 = 401d-c4e82b879548fe56 and must
@@ -5217,26 +5025,21 @@ soak_done:
 	move.l	($3378).l,d0
 	chkl	d0,$2a91fcac,332	; mantissa low
 
-	; e3-class pend (enabled OVFL on a released multiply): FSAVE
-	; extracts the 100-byte $41/$60 BUSY frame -- E3 set, WBTEMP the
-	; internal rounded intermediate -- and FRESTORE re-arms the pend
-	; for pre-instruction delivery at the next dispatch
+	; OVFL (here enabled, at single precision, from a multiply): the
+	; same EXCP state with vector code 5, its operand the source
 	fmove.l	#$7FFFFFFF,fp1
 	fmul.x	fp1,fp1
 	fmul.x	fp1,fp1
 	fmul.x	fp1,fp1		; ~2^248 in extended: exact, no overflow yet
 	fmove.l	#$1040,fpcr	; enable OVFL, rounding precision SINGLE
 	clr.w	(cnt_fpovfl).l
-	fmul.x	fp1,fp1		; released; single-precision OVFL pends
-	fsave	(a3)		; extraction: NO trap may fire here
+	fmul.x	fp1,fp1		; single-precision OVFL pends
+	fsave	(a3)		; NO trap may fire here
 	chkcnt	cnt_fpovfl,0,318
 	move.l	($3800).l,d0
-	chkl	d0,$41600000,319	; BUSY frame id, size $60
-	move.l	($3848).l,d0	; +72: exception flags
-	and.l	#$06100000,d0
-	chkl	d0,$02000000,320	; E3 set, E1 and T clear
-	move.l	($3818).l,d0	; +24: WBTS/WBTE = internal sign/exponent
-	chkl	d0,$41EF0000,321	; 2^248 squared: biased exp $41EF
+	chkl	d0,$40F6E005,319	; EXCP, OVFL; the source 2^248's exponent
+	move.l	($3804).l,d0
+	chkl	d0,$FFFFFFF0,320	; (2^31-1)^8's mantissa, high
 	frestore	(a3)
 	fnop			; re-armed pend delivers here
 	chkcnt	cnt_fpovfl,1,322
@@ -5296,3 +5099,485 @@ hr_iregs:				; integer file per the capture (A7
 	dc.l	$00003300
 hr_ustk:
 	ds.b	64
+
+;---------------------------------------------------------------------------
+	org	$C000
+unimp_battery:
+;------------------------------ packed decimal operands (vector 55, format $2)
+	; Packed decimal is not in the 68060's hardware: vector 55 with a
+	; format-$2 frame, the stacked PC the next instruction, the address
+	; field the operand's address, the address register as it was, nothing
+	; read or written, FPIAR the instruction, and the FPU left IDLE with a
+	; zero exception operand (WinUAE fp_unimp_datatype, packed).
+	fmove.l	#7,fp0
+	move.l	#$11111111,($3340).l
+	lea	($3340).l,a0
+	move.l	#0,(unsup_resume).l
+pks_op:
+	fmove.p	fp0,(a0)+
+pks_nx:
+	cmp.l	#$3340,a0
+	beq.s	pks1
+	failt	329		; (An)+ not applied
+pks1:
+	moveq	#0,d0
+	move.w	(unsup_fmt).l,d0
+	chkl	d0,$20DC,650	; format $2, vector 55
+	move.l	(unsup_fa).l,d0
+	chkl	d0,$3340,651
+	move.l	(unsup_pc).l,d0
+	chkl	d0,pks_nx,652
+	move.l	(unsup_fhdr).l,d0
+	chkl	d0,$00006000,653	; IDLE, operand exponent zero
+	move.l	(unsup_fsave+4).l,d0
+	or.l	(unsup_fsave+8).l,d0
+	chkl	d0,0,654
+	move.l	($3340).l,d0
+	chkl	d0,$11111111,655	; nothing stored
+	fmove.l	fpiar,d0
+	chkl	d0,pks_op,679
+	subq.w	#1,(cnt_fpunsup).l
+
+	; the dynamic-k form likewise; -(An) reports An - 12 + 8 (WinUAE
+	; put_fp_value2: the 68060's packed -(An) address is An - 4)
+	moveq	#-1,d0
+	lea	($3350).l,a0
+packed_dynamic:
+	dc.w	$F220,$7C00	; fmove.p fp0,-(a0){d0}
+	cmp.l	#$3350,a0
+	beq.s	pkd1
+	failt	656
+pkd1:
+	move.l	(unsup_fa).l,d0
+	chkl	d0,$334C,657
+	subq.w	#1,(cnt_fpunsup).l
+
+	; a packed source: the same, before any operand is read
+	move.l	#$40010001,($3340).l
+	move.l	#$23456789,($3344).l
+	move.l	#$01234567,($3348).l
+	fmove.l	#5,fp1
+	move.l	#$EEEEEEEE,(unsup_fa).l
+	fmove.p	($3340).l,fp1
+pkl_nx:
+	moveq	#0,d0
+	move.w	(unsup_fmt).l,d0
+	chkl	d0,$20DC,658
+	move.l	(unsup_fa).l,d0
+	chkl	d0,$3340,659
+	move.l	(unsup_pc).l,d0
+	chkl	d0,pkl_nx,660
+	fmove.l	fp1,d0
+	chkl	d0,5,661		; the destination is untouched
+	subq.w	#1,(cnt_fpunsup).l
+	lea	($3350).l,a0
+	fmove.p	-(a0),fp1
+	cmp.l	#$3350,a0
+	beq.s	pkl1
+	failt	680
+pkl1:
+	move.l	(unsup_fa).l,d0
+	chkl	d0,$334C,681	; An - 12 + 8
+	subq.w	#1,(cnt_fpunsup).l
+	; a packed Dn source (fmove.p d0,fp1): address field zero
+	dc.w	$F200,$4C80
+	move.l	(unsup_fa).l,d0
+	chkl	d0,0,682
+	subq.w	#1,(cnt_fpunsup).l
+
+	; FINT is hardware, so FINT.P is the datatype trap; an unimplemented
+	; opmode with the same packed source is vector 11 (the instruction
+	; check comes first), its frame carrying the operand's address
+	fint.p	($3340).l,fp2
+	moveq	#0,d0
+	move.w	(unsup_fmt).l,d0
+	chkl	d0,$20DC,662
+	subq.w	#1,(cnt_fpunsup).l
+	move.l	#$202C,(exp_fmt).l
+	move.l	#$3340,(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+	dc.w	$F239,$4C0E	; fsin.p ($3340).l,fp0
+	dc.l	$00003340
+	chkcnt	cnt_fpunimp,1,663
+	subq.w	#1,(cnt_fpunimp).l
+
+	; #imm.X and #imm.P are unimplemented effective addresses: vector 60,
+	; format $0, the stacked PC the instruction (MC68060UM 6.5.3)
+	fmove.l	#9,fp3
+	lea	fimx_nx(pc),a0
+	move.l	a0,(ea60_resume).l
+fimx_op:
+	dc.w	$F23C,$4980	; fmove.x #<3.0>,fp3
+	dc.l	$40000000,$C0000000,$00000000
+fimx_nx:
+	chkcnt	cnt_ea60,2,664
+	move.l	(ea60_pc).l,d0
+	chkl	d0,fimx_op,665
+	fmove.l	fp3,d0
+	chkl	d0,9,683
+	lea	fimp_nx(pc),a0
+	move.l	a0,(ea60_resume).l
+	dc.w	$F23C,$4D80	; fmove.p #imm,fp3
+	dc.l	$00000003,$00000000,$00000000
+fimp_nx:
+	chkcnt	cnt_ea60,3,684
+	; an unimplemented opmode with an #imm.X source: vector 60 first
+	lea	fimu_nx(pc),a0
+	move.l	a0,(ea60_resume).l
+	dc.w	$F23C,$488E	; fsin.x #imm,fp1
+	dc.l	$40000000,$C0000000,$00000000
+fimu_nx:
+	chkcnt	cnt_ea60,4,685
+	; but a single-precision immediate is fine: vector 11, no address
+	move.l	#$202C,(exp_fmt).l
+	clr.l	(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+	dc.w	$F23C,$448E	; fsin.s #imm,fp1
+	dc.l	$40400000
+	chkcnt	cnt_fpunimp,1,686
+	subq.w	#1,(cnt_fpunimp).l
+
+;---------------------------------- the transcendentals and FMOVECR trap
+	; vector 11, format $2, the next PC; the handler's FSAVE sees the IDLE
+	; frame with a zero operand (WinUAE fp_unimp_instruction: 68060
+	; reset_fsave_data); FPIAR names the instruction
+	fmove.l	#7,fp0		; FPU in use again
+	move.l	#$202C,(exp_fmt).l
+	clr.l	(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+	move.w	#1,(save_unimp).l
+fsin_op:
+	dc.w	$F200,$000E	; fsin.x fp0
+fsin_nx:
+	chkcnt	cnt_fpunimp,1,43
+	move.l	(unimp_frame+$00).l,d0
+	chkl	d0,$00006000,260	; IDLE, operand exponent zero
+	move.l	(unimp_frame+$04).l,d0
+	chkl	d0,0,261
+	move.l	(unimp_frame+$08).l,d0
+	chkl	d0,0,262
+	move.l	(unimp_pc).l,d0
+	chkl	d0,fsin_nx,263
+	fmove.l	fpiar,d0
+	chkl	d0,fsin_op,264
+	fmove.l	fp0,d0
+	chkl	d0,7,265		; nothing computed
+	; the memory operand's address is in the frame; (An)+ / -(An) are not
+	; applied (the M68060SP does that), -(An) already decremented
+	move.l	#$3FFF0000,($3360).l
+	move.l	#$80000000,($3364).l
+	clr.l	($3368).l
+	lea	($3360).l,a0
+	move.l	#$3360,(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+	dc.w	$F218,$480E	; fsin.x (a0)+,fp0
+	cmp.l	#$3360,a0
+	beq.s	fsin_pi
+	failt	266
+fsin_pi:
+	lea	($336C).l,a0
+	move.l	#$3360,(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+	dc.w	$F220,$480E	; fsin.x -(a0),fp0
+	cmp.l	#$336C,a0
+	beq.s	fsin_pd
+	failt	267
+fsin_pd:
+	move.l	#$3370,(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+	dc.w	$F228,$400E,$0004	; fsin.l (4,a0),fp0
+	chkcnt	cnt_fpunimp,4,268
+	sub.w	#3,(cnt_fpunimp).l
+
+	; FRESTORE must consume the complete frame; saving it again through
+	; -(An) must subtract the same 12 bytes and reproduce it
+	lea	(unimp_frame).l,a1
+	frestore	(a1)+
+	cmp.l	#unimp_frame+12,a1
+	beq.s	unimp_pi_ok
+	failt	273
+unimp_pi_ok:
+	fsave	-(a1)
+	cmp.l	#unimp_frame,a1
+	beq.s	unimp_pd_ok
+	failt	274
+unimp_pd_ok:
+	move.l	(a1),d0
+	chkl	d0,$00006000,275
+
+	; FMOVECR is not in the hardware either
+	move.w	#1,(exp_ea_v).l
+	clr.l	(exp_ea).l
+	fmovecr	#0,fp1		; constant ROM: also not hardware
+	chkcnt	cnt_fpunimp,2,44
+	sub.w	#1,(cnt_fpunimp).l
+
+;--------------------------------------------- FINT and FINTRZ (hardware)
+; FINT rounds to an integer by the FPCR mode, FINTRZ toward zero; the
+; result stays extended (no precision rounding); discarded bits set INEX2;
+; a zero result keeps the operand's sign (floatx80_round_to_int)
+FINTCHK	macro	; \1=ext word (opmode, FPm=FP1 -> FP2) \2=FPCR \3=source X (3 longs)
+		; \4,\5,\6=expected X  \7=expected FPSR & $0F00FF00  \8=test
+	move.l	#\3,($3370).l
+	fmovem.x	($3370).l,fp1
+	fmove.l	#\2,fpcr
+	fmove.l	#0,fpsr
+	dc.w	$F200,\1
+	fmove.l	#0,fpcr
+	fmove.l	fpsr,d0
+	and.l	#$0F00FF00,d0
+	chkl	d0,\7,\8
+	fmovem.x	fp2,($3380).l
+	move.l	($3380).l,d0
+	chkl	d0,\4,\8+1
+	move.l	($3384).l,d0
+	chkl	d0,\5,\8+2
+	move.l	($3388).l,d0
+	chkl	d0,\6,\8+3
+	endm
+	clr.l	($3374).l
+	clr.l	($3378).l
+	; 2.5 RN -> 2 (ties to even), INEX2
+	move.l	#$A0000000,($3374).l
+	FINTCHK	$0501,$00,$40000000,$40000000,$80000000,0,$00000200,700
+	; 3.5 RN -> 4
+	move.l	#$E0000000,($3374).l
+	FINTCHK	$0501,$00,$40000000,$40010000,$80000000,0,$00000200,704
+	; -2.5 RN -> -2
+	move.l	#$A0000000,($3374).l
+	FINTCHK	$0501,$00,$C0000000,$C0000000,$80000000,0,$08000200,708
+	; 2.75 FINTRZ (FPCR RN ignored) -> 2
+	move.l	#$B0000000,($3374).l
+	FINTCHK	$0503,$00,$40000000,$40000000,$80000000,0,$00000200,712
+	; -2.75 FINTRZ -> -2
+	move.l	#$B0000000,($3374).l
+	FINTCHK	$0503,$00,$C0000000,$C0000000,$80000000,0,$08000200,716
+	; -0.3 RM -> -1
+	move.l	#$99999999,($3374).l
+	FINTCHK	$0501,$20,$BFFD0000,$BFFF0000,$80000000,0,$08000200,720
+	; 0.3 RP -> +1
+	FINTCHK	$0501,$30,$3FFD0000,$3FFF0000,$80000000,0,$00000200,724
+	; 0.3 RN -> +0 (Z), INEX2
+	FINTCHK	$0501,$00,$3FFD0000,$00000000,$00000000,0,$04000200,728
+	; -0.3 RZ -> -0 (N, Z)
+	FINTCHK	$0501,$10,$BFFD0000,$80000000,$00000000,0,$0C000200,732
+	; 2^70 + 1: integral already, unchanged, exact
+	move.l	#$80000000,($3374).l
+	move.l	#$00000001,($3378).l
+	FINTCHK	$0501,$00,$40450000,$40450000,$80000000,$00000001,$00000000,736
+	; 123.0: exact
+	move.l	#$F6000000,($3374).l
+	clr.l	($3378).l
+	FINTCHK	$0503,$00,$40050000,$40050000,$F6000000,0,$00000000,740
+	; 2^62 + 0.5 RP: the integer part's last bit, then rounded up
+	move.l	#$80000000,($3374).l
+	move.l	#$00000001,($3378).l
+	FINTCHK	$0501,$30,$403D0000,$403D0000,$80000000,$00000002,$00000200,744
+	move.l	#$80000000,($3374).l
+	move.l	#$00000003,($3378).l
+	FINTCHK	$0501,$30,$403E0000,$403E0000,$80000000,$00000003,$00000000,748
+	; 1.5 x 2^0 RP at the 2^63 edge: 2^63 - 0.5 rounds up to 2^63
+	move.l	#$FFFFFFFF,($3374).l
+	move.l	#$FFFFFFFF,($3378).l
+	FINTCHK	$0501,$30,$403D0000,$403E0000,$80000000,$00000000,$00000200,752
+	; infinity passes through, with the I condition code
+	clr.l	($3374).l
+	clr.l	($3378).l
+	FINTCHK	$0501,$00,$7FFF0000,$7FFF0000,$00000000,0,$02000000,756
+	; a memory operand: fint.l #-7,fp2 and fintrz.s #-2.5,fp2
+	fmove.l	#0,fpsr
+	dc.w	$F23C,$4101	; fint.l #-7,fp2
+	dc.l	-7
+	fmove.l	fp2,d0
+	chkl	d0,-7,760
+	dc.w	$F23C,$4503	; fintrz.s #-2.5,fp2
+	dc.l	$C0200000
+	fmove.l	fpsr,d0		; (before the store clears the exception byte)
+	and.l	#$0F00FF00,d0
+	chkl	d0,$08000200,762
+	fmove.l	fp2,d0
+	chkl	d0,-2,761
+
+;------------------------------------------- unimplemented-frame fields
+; Every unimplemented instruction leaves the same frame: IDLE, operand
+; zero.  The frame names no instruction (FPIAR does), so a stale frame
+; would show up as the previous instruction's PC or operand.
+FRAMECHK	macro	; \1=extword \2=base test number
+	fmove.l	#7,fp0
+	fmove.l	#3,fp1
+	move.l	#$202C,(exp_fmt).l
+	clr.l	(exp_ea).l
+	move.w	#1,(exp_ea_v).l
+	move.w	#1,(save_unimp).l
+	move.l	#-1,(unimp_frame).l
+fck\@:
+	dc.w	$F200,\1
+	move.l	(unimp_frame+$00).l,d0
+	chkl	d0,$00006000,\2	; IDLE
+	move.l	(unimp_frame+$04).l,d0
+	chkl	d0,0,\2+1
+	fmove.l	fpiar,d0
+	chkl	d0,fck\@,\2+2
+	fmove.l	fp0,d0
+	chkl	d0,7,\2+3		; nothing computed
+	sub.w	#1,(cnt_fpunimp).l
+	endm
+
+	; FTWOTOX.X FP0,FP0
+	FRAMECHK	$0011,200
+	; FETOX.X FP0,FP0
+	FRAMECHK	$0010,204
+	; FREM FP0,FP0 (dyadic)
+	FRAMECHK	$0025,208
+	; FGETEXP.X FP1,FP0
+	FRAMECHK	$041E,212
+
+;--------------------------------------- FSAVE/FRESTORE frame round trip
+; A frame handed back by FRESTORE must come out of the next FSAVE
+; unchanged.
+	fmove.l	#7,fp0
+	move.l	#$202C,(exp_fmt).l
+	move.w	#1,(save_unimp).l
+	dc.w	$F200,$000E	; fsin.x fp0: leaves an IDLE frame
+	frestore (unimp_frame).l	; hand it back
+	fsave	(frame_b).l		; and take it again
+	lea	(unimp_frame).l,a0
+	lea	(frame_b).l,a1
+	moveq	#2,d1
+frt_lp:
+	move.l	(a0)+,d2
+	cmp.l	(a1)+,d2
+	beq.s	frt_ok
+	failt	216			; frame changed across FRESTORE+FSAVE
+frt_ok:
+	dbra	d1,frt_lp
+	move.l	(frame_b).l,d0
+	chkl	d0,$00006000,217
+	sub.w	#1,(cnt_fpunimp).l
+
+; Consecutive transcendentals on DIFFERENT registers.  Each must take its
+; own vector-11 trap, its frame naming the following instruction.
+	fmove.l	#7,fp0
+	fmove.l	#9,fp1
+	fmove.l	#11,fp2
+	move.l	#$202C,(exp_fmt).l
+	move.w	(cnt_fpunimp).l,d5
+	dc.w	$F200,$000E	; fsin.x fp0
+cst1:
+	move.l	(unimp_pc).l,d0
+	chkl	d0,cst1,189
+	dc.w	$F200,$048E	; fsin.x fp1
+cst2:
+	move.l	(unimp_pc).l,d0
+	chkl	d0,cst2,190
+	dc.w	$F200,$090E	; fsin.x fp2
+cst3:
+	move.l	(unimp_pc).l,d0
+	chkl	d0,cst3,191
+	move.w	(cnt_fpunimp).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,3,192		; exactly three traps, one per instruction
+	sub.w	#3,(cnt_fpunimp).l
+
+; A vector-11 trap whose handler does NOT save the frame must not leave the
+; FPU trapping on the next VALID instruction: the unimplemented instruction
+; leaves the IDLE state, not the EXCP state.
+	move.w	(cnt_fpunimp).l,d5
+	move.w	#1,(nosave_unimp).l
+	fmove.l	#7,fp0
+	dc.w	$F200,$000E	; fsin.x fp0: traps, handler does NOT FSAVE
+	fmove.l	#3,fp1
+	dc.w	$F23C,$4023	; fmul.l #$20AB,fp0 -- HARDWARE op, must execute
+	dc.l	$000020AB
+	clr.w	(nosave_unimp).l
+	move.w	(cnt_fpunimp).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,193		; ONE trap: the FSIN only, not the FMUL
+	fmove.l	fp0,d0
+	chkl	d0,$0000E4AD,194	; and the FMUL actually multiplied (7*$20AB)
+	sub.w	#1,(cnt_fpunimp).l
+
+	move.w	(cnt_fpunimp).l,d5
+	move.w	#1,(nosave_unimp).l
+	fmove.l	#7,fp0
+	dc.w	$F200,$0011	; ftwotox.x fp0: traps, handler does NOT FSAVE
+	dc.w	$F23C,$4023	; fmul.l #$20AB,fp0 -- HARDWARE op, must execute
+	dc.l	$000020AB
+	clr.w	(nosave_unimp).l
+	move.w	(cnt_fpunimp).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,195		; ONE trap: the FTWOTOX only
+	fmove.l	fp0,d0
+	chkl	d0,$0000E4AD,196	; the FMUL executed after it
+	sub.w	#1,(cnt_fpunimp).l
+
+;----------- single-step over an unimplemented FP instruction (218-221)
+; The vector-11 exception takes no trace (MC68060UM 8.3); the frame keeps
+; the SR with T1, the handler runs untraced, its RTE restores T1, and the
+; instruction at the resume point executes and traces.
+	move.l	#h_trace9,($24).l
+	clr.w	(cnt_trc9).l
+	move.w	(cnt_fpunimp).l,d5
+	fmove.l	#7,fp1
+	move.l	#$202C,(exp_fmt).l
+	move.w	#1,(save_unimp).l
+	move.w	#$0000,-(sp)
+	pea	(t1site).l
+	move.w	#$A000,-(sp)	; S set, T1 set: enter the site single-stepping
+	rte
+t1site:
+	dc.w	$F200,$048E	; fsin.x fp1: vector 11 with T1 set
+t1next:
+	nop			; the $202C frame resumes here, T1 restored
+t1after:
+	move.w	(cnt_trc9).l,d0
+	chkl	d0,1,218	; the step CAME BACK: exactly one trace
+	move.l	(trc9_pc).l,d0
+	chkl	d0,t1after,219	; ...taken after the resume instruction
+	move.w	(cnt_fpunimp).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,220	; and exactly one vector-11 trap
+	sub.w	#1,(cnt_fpunimp).l
+
+; the same step with an FPSP-shaped handler: FSAVE, inspect, FRESTORE,
+; RTE.  The restored frame must not eat the trace either.
+	move.w	(cnt_fpunimp).l,d5
+	clr.w	(cnt_trc9).l
+	move.w	#1,(restore_unimp).l
+	fmove.l	#7,fp1
+	move.w	#$0000,-(sp)
+	pea	(t2site).l
+	move.w	#$A000,-(sp)
+	rte
+t2site:
+	dc.w	$F200,$048E	; fsin.x fp1
+	nop
+t2after:
+	clr.w	(restore_unimp).l
+	move.w	(cnt_trc9).l,d0
+	chkl	d0,1,221	; the step still comes back through FRESTORE
+	sub.w	#1,(cnt_fpunimp).l
+	move.l	#unexp,($24).l
+
+; Same pair, but the handler FSAVEs and FRESTOREs the (IDLE) frame: the
+; following hardware instruction executes.
+	move.w	(cnt_fpunimp).l,d5
+	move.w	#1,(restore_unimp).l
+	fmove.l	#7,fp0
+	dc.w	$F200,$0011	; ftwotox.x fp0: traps, handler FSAVE+FRESTORE
+	dc.w	$F23C,$4023	; fmul.l #$20AB,fp0 -- must EXECUTE, not re-trap
+	dc.l	$000020AB
+	clr.w	(restore_unimp).l
+	move.w	(cnt_fpunimp).l,d0
+	sub.w	d5,d0
+	and.l	#$FFFF,d0
+	chkl	d0,1,197		; ONE trap
+	fmove.l	fp0,d0
+	chkl	d0,$0000E4AD,198	; and the FMUL produced 7*$20AB
+	sub.w	#1,(cnt_fpunimp).l
+
+	jmp	unimp_return

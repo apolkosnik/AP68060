@@ -6,7 +6,8 @@
 // Turns a decoded instruction into uops by walking its microcode routine   //
 // (rtl/gen/ap68060_ucode_rom.svh), one uop per cycle:                       //
 //   * symbolic operands (EA0, DX, IMM, ...) become registers, immediates   //
-//     or the uop's own memory access; A7 maps to USP/ISP/MSP by S and M    //
+//     or the uop's own memory access; A7 maps to USP or ISP by S (the      //
+//     68060 has one supervisor stack; M is only a bit of SR)               //
 //   * an EA with memory indirection gets a pointer load (into T13 for EA0, //
 //     T12 for EA1) before the uop that uses it                             //
 //   * a source (An)+/-(An) update marked noupd is deferred into the uop    //
@@ -29,7 +30,6 @@ module ap68060_useq
 	output logic        rq_pop,
 
 	input  logic        smode,
-	input  logic        master,     // M bit
 
 	input  logic        exc_go,
 	input  logic  [3:0] exc_kind,
@@ -81,7 +81,7 @@ wire         room_out = (uq_n != 2'd2);
 //--------------------------------------------------------------------------
 // register naming
 //--------------------------------------------------------------------------
-wire [4:0] sp_reg = !smode ? R_USP : (master ? R_MSP : R_ISP);
+wire [4:0] sp_reg = !smode ? R_USP : R_ISP;
 
 function automatic logic [4:0] areg(input logic [2:0] n, input logic [4:0] spr);
 	areg = (n == 3'd7) ? spr : (R_A0 + {2'b00, n});
@@ -281,7 +281,9 @@ always_comb begin
 			S_CONST: begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = {{16{uw.cval[15]}}, uw.cval}; end
 			S_ZERO:  o.src = OS_ZERO;
 			S_LD:    o.src = OS_MEM;
-			S_CREG:  begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = {28'd0, src.ext1[11], src.ext1[2:0]}; end
+			// MOVEC register number, as the special register selector:
+			// $000-$008 -> $00-$08, $800-$808 -> $10-$18
+			S_CREG:  begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = {27'd0, src.ext1[11], src.ext1[3:0]}; end
 			S_BFO: begin
 				if (src.ext1[11]) o.r = dreg(src.ext1[8:6]);
 				else begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = {27'd0, src.ext1[10:6]}; end
@@ -293,7 +295,7 @@ always_comb begin
 			S_OPW:   begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = {16'd0, src.opw}; end
 			S_EXT1:  begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = {16'd0, src.ext1}; end
 			S_FPDL:  o.r = dreg(src.ext1[6:4]);      // FMOVEM dynamic list register
-			S_CREGR: o.r = (src.ext1[2:0] == 3'd0) ? R_USP : (src.ext1[2:0] == 3'd3) ? R_MSP : R_ISP;
+			S_CREGR: o.r = R_USP;
 			default: o.v = 1'b0;
 		endcase
 		if (k == 0) oa = o; else if (k == 1) ob = o; else od = o;
@@ -447,10 +449,9 @@ always_comb begin
 	// after the source EA's update (the 68000 family computes the EA first)
 	nu.b_upd = nu.upd_v && !me_ea1 && (me.m == EM_AIP || me.m == EM_APD) &&
 	           nu.b_src == OS_REG && nu.b_reg == nu.upd_reg;
-	// MOVES Rn,<ea> computes the EA first: MOVES.L A6,-(A6) stores the
-	// decremented A6 (WinUAE, the cputest oracle); MOVE reads the source first
-	nu.a_upd = nu.upd_v && (me.m == EM_AIP || me.m == EM_APD) &&
-	           src.opw[15:8] == 8'h0E && nu.a_src == OS_REG && nu.a_reg == nu.upd_reg;
+	// (the 68060 MOVES Rn,(An)+/-(An) stores the original Rn, as MOVE does --
+	// WinUAE gencpu; the 68040 computed the EA first)
+	nu.a_upd = 1'b0;
 	// the deferred update lands on the upd2 uop, memory or not (FRESTORE
 	// commits (An)+ only after its frame check).  Its displacement merge is
 	// applied after the MOVEM block (no MOVEM uop has upd2), so the two
@@ -781,9 +782,8 @@ always_comb begin
 	if (exc_go) begin
 		case (exc_kind)
 			4'd1:    na = UA_EXC_FMT2;
-			4'd2:    na = UA_EXC_FMT7;
+			4'd2:    na = UA_EXC_FMT4;
 			4'd3:    na = UA_EXC_IRQ;
-			4'd5:    na = UA_EXC_IRQM;
 			4'd4:    na = UA_EXC_RESET;
 			default: na = UA_EXC_FMT0;
 		endcase
@@ -940,8 +940,7 @@ always_comb begin
 		JC_FMT_8:    jc_now = (src.ext1[12:10] == 3'd5);
 		JC_FMT_12:   jc_now = (src.ext1[12:10] == 3'd2 || src.ext1[12:10] == 3'd3);
 		JC_FMT_7:    jc_now = (src.ext1[12:10] == 3'd7);
-		JC_CREG_RF:  jc_now = (src.ext1[11:0] == 12'h800) || (src.ext1[11:0] == 12'h803) ||
-		                      (src.ext1[11:0] == 12'h804);
+		JC_CREG_RF:  jc_now = (src.ext1[11:0] == 12'h800);    // USP
 		default:     jc_now = 1'b0;
 	endcase
 end

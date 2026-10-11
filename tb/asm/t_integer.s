@@ -24,6 +24,28 @@ chkl	macro
 ok\@:
 	endm
 
+; the next instruction must take the unimplemented integer instruction
+; exception (68060: vector 61, format $0, PC = the instruction; the
+; handler unimp61 checks the frame and resumes at \1); \2 the test number
+XPC	equ	$3F00
+XRET	equ	$3F04
+XCNT	equ	$3F08
+XTEST	equ	$3F0A
+unimp	macro
+	move.l	#.u\@,(XPC).l
+	move.l	#\1,(XRET).l
+	move.w	#\2,(XTEST).l
+	clr.w	(XCNT).l
+.u\@:
+	endm
+; ... and it did (test number \1)
+unimpok	macro
+	tst.w	(XCNT).l
+	bne.s	ok\@
+	failt	\1
+ok\@:
+	endm
+
 ; compare CCR (via MOVE from CCR) against \1, fail with number \2
 chkccr	macro
 	move.w	ccr,d6
@@ -50,6 +72,7 @@ start:
 ; needs cache maintenance.
 	move.l	#$80008000,d0
 	movec	d0,cacr
+	move.l	#unimp61,($F4).l	; vector 61: unimplemented integer instruction
 
 ;----------------------------------------------------------------- moveq
 	moveq	#-1,d0
@@ -205,11 +228,15 @@ start:
 	move.l	#$12345678,d0
 	mulu.l	#2,d0
 	chkl	d0,$2468ACF0,46
+	; a 64-bit product: unimplemented on the 68060, registers untouched
 	move.l	#$80000000,d0
 	move.l	#$80000000,d1
+	moveq	#7,d2
+	unimp	r47,47
 	mulu.l	d1,d2:d0
-	chkl	d0,0,47
-	chkl	d2,$40000000,48
+r47:	unimpok	47
+	chkl	d0,$80000000,47
+	chkl	d2,7,48
 	move.l	#5,d0
 	muls.l	#-1,d0
 	chkl	d0,$FFFFFFFB,49
@@ -220,16 +247,22 @@ start:
 	divul.l	#5,d1:d0
 	chkl	d0,8,51
 	chkl	d1,3,52
+	; 64-bit dividends: unimplemented on the 68060, flags and registers
+	; untouched
 	move.l	#2,d1
 	moveq	#0,d0
-	divu.l	#$10,d1:d0	; 64-bit dividend $2_0000_0000
-	chkl	d0,$20000000,53
-	chkl	d1,0,54
+	unimp	r53,53
+	divu.l	#$10,d1:d0
+r53:	unimpok	53
+	chkl	d0,0,53
+	chkl	d1,2,54
 	moveq	#0,d0
 	move.w	#0,ccr
 	move.l	#1,d1
-	divu.l	#1,d1:d0	; quotient needs 33 bits: overflow
-	chkccr	$02,55
+	unimp	r55,55
+	divs.l	#1,d1:d0
+r55:	unimpok	55
+	chkccr	$00,55
 	chkl	d1,1,56		; unchanged
 
 ;----------------------------------------------------------------- BCD
@@ -443,15 +476,20 @@ t96ok:
 	chkl	d5,$00007FFF,98
 
 ;----------------------------------------------------------------- movep
+; (MOVEP is unimplemented on the 68060: vector 61, memory untouched)
 	lea	($3200).l,a3
+	clr.l	($3200).l
 	move.l	#$11223344,d0
+	unimp	r99,99
 	movep.l	d0,0(a3)
+r99:	unimpok	99
 	moveq	#0,d1
-	movep.l	0(a3),d1
-	chkl	d1,$11223344,99
-	move.w	($3200).l,d2
-	and.l	#$FF00,d2
-	chkl	d2,$1100,100	; byte lands in the upper lane
+	unimp	r100,100
+	movep.w	0(a3),d1
+r100:	unimpok	100
+	chkl	d1,0,100
+	move.l	($3200).l,d2
+	chkl	d2,0,100
 
 ;----------------------------------------------------------------- pack/unpk
 	move.w	#$0407,d0
@@ -587,25 +625,21 @@ cas2ok:
 	btst	d1,#$0D		; bit 1 of $0D is clear
 	chkccr	$04,133
 
+	; CMP2 and CHK2 are unimplemented on the 68060 (vector 61)
 	move.w	#10,($30A0).l	; word bounds pair {10, 20}
 	move.w	#20,($30A2).l
 	move.w	#0,ccr
-	moveq	#15,d0
-	cmp2.w	($30A0).l,d0	; inside
-	chkccr	$00,134
-	moveq	#10,d0
-	cmp2.w	($30A0).l,d0	; on the lower bound
-	chkccr	$04,135
 	moveq	#25,d0
-	cmp2.w	($30A0).l,d0	; above
-	chkccr	$01,136
-	moveq	#5,d0
-	cmp2.w	($30A0).l,d0	; below
-	chkccr	$01,137
+	unimp	r134,134
+	cmp2.w	($30A0).l,d0
+r134:	unimpok	134
+	chkccr	$00,135
 	move.l	#$00003000,($30A8).l	; long bounds for an address register
 	move.l	#$00004000,($30AC).l
 	movea.l	#$3800,a1
-	cmp2.l	($30A8).l,a1
+	unimp	r136,136
+	chk2.l	($30A8).l,a1
+r136:	unimpok	136
 	chkccr	$00,138
 
 ;----------------------------------------------------------------- CAS2
@@ -617,51 +651,50 @@ cas2ok:
 	move.l	#$22220000,d1	; Dc2 matches
 	move.l	#$AAAA0001,d2	; Du1
 	move.l	#$BBBB0002,d3	; Du2
+	; CAS2 is unimplemented on the 68060 (vector 61): nothing changes
+	unimp	r140,140
 	cas2.l	d0:d1,d2:d3,(a0):(a1)
-	beq.s	c2aok
-	failt	140
-c2aok:
+r140:	unimpok	140
 	move.l	($30B0).l,d4
-	chkl	d4,$AAAA0001,141
+	chkl	d4,$11110000,141
 	move.l	($30B8).l,d4
-	chkl	d4,$BBBB0002,142
-	chkl	d0,$11110000,143	; compare registers untouched on success
+	chkl	d4,$22220000,142
+	chkl	d0,$11110000,143
+	unimp	r144,144
+	cas2.w	d0:d1,d2:d3,(a0):(a1)
+r144:	unimpok	144
 
-	moveq	#0,d0			; Dc1 mismatch: both loaded, no store
-	cas2.l	d0:d1,d2:d3,(a0):(a1)
-	bne.s	c2bok
-	failt	144
-c2bok:
-	chkl	d0,$AAAA0001,145
-	chkl	d1,$BBBB0002,146
-	move.l	($30B0).l,d4
-	chkl	d4,$AAAA0001,147	; memory unchanged
-
-	; second compare mismatch: flags from the second compare
-	move.l	#$AAAA0001,d0
-	moveq	#0,d1
-	cas2.l	d0:d1,d2:d3,(a0):(a1)
-	bne.s	c2cok
+	; CAS with a misaligned operand: unimplemented as well (word at an
+	; odd address, long not at a multiple of four); a byte is never
+	; misaligned and an aligned word works
+	move.l	#$11223344,($30C0).l
+	move.l	#$55667788,($30C4).l
+	move.l	#$3344,d0
+	move.l	#$AAAA,d1
+	unimp	r145,145
+	cas.w	d0,d1,($30C1).l
+r145:	unimpok	145
+	move.l	#$33445566,d0
+	unimp	r146,146
+	cas.l	d0,d1,($30C2).l
+r146:	unimpok	146
+	move.l	($30C0).l,d4
+	chkl	d4,$11223344,147	; memory untouched
+	move.l	#$3344,d0
+	cas.w	d0,d1,($30C2).l		; aligned word: implemented, matches
+	beq.s	c2cok
 	failt	148
 c2cok:
-	chkl	d1,$BBBB0002,149
-
-	; word form
-	move.w	#$1234,($30C0).l
-	move.w	#$5678,($30C4).l
-	lea	($30C0).l,a0
-	lea	($30C4).l,a1
-	move.l	#$1234,d0
-	move.l	#$5678,d1
-	move.l	#$1111,d2
-	move.l	#$2222,d3
-	cas2.w	d0:d1,d2:d3,(a0):(a1)
+	move.l	($30C0).l,d4
+	chkl	d4,$1122AAAA,149
+	move.l	#$22,d0
+	move.l	#$77,d1
+	cas.b	d0,d1,($30C1).l		; a byte at an odd address is aligned
 	beq.s	c2dok
 	failt	150
 c2dok:
-	move.w	($30C0).l,d4
-	and.l	#$FFFF,d4
-	chkl	d4,$1111,151
+	move.l	($30C0).l,d4
+	chkl	d4,$1177AAAA,151
 
 ;----------------------------------------------------------------- BCD with
 ; non-BCD digit inputs: the decimal correction is byte-wide on real
@@ -743,15 +776,20 @@ c2dok:
 	chkccr	$0E,168		; V set, N/Z preserved
 	chkl	d0,$80000000,169
 
-;--------------------------------------------------- MULx.L with Dh == Dl
-; the 68040 writes Dh before Dl, so the shared register keeps the LOW
-; product half (020/030 end with the high half); V/C clear, X preserved
+;--------------------------------------------------- MULx.L 32-bit overflow
+; a 32-bit product that loses bits sets V (C clear, X kept); the 64-bit
+; form (Dh:Dl) is unimplemented on the 68060
 	move.l	#$10000,d0
 	move.l	#$10000,d1
 	move.w	#$1F,ccr
-	mulu.l	d1,d0:d0	; $10000*$10000 = $1_0000_0000
-	chkccr	$10,170		; N=0 Z=0 (64-bit product nonzero) V=C=0, X kept
-	chkl	d0,0,171	; low half, not the high half
+	mulu.l	d1,d0		; $10000*$10000 = $1_0000_0000: V
+	chkccr	$16,170		; X Z V (the low long is zero)
+	chkl	d0,0,171
+	move.l	#$10000,d0
+	unimp	r172,172
+	mulu.l	d1,d0:d0
+r172:	unimpok	172
+	chkl	d0,$10000,172
 
 ;------------------------------------------------- shift/rotate count edges
 ; register count 0: N/Z from the unchanged operand, V=C=0, X preserved,
@@ -868,6 +906,20 @@ sub1:
 
 subrtd:
 	rtd	#4
+
+; vector 61: an expected unimplemented integer instruction (see unimp)
+unimp61:
+	cmp.w	#$00F4,6(sp)		; format $0, vector 61
+	bne.s	.bad
+	move.l	2(sp),d6
+	cmp.l	(XPC).l,d6		; PC = the instruction
+	bne.s	.bad
+	move.l	(XRET).l,2(sp)
+	addq.w	#1,(XCNT).l
+	rte
+.bad:
+	move.w	(XTEST).l,d7
+	bra	fail_all
 
 fail_all:
 	move.w	d7,(FAILREG).l

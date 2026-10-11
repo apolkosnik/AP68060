@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MC68040 instruction table for the AP68060 decoder generator.
+"""MC68060 instruction table for the AP68060 decoder generator.
 
 Every entry is one opcode pattern:
 
@@ -22,8 +22,13 @@ Every entry is one opcode pattern:
          3 = MOVE16 operands
 
 The decoder generator checks this table exhaustively against WinUAE's
-per-opcode table (tools-oracle/op040.txt, built from readcpu.cpp and
-table68k for cpu_level 4).
+per-opcode table (built from readcpu.cpp and table68k for cpu_level 5).
+
+The 68060 leaves out MOVEP, CHK2/CMP2 and CAS2 (and the 64-bit MULx.L /
+DIVx.L forms, decided from the extension word in D1): they keep their
+encodings and EA rules here and take the unimplemented integer
+instruction exception, vector 61 (routine UNIMPL).  PTEST is gone (an
+F-line opcode, vector 11); PLPAR/PLPAW and LPSTOP are new.
 """
 
 # addressing mode index order
@@ -97,15 +102,15 @@ add('0000 0010 0111 1100', 'ANDSR', 'SR_LOG',  'W', imm='W', priv=True)
 add('0000 1010 0011 1100', 'EORSR', 'CCR_LOG', 'B', imm='B')
 add('0000 1010 0111 1100', 'EORSR', 'SR_LOG',  'W', imm='W', priv=True)
 # CHK2/CMP2 (size in bits 10:9)
-add('0000 0000 11.. ....', 'CHK2', 'CHK2', 'B', ea0=CTL, nfix=1)
-add('0000 0010 11.. ....', 'CHK2', 'CHK2', 'W', ea0=CTL, nfix=1)
-add('0000 0100 11.. ....', 'CHK2', 'CHK2', 'L', ea0=CTL, nfix=1)
+add('0000 0000 11.. ....', 'CHK2', 'UNIMPL', 'B', ea0=CTL, nfix=1)
+add('0000 0010 11.. ....', 'CHK2', 'UNIMPL', 'W', ea0=CTL, nfix=1)
+add('0000 0100 11.. ....', 'CHK2', 'UNIMPL', 'L', ea0=CTL, nfix=1)
 # CAS / CAS2
 add('0000 1010 11.. ....', 'CAS', 'CAS', 'B', ea0=MALT, nfix=1)
 add('0000 1100 11.. ....', 'CAS', 'CAS', 'W', ea0=MALT, nfix=1)
 add('0000 1110 11.. ....', 'CAS', 'CAS', 'L', ea0=MALT, nfix=1)
-add('0000 1100 1111 1100', 'CAS2', 'CAS2', 'W', nfix=2)
-add('0000 1110 1111 1100', 'CAS2', 'CAS2', 'L', nfix=2)
+add('0000 1100 1111 1100', 'CAS2', 'UNIMPL', 'W', nfix=2)
+add('0000 1110 1111 1100', 'CAS2', 'UNIMPL', 'L', nfix=2)
 # static bit operations: bit number word, then the EA
 add('0000 1000 00.. ....', 'BTST', 'BTST_IMM', 'B', ea0=DATA - {'imm'}, imm='B')
 add('0000 1000 01.. ....', 'BCHG', 'BIT_IMM', 'B', ea0=DALT, imm='B')
@@ -116,10 +121,10 @@ add('0000 ...1 00.. ....', 'BTST', 'BTST_DYN', 'B', ea0=DATA)
 add('0000 ...1 01.. ....', 'BCHG', 'BIT_DYN', 'B', ea0=DALT)
 add('0000 ...1 10.. ....', 'BCLR', 'BIT_DYN', 'B', ea0=DALT)
 add('0000 ...1 11.. ....', 'BSET', 'BIT_DYN', 'B', ea0=DALT)
-add('0000 ...1 0000 1...', 'MVPMR', 'MOVEP_MR', 'W', imm='W')
-add('0000 ...1 0100 1...', 'MVPMR', 'MOVEP_MR', 'L', imm='W')
-add('0000 ...1 1000 1...', 'MVPRM', 'MOVEP_RM', 'W', imm='W')
-add('0000 ...1 1100 1...', 'MVPRM', 'MOVEP_RM', 'L', imm='W')
+add('0000 ...1 0000 1...', 'MVPMR', 'UNIMPL', 'W', imm='W')
+add('0000 ...1 0100 1...', 'MVPMR', 'UNIMPL', 'L', imm='W')
+add('0000 ...1 1000 1...', 'MVPRM', 'UNIMPL', 'W', imm='W')
+add('0000 ...1 1100 1...', 'MVPRM', 'UNIMPL', 'L', imm='W')
 
 # ---------------------------------------------------------------- MOVE
 add('0001 .... .... ....', 'MOVE',  'MOVE',  'B', ea0=ALL - {'An'}, ea1=DALT)
@@ -153,6 +158,11 @@ add('0100 1100 10.. ....', 'MVMEL', 'MOVEM_MR', 'W', ea0=CTL | {'Aip'}, nfix=1)
 add('0100 1100 11.. ....', 'MVMEL', 'MOVEM_MR', 'L', ea0=CTL | {'Aip'}, nfix=1)
 add('0100 1010 11.. ....', 'TAS',  'TAS', 'B', ea0=DALT)
 add('0100 1010 1111 1100', 'ILLG', 'ILLEGAL', 'U')
+# 68060 debug instructions: HALT (privileged: the halted state, PST $1C,
+# until reset -- the debug port that restarts it is not provided) and
+# PULSE (PST $04/$14 for one clock)
+add('0100 1010 1100 1000', 'HALT',  'HALT',  'U', priv=True)
+add('0100 1010 1100 1100', 'PULSE', 'PULSE', 'U')
 add('0100 1100 00.. ....', 'MULL', 'MULL', 'L', ea0=DATA, nfix=1)
 add('0100 1100 01.. ....', 'DIVL', 'DIVL', 'L', ea0=DATA, nfix=1)
 add('0100 1110 0100 ....', 'TRAP', 'TRAP', 'U')
@@ -279,14 +289,17 @@ add('1111 0101 0000 0...', 'PFLUSHN',  'PFLUSH', 'U', priv=True)
 add('1111 0101 0000 1...', 'PFLUSH',   'PFLUSH', 'U', priv=True)
 add('1111 0101 0001 0...', 'PFLUSHAN', 'PFLUSH', 'U', priv=True)
 add('1111 0101 0001 1...', 'PFLUSHA',  'PFLUSH', 'U', priv=True)
-add('1111 0101 0100 1...', 'PTESTW',   'PTEST',  'U', priv=True)
-add('1111 0101 0110 1...', 'PTESTR',   'PTEST',  'U', priv=True)
+# PLPAW (An) / PLPAR (An): the address space is the DFC's
+add('1111 0101 1000 1...', 'PLPAW',    'PLPA',   'U', priv=True)
+add('1111 0101 1100 1...', 'PLPAR',    'PLPA',   'U', priv=True)
 # MOVE16: fea=3, D1 builds (Ay)+/(Ay)/abs.L operands; one routine
 add('1111 0110 0000 0...', 'MOVE16', 'MOVE16', 'U', imm='L', fea=3)
 add('1111 0110 0000 1...', 'MOVE16', 'MOVE16', 'U', imm='L', fea=3)
 add('1111 0110 0001 0...', 'MOVE16', 'MOVE16', 'U', imm='L', fea=3)
 add('1111 0110 0001 1...', 'MOVE16', 'MOVE16', 'U', imm='L', fea=3)
 add('1111 0110 0010 0...', 'MOVE16', 'MOVE16', 'U', nfix=1, fea=3)
+# LPSTOP #<data>: $F800, the word $01C0, the immediate
+add('1111 1000 0000 0000', 'LPSTOP', 'LPSTOP', 'U', nfix=1, imm='W', priv=True)
 
 
 def bits_match(op):
@@ -318,11 +331,8 @@ def ea_legal(e, op):
     return True
 
 
-# 68040 T0 trace list (WinUAE gencpu.cpp trace_t0_68040_only/check_trace
-# sites; taken control transfers are traced by the back end)
-T0_RT = {'SR_LOG', 'MOVE_TO_SR', 'MOVE_TO_USP', 'NOP', 'MOVEC_WR', 'CAS',
-         'CAS2', 'MOVES', 'CACHE_OP', 'PFLUSH', 'PTEST', 'FDBCC', 'FSAVE',
-         'FRESTORE'}
+# the 68060 has no trace on change of flow (T0): nothing is on its list
+T0_RT = set()
 
 
 def lookup(op):

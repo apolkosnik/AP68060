@@ -1,5 +1,6 @@
-; AP040 milestone C exception, interrupt and control register self test
-; assembled with vasmm68k_mot -Fbin -m68040
+; AP68060 exception, interrupt and control register self test (from the
+; AP040 milestone C test, converted to the MC68060's rules)
+; assembled with vasmm68k_mot -Fbin -m68060
 ;
 ; testbench protocol:
 ;   word write to $F100 = failing test number
@@ -7,10 +8,10 @@
 ;   word write to $F110 = request interrupt level (0 releases)
 ;   byte write to $F120 must carry FC=1 (MOVES with DFC=1 check in the TB)
 ;
-; frame layout under test (MC68040):
+; frame layout under test (MC68060, MC68060UM 8.4):
 ;   format $0: SR@0, PC@2, fmt/vec@6            (8 bytes)
-;   format $1: same, throwaway                  (8 bytes)
 ;   format $2: + address@8                      (12 bytes)
+;   format $4: + fault address@8, FSLW@12       (16 bytes, access error)
 
 FAILREG	equ	$F100
 DONEREG	equ	$F102
@@ -76,6 +77,9 @@ order_hit	equ	$3660	; trace-vs-IRQ order test saw a same-boundary hit
 hold2		equ	$3664	; h_int2 leaves the line ASSERTED for N entries
 kick5		equ	$3666	; h_int2 raises level 5 mid-handler once
 nest52		equ	$3668	; h_int5 hands the line back to level 2 once
+cnt_unimp	equ	$366A	; unimplemented integer instructions (vector 61)
+ill_resume	equ	$366C	; h_ill resumes here when set (4-byte opcodes)
+trap_guard2	equ	$3680	; set by h_trap0's SECOND instruction
 
 failt	macro
 	move.w	#\1,d7
@@ -137,8 +141,12 @@ ok\@:
 	rept	14
 	dc.l	unexp		; 34-47
 	endr
-	rept	208
-	dc.l	unexp		; 48-255
+	rept	13
+	dc.l	unexp		; 48-60
+	endr
+	dc.l	h_unimp		; 61 unimplemented integer instruction
+	rept	194
+	dc.l	unexp		; 62-255
 	endr
 
 	org	$400
@@ -148,6 +156,8 @@ start:
 clrloop:
 	clr.w	(a0)+
 	dbra	d0,clrloop
+	clr.w	(cnt_unimp).l
+	clr.l	(ill_resume).l
 
 ;----------------------------------------------------------------- TRAP #0
 	trap	#0
@@ -156,26 +166,29 @@ clrloop:
 ;----------------------------------------------------------------- illegal / BKPT
 	dc.w	$4AFC		; ILLEGAL
 	chkcnt	cnt_ill,1,2
-	dc.w	$4848		; BKPT #0: illegal on this implementation
-	chkcnt	cnt_ill,2,3
+	dc.w	$4848		; BKPT #0: the breakpoint acknowledge cycle, then
+	chkcnt	cnt_ill,2,3	; the illegal instruction exception
 
 ;----------------------------------------------------------------- A/F-line
 	dc.w	$A123
 	chkcnt	cnt_aline,1,4
-	dc.w	$F0FF		; 030 PMMU opcode: F-line on 040
+	dc.w	$F0FF		; 030 PMMU opcode: F-line on the 060
 	chkcnt	cnt_fline,1,5
 
 ;----------------------------------------------------------------- FSAVE/FRESTORE
-; FPU-less state frame model: FSAVE writes a 4-byte NULL frame (version
-; byte $00) and FRESTORE consumes it; neither takes the F-line trap
-	move.l	#$DEADBEEF,($3530).l
+; The 68060 state frame is always three long words (MC68060UM 6.7): after
+; reset the FPU is in the NULL state, whose frame format byte (bits 15-8 of
+; the first long word) is $00; FRESTORE reads the same three long words.
+; Neither takes the F-line trap.
+	move.l	#$DEADBEEF,($3528).l
 	lea	($3534).l,a0
 	dc.w	$F320		; fsave -(a0)
-	cmp.l	#$3530,a0
+	cmp.l	#$3528,a0
 	beq.s	fsv1
 	failt	60
 fsv1:
-	tst.l	($3530).l	; NULL frame is all zero
+	move.w	($352A).l,d0	; NULL frame: format byte $00
+	and.w	#$FF00,d0
 	beq.s	fsv2
 	failt	61
 fsv2:
@@ -196,21 +209,36 @@ fsv3:
 	move.l	#50,d0
 	chk.w	#100,d0		; in bounds: no trap
 	chkcnt	cnt_chk,2,8
+	; CHK2 is unimplemented on the 68060: vector 61, format $0, PC = the
+	; CHK2 itself, whether the register is inside the bounds or not
 	move.w	#10,($3520).l	; CHK2 bounds pair {10, 20}
 	move.w	#20,($3522).l
 	moveq	#15,d0
-	chk2.w	($3520).l,d0	; inside: no trap
-	chkcnt	cnt_chk,2,55
+	lea	chk2a(pc),a0
+	move.l	a0,(exp_pc).l
+	lea	chk2a_c(pc),a0
+	move.l	a0,(resume).l
+chk2a:
+	chk2.w	($3520).l,d0
+chk2a_c:
+	chkcnt	cnt_unimp,1,55
 	moveq	#30,d0
-	chk2.w	($3520).l,d0	; outside: vector 6, format $2
-	chkcnt	cnt_chk,3,56
+	lea	chk2b(pc),a0
+	move.l	a0,(exp_pc).l
+	lea	chk2b_c(pc),a0
+	move.l	a0,(resume).l
+chk2b:
+	chk2.w	($3520).l,d0
+chk2b_c:
+	chkcnt	cnt_unimp,2,56
+	chkcnt	cnt_chk,2,56
 
 ;----------------------------------------------------------------- divide by zero
 	move.l	#7,d0
 	divu.w	#0,d0
 	chkcnt	cnt_divz,1,9
 
-	; 68040 long divide-by-zero clears C but preserves X/N/Z/V.
+	; 68060 long divide-by-zero clears C but preserves X/N/Z/V (WinUAE).
 	; Use all CCR bits set so a stale C is observable after RTE.
 	moveq	#0,d1
 	move.l	#$142,d0
@@ -241,32 +269,32 @@ fsv3:
 	chkcnt	cnt_trapv,3,14
 
 ;----------------------------------------------------------------- trace
+; The 68060 traces with T1 only: there is no trace on change of flow, and
+; SR bit 14 (T0) always reads as zero (MC68060UM 3.2.2.2, 11.1.2.4).
 	move.w	#$A000,sr	; T1 + S: trace every instruction
 	nop			; traced; the handler clears the stacked T bits
 	chkcnt	cnt_trace,1,57
-	move.w	#$6000,sr	; T0 + S: trace only changes of flow
-	nop			; NOP synchronizes the 040 pipeline and is T0-traced
-	chkcnt	cnt_trace,2,58
+	move.w	#$6000,sr	; T0 + S: T0 does not exist on the 68060
+	nop
+	chkcnt	cnt_trace,1,58
+	move.w	sr,d0
+	and.w	#$4000,d0	; the T0 write was dropped
+	beq.s	t0gone
+	failt	97
+t0gone:
 	move.w	#$6000,sr
-	moveq	#1,d0		; ordinary straight-line instruction: no trace
-	chkcnt	cnt_trace,2,97
-	move.w	#$2700,sr	; MOVE to SR is itself a T0 synchronization point
-	chkcnt	cnt_trace,3,98
-	move.w	#$6000,sr
-	bra	t0flow		; taken branch: traced (word form: zero displacement)
+	bra	t0flow		; taken branch: no trace without T1
 t0flow:
-	chkcnt	cnt_trace,4,59
-	move.w	#$6000,sr
-	stop	#$2700		; a traced STOP never enters stopped state
-	chkcnt	cnt_trace,5,99
-	; MOVEC to a control register is a T0 change of flow; reading one
-	; back is NOT.  gencpu marks only i_MOVE2C ($4E7B) with
-	; trace_t0_68040_only(), and cputest Basic/MOVEC2 expects the trace
-	; after the $4E7B in its sequence rather than the $4E7A before it.
-	move.w	#$6000,sr
-	movec	vbr,d0		; $4E7A: reads a control register, no trace
-	nop			; ...so the trace comes from this NOP instead
-	chkcnt	cnt_trace,6,100
+	chkcnt	cnt_trace,1,98
+	move.w	#$A000,sr	; T1: the next instruction is traced
+	moveq	#1,d0		; ordinary straight-line instruction: traced
+	chkcnt	cnt_trace,2,59
+	move.w	#$A000,sr
+	stop	#$2700		; a traced STOP loads SR, takes the trace and
+	chkcnt	cnt_trace,3,99	; never enters the stopped state
+	move.w	#$A000,sr
+	movec	vbr,d0		; MOVEC is traced like anything else under T1
+	chkcnt	cnt_trace,4,100
 	move.w	#$2700,sr
 
 ;----------------------------------------------------------------- MOVEC matrix
@@ -286,9 +314,9 @@ t0flow:
 	movec	dfc,d1
 	chkl	d1,7,17
 
-	movec	d0,cacr
-	movec	cacr,d1
-	chkl	d1,$80008000,18
+	movec	d0,cacr	; 68060 CACR: EDC NAD ESB DPI FOC EBC (CABC CUBC
+	movec	cacr,d1		; act and read as zero) EIC NAI FIC
+	chkl	d1,$F880E000,18
 	moveq	#0,d0
 	movec	d0,cacr
 
@@ -318,26 +346,66 @@ t0flow:
 	movec	srp,d1
 	chkl	d1,$FFFFFE00,23
 
-	move.l	#$12345678,d0
-	movec	d0,mmusr
-	movec	mmusr,d1
-	chkl	d1,$12345678,24
+	; the 68040's MMUSR, the MSP and the ISP (and the 020/030 CAAR) do not
+	; exist on the 68060: MOVEC naming them is an illegal instruction
+	clr.w	(cnt_ill).l
+	lea	mvc_m1(pc),a0
+	move.l	a0,(ill_resume).l
+	dc.w	$4E7B,$0805	; movec d0,mmusr
+mvc_m1:
+	chkcnt	cnt_ill,1,24
+	lea	mvc_m2(pc),a0
+	move.l	a0,(ill_resume).l
+	dc.w	$4E7A,$1803	; movec msp,d1
+mvc_m2:
+	chkcnt	cnt_ill,2,26
+	lea	mvc_m3(pc),a0
+	move.l	a0,(ill_resume).l
+	dc.w	$4E7A,$0804	; movec isp,d0
+mvc_m3:
+	chkcnt	cnt_ill,3,27
+	lea	mvc_m4(pc),a0
+	move.l	a0,(ill_resume).l
+	dc.w	$4E7A,$0802	; movec caar,d0
+mvc_m4:
+	chkcnt	cnt_ill,4,27
+	move.w	#2,(cnt_ill).l	; the counts below continue from the opcodes
 
 	move.l	#$3C00,d0
 	movec	d0,usp
 	movec	usp,d1
 	chkl	d1,$3C00,25
 
-	move.l	#$3800,d0
-	movec	d0,msp
-	movec	msp,d1
-	chkl	d1,$3800,26
+	; PCR (MC68060UM 3.2.2.5): the MC68060 identification $0430 and the
+	; revision are read-only; EDEBUG, DFP and ESS are written
+	dc.w	$4E7A,$1808	; movec pcr,d1
+	move.l	d1,d2
+	clr.w	d2
+	chkl	d2,$04300000,190
+	move.l	#$FFFF0083,d0	; EDEBUG DFP ESS, and nothing else
+	dc.w	$4E7B,$0808	; movec d0,pcr
+	dc.w	$4E7A,$2808	; movec pcr,d2
+	and.l	#$FF,d2
+	chkl	d2,$83,191
+	moveq	#0,d0
+	dc.w	$4E7B,$0808	; FPU on, superscalar dispatch off again
 
-	movec	isp,d0		; active stack: must equal SP
-	cmp.l	sp,d0
-	beq.s	t27ok
-	failt	27
-t27ok:
+	; BUSCR (MC68060UM 7.4): L and LE are written, SL and SLE are the
+	; shadow copies an exception takes (an exception clears L and LE)
+	moveq	#0,d0
+	dc.w	$4E7B,$0008	; movec d0,buscr
+	dc.w	$4E7A,$1008	; movec buscr,d1
+	chkl	d1,0,192
+	move.l	#$A0000000,d0	; L and LE: the next operand accesses are locked
+	dc.w	$4E7B,$0008
+	trap	#0		; no operand access before the exception
+	dc.w	$4E7A,$1008	; movec buscr,d1
+	chkl	d1,$50000000,193	; L, LE moved to SL, SLE and cleared
+	moveq	#0,d0
+	dc.w	$4E7B,$0008
+	dc.w	$4E7A,$1008
+	chkl	d1,$50000000,194	; the shadow bits are not written by MOVEC
+	subq.w	#1,(cnt_trap0).l	; keep the TRAP #0 count below intact
 
 ;----------------------------------------------------------------- MOVE USP
 	movea.l	#$3C00,a0
@@ -359,18 +427,33 @@ t28ok:
 	and.l	#$FF,d2
 	chkl	d2,$5A,29
 
-;----------------------------------------------------------------- PTEST/PFLUSH/CINV/CPUSH decode
-; PTEST walks the translation tables even with TC.E clear (WinUAE's PTEST
-; has no enable check), so point the root at a zeroed descriptor: the probe
-; reports a plain nonresident MMUSR rather than a transparent shortcut.
+;----------------------------------------------------------------- PTEST/PLPA/PFLUSH/CINV/CPUSH decode
+; PTEST is gone on the 68060: an F-line opcode (vector 11, format $0).
+; PLPA with translation disabled answers the address itself (the default
+; transparent translation), so An is unchanged.
 	move.l	#$5800,d0
 	movec	d0,urp
 	movec	d0,srp
 	clr.l	($5800).l	; root entry 0: invalid
 	lea	($5000).l,a0
-	ptestr	(a0)
-	movec	mmusr,d0
-	chkl	d0,0,30		; nonresident: R clear
+	move.w	(cnt_fline).l,d5
+	dc.w	$F568		; ptestr (a0): F-line
+	move.w	(cnt_fline).l,d6
+	sub.w	d5,d6
+	cmp.w	#1,d6
+	beq.s	ptest_fl
+	failt	30
+ptest_fl:
+	dc.w	$F5C8		; plpar (a0)
+	cmpa.l	#$5000,a0
+	beq.s	plpa_tt1
+	failt	195
+plpa_tt1:
+	dc.w	$F588		; plpaw (a0)
+	cmpa.l	#$5000,a0
+	beq.s	plpa_tt2
+	failt	196
+plpa_tt2:
 	pflusha
 	cinva	bc
 	cpushl	dc,(a0)
@@ -404,9 +487,9 @@ fmt_cont:
 	addq.l	#8,sp		; discard the fake frame
 	chkcnt	cnt_fmt,1,34
 
-	; A full MC68040 does not recognize the LC/EC format-$4 frame.
-	lea	fmt4_cont(pc),a0
-	move.l	a0,(resume).l
+	; The 68060 RTE takes formats $0, $2, $3 and $4 (MC68060UM 8.2.7):
+	; a format-$4 frame (access error) is 16 bytes and simply returns
+	movea.l	sp,a4
 	clr.l	-(sp)		; frame bytes 12..15
 	clr.l	-(sp)		; frame bytes 8..11
 	move.w	#$4010,-(sp)	; format $4, arbitrary vector offset
@@ -414,17 +497,43 @@ fmt_cont:
 	move.w	#$2700,-(sp)
 	rte
 fmt4_cont:
-	lea	16(sp),sp	; invalid frame remains intact below format-error frame
-	chkcnt	cnt_fmt,2,87
+	chkcnt	cnt_fmt,1,87
+	cmpa.l	sp,a4		; all 16 bytes popped
+	beq.s	fmt4_sp
+	failt	87
+fmt4_sp:
+	; ... but the 68020-68040 throwaway ($1) and the 68040 access error
+	; ($7) frames are format errors
+	lea	fmt1_cont(pc),a0
+	move.l	a0,(resume).l
+	move.w	#$1010,-(sp)	; format $1
+	pea	fmt1_cont(pc)
+	move.w	#$2700,-(sp)
+	rte
+fmt1_cont:
+	addq.l	#8,sp
+	chkcnt	cnt_fmt,2,197
+	lea	fmt7_cont(pc),a0
+	move.l	a0,(resume).l
+	move.w	#$7010,-(sp)	; format $7
+	pea	fmt7_cont(pc)
+	move.w	#$2700,-(sp)
+	rte
+fmt7_cont:
+	addq.l	#8,sp
+	chkcnt	cnt_fmt,3,198
 
-	; FRESTORE must reject a state frame with an incompatible version byte.
-	; Vector 14 stacks the FRESTORE instruction PC in a format-$0 frame.
-	move.l	#$42000000,($3540).l
+	; FRESTORE must reject a state frame whose format byte (bits 15-8 of
+	; the first long word) is not $00, $60 or $E0.  Vector 14 stacks the
+	; FRESTORE instruction PC in a format-$0 frame.
+	move.l	#$00004200,($3540).l
+	clr.l	($3544).l
+	clr.l	($3548).l
 	lea	frestore_bad_cont(pc),a0
 	move.l	a0,(resume).l
 	frestore	($3540).l
 frestore_bad_cont:
-	chkcnt	cnt_fmt,3,101
+	chkcnt	cnt_fmt,4,101
 
 ;----------------------------------------------------------------- address error
 	lea	addr_cont(pc),a0
@@ -452,16 +561,17 @@ bcc_nt:
 bcc_nt_cont:
 	chkcnt	cnt_addr,2,88
 
-	; RTE to an odd user-mode PC with tracing enabled stacks the restored
-	; user/T1 SR exactly.  The handler verifies it before forcing a safe
-	; supervisor continuation.
+	; RTE to an odd PC (68060, WinUAE gencpu): the frame is popped, the
+	; system byte of the stacked SR is the RTE's own, and the CCR is clear
+	; but for N and Z taken from the new SR word ($8000: N)
+	move.w	#$2700,sr
 	lea	rte_odd_cont(pc),a0
 	move.l	a0,(resume).l
 	move.l	#$400,(exp_addr).l
 	lea	rte_odd(pc),a0		; the frame names the RTE itself
 	move.l	a0,(exp_pc).l
 	move.w	#1,(exp_srv).l
-	move.w	#$8000,(exp_sr).l
+	move.w	#$2708,(exp_sr).l
 	move.w	#$0000,-(sp)
 	move.l	#$00000401,-(sp)
 	move.w	#$8000,-(sp)	; user + T1
@@ -565,27 +675,33 @@ mdelay:
 	bsr	wait_nmi_2
 	chkcnt	cnt_nmi,2,41
 
-;----------------------------------------------------------------- M bit throwaway
+;----------------------------------------------------------------- M bit
+; The 68060 has one supervisor stack: M is only a bit of SR (MC68060UM
+; 11.1.2).  Setting it leaves A7 alone; an interrupt stacks a format-$0
+; frame on that stack with M as it was and runs the handler with M clear;
+; RTE restores it.
 	move.w	#$2000,sr
-	move.l	#$3800,d0
-	movec	d0,msp
-	movec	isp,d5		; remember ISP
-	ori.w	#$1000,sr	; switch to master stack
-	move.w	#2,(IPLREG).l
-	bsr	wait_int2_3
-	; back here with M restored from the master stack frame
-	move.w	sr,d0
-	andi.w	#$1000,d0
-	beq	mfail
-	chkcnt	cnt_mflag,1,42	; exactly one throwaway frame seen
-	movec	msp,d0
-	chkl	d0,$3800,43	; master stack fully unwound
-	andi.w	#$EFFF,sr	; back to interrupt stack
-	movec	isp,d0
-	cmp.l	d0,d5
+	movea.l	sp,a5		; remember the stack
+	clr.w	(tw_sr).l
+	ori.w	#$1000,sr	; M set: A7 does not change
+	cmpa.l	sp,a5
 	beq.s	t44ok
 	failt	44
 t44ok:
+	move.w	#2,(IPLREG).l
+	bsr	wait_int2_3
+	move.w	sr,d0		; M restored by the handler's RTE
+	andi.w	#$1000,d0
+	beq	mfail
+	move.w	(tw_sr).l,d0	; ... and it was in the stacked SR
+	andi.w	#$1000,d0
+	beq	mfail
+	chkcnt	cnt_mflag,1,42	; the handler saw M clear
+	cmpa.l	sp,a5		; one stack, fully unwound
+	beq.s	t43ok
+	failt	43
+t43ok:
+	andi.w	#$EFFF,sr
 
 	; A level already pending under mask 7 when RTE restores mask 0 IS
 	; taken at that boundary: the instruction at the restored PC does not
@@ -625,10 +741,13 @@ rte_irq_ok:
 	beq	fine_inj_done	; it and the block is bypassed, not faked
 
 	; If an interrupt becomes pending while another exception is being
-	; processed, the 68040 stacks the interrupt and vectors to it before it
-	; executes the first instruction of the original exception handler.
+	; processed, the 68060 defers it until the first instruction of the
+	; original exception handler has executed (MC68060UM 8.1, 8.2.9): the
+	; interrupt is taken after h_trap0's first instruction and before its
+	; second (h_int2 checks trap_guard and trap_guard2).
 	move.w	#$2000,sr		; IPL2 is unmasked in the interrupted context
 	clr.w	(trap_guard).l
+	clr.w	(trap_guard2).l
 	move.w	#1,(irq_exc).l
 	move.w	#1,(IRQEXCCTL).l	; TB raises IPL2 after TRAP #0 starts
 	trap	#0
@@ -643,10 +762,11 @@ exc_irq_done:
 	failt	96
 exc_irq_guarded:
 	; Repeat in the narrower vector-read/handler-refill window. The TB holds
-	; the fetched handler opcode until IPL synchronization completes. The
-	; core must discard it and take IPL2 before executing h_trap0's guard.
+	; the fetched handler opcode until IPL synchronization completes; the
+	; handler's first instruction still runs before IPL2 is taken.
 	move.w	#$2000,sr
 	clr.w	(trap_guard).l
+	clr.w	(trap_guard2).l
 	move.w	#1,(irq_exc).l
 	move.w	#2,(IRQEXCCTL).l
 	trap	#0
@@ -821,9 +941,10 @@ t139_x:
 t139_ok:
 	move.w	#0,(FBERRCTL).l
 
-	; 141: a DEMAND fetch fault takes the access error: format $7,
-	; FA = the fetch address, supervisor program space, ATC clear; RTE
-	; restarts the fetch, which then succeeds.  The target sits BEHIND
+	; 141: a DEMAND fetch fault takes the access error: format $4, FA =
+	; the instruction (an opword fetch: FSLW IO), supervisor program
+	; space, a bus error on a read (RE) and no MMU cause; RTE restarts the
+	; fetch, which then succeeds.  The target sits BEHIND
 	; the arming code so it can only ever be fetched through the
 	; branch's flush -- a demand fetch by construction.
 	bra.s	t141_arm
@@ -849,11 +970,13 @@ fberr_done:
 	btst	#1,d0		; instruction boundaries: cycle-fine IPLDLY
 	beq	fine_sweep_done
 
-	; Trace vs interrupt at one boundary.  The INTERRUPT is processed
-	; first; these sweeps pin that, and hardware corroborates it: an odd
-	; IRQ vector producing a nested address error stacks an SR carrying
-	; the ACCEPTED interrupt mask, only reachable if the interrupt was
-	; processed first.
+	; Trace vs interrupt at one boundary, 68060 (MC68060UM 8.3): the TRACE
+	; is processed first (priority 4.0 against 4.1), and the interrupt is
+	; then deferred until the trace handler's first instruction has run --
+	; so the interrupt frame stacks h_trace's second instruction, and the
+	; trace frame the instruction after the traced one.  The 68040 order
+	; (interrupt first, trace at the interrupt handler's entry) must never
+	; be seen.  (The notes below are the 68040 history of these tests.)
 	;
 	; CORRECTION (2026-08-22).  An earlier version of this comment, and
 	; commit cc742655, claimed WinUAE also DELIVERS the trace at the
@@ -899,11 +1022,20 @@ tio_ret:
 	move.w	#$2700,sr	; stop; the handlers already ran
 	move.l	(int2_pc).l,d0
 	lea	tio_ret(pc),a0
-	cmp.l	a0,d0		; IRQ frame returned to the RTS target?
+	cmp.l	a0,d0		; the 68040 order (interrupt first) is wrong
+	bne.s	tio_ord
+	move.l	(trace_pc).l,d1
+	lea	(h_int2).l,a1
+	cmp.l	a1,d1
+	bne.s	tio_ord
+	failt	142
+tio_ord:
+	lea	(h_trace+8).l,a0
+	cmp.l	a0,d0		; IRQ frame names h_trace's second instruction?
 	bne.s	tio_next
 	move.l	(trace_pc).l,d0
-	lea	(h_int2).l,a0
-	cmp.l	a0,d0		; trace delivered at the IRQ handler entry?
+	lea	tio_ret(pc),a0
+	cmp.l	a0,d0		; trace frame returned to the RTS target?
 	bne.s	tio_next
 	move.w	#1,(order_hit).l
 tio_next:
@@ -913,16 +1045,13 @@ tio_next:
 	move.w	#0,(IPLREG).l
 	tst.w	(order_hit).l
 	bne.s	tio_ok
-	failt	142		; interrupt never won a simultaneous trace
+	failt	142		; the trace never went first at one boundary
 tio_ok:
 
 	; 143 covers the straight-line boundary: sweep IPL2 into a traced
 	; divide so some delay lands trace and interrupt simultaneously
-	; pending at its boundary.  The interrupt goes first and the trace
-	; must arrive at the IRQ handler entry (trace frame PC = h_int2) --
-	; a core that drops the trace event resumes tracing only at the
-	; following instruction and stacks a later PC, and that signature
-	; must then never appear across the whole sweep.
+	; pending at its boundary: the trace frame names the instruction
+	; after the divide, the interrupt frame h_trace's second instruction.
 	; Same widening as 142: the coincidence delay moves with core timing.
 	clr.w	(order_hit).l
 	moveq	#2,d5
@@ -930,13 +1059,23 @@ tio2_loop:
 	clr.l	(int2_pc).l
 	clr.l	(trace_pc).l
 	move.w	d5,(IPLDLY).l
-	move.w	#$A000,sr	; T1 + S, mask 0
 	move.l	#100,d0
-	divu.w	#3,d0		; traced; IPL2 qualifies inside
+	move.w	#$A000,sr	; T1 + S, mask 0
+	divu.w	#3,d0		; the first traced instruction; IPL2 qualifies inside
+tio2_after:
 	move.w	#$2700,sr
 	move.l	(trace_pc).l,d0
 	lea	(h_int2).l,a0
-	cmp.l	a0,d0
+	cmp.l	a0,d0		; the 68040 order (trace at the IRQ entry)
+	bne.s	tio2_ord
+	failt	143
+tio2_ord:
+	lea	tio2_after(pc),a0
+	cmp.l	a0,d0		; trace first, after the divide ...
+	bne.s	tio2_next
+	move.l	(int2_pc).l,d0
+	lea	(h_trace+8).l,a0
+	cmp.l	a0,d0		; ... and the IRQ after h_trace's first insn
 	bne.s	tio2_next
 	move.w	#1,(order_hit).l
 tio2_next:
@@ -1327,14 +1466,15 @@ cmpiok:
 	move.w	(IPLCAP).l,d0
 	btst	#2,d0
 	beq	buserr_done
-; The handler verifies format $7, a clear ATC-fault bit and the original
-; supervisor-data function code before returning to the faulting instruction.
+; The handler verifies format $4, an FSLW with a read bus error (RE), no MMU
+; cause and the original supervisor-data function code (TM) before
+; returning to the faulting instruction, which the 68060 restarts.
 	move.w	#5,(buserr_fc).l
 	move.l	(FCREG+$20).l,d0
 	chkcnt	cnt_buserr,1,86
 
-	; A faulting MOVES reports its selected transfer modifier in the SSW, but
-	; exception stack/vector traffic itself must use supervisor-data FC=5.
+	; A faulting MOVES reports its function code in the FSLW, but exception
+	; stack/vector traffic itself must use supervisor-data FC=5.
 	move.w	#1,(BERRCTL).l	; arm a second rejection in the testbench
 	moveq	#1,d0
 	movec	d0,sfc
@@ -1349,9 +1489,9 @@ buserr_done:
 ;=========== WinUAE-oracle exception/stack-frame battery (2026-08-07) ======
 	clr.w	(exp_srv).l
 
-; RTE to an odd PC commits the restored SR before taking the address error;
-; the frame therefore carries that restored image (hardware cputest
-; 68040_ae RTE/0001).
+; RTE to an odd PC: the 68060 stacks its own system byte with a CCR of N
+; and Z from the new SR word (WinUAE gencpu): $0013 gives neither
+	move.w	#$2000,sr
 	lea	ex_t1_cont(pc),a0
 	move.l	a0,(resume).l
 	move.l	#$400,(exp_addr).l
@@ -1361,7 +1501,7 @@ buserr_done:
 	move.l	#$00000401,-(sp)	; odd return PC
 	move.w	#$0013,-(sp)	; restored SR: user, CCR=$13
 	move.w	#1,(exp_srv).l
-	move.w	#$0013,(exp_sr).l
+	move.w	#$2000,(exp_sr).l
 ex_t1_rte:
 	rte
 ex_t1_cont:
@@ -1398,8 +1538,8 @@ ex_t2_cont:
 ex_t2_sp_ok:
 	chkcnt	cnt_addr,6,105
 
-; The interrupt throwaway frame's SR image is the ORIGINAL SR with only S
-; forced: the old interrupt mask and M survive in the image.
+; The interrupt frame's SR image is the ORIGINAL SR: the old interrupt
+; mask and M survive in the image (the 68060 stacks no throwaway frame).
 	move.w	#$3100,sr	; S + M, mask 1
 	move.w	#2,(IPLREG).l
 ex_t3_wait:
@@ -1408,7 +1548,6 @@ ex_t3_wait:
 	bne.s	ex_t3_wait
 	move.w	(tw_sr).l,d0
 	chkl	d0,$3100,106	; M and the OLD mask kept, S already set
-	andi.w	#$EFFF,sr	; back to the interrupt stack
 	move.w	#$2700,sr
 
 ; An odd handler address is not a halt (that is reserved for vectors 2 and
@@ -1435,33 +1574,25 @@ ex_t4_cont:
 	chkcnt	cnt_trapu,1,108	; the TRAP handler itself never ran (count
 				; unchanged from the user round-trip test)
 
-; A pending T0 trace does NOT survive an exception on the 68040 -- not for
-; the internal ones (CHK et al) and not for the others either.  This test
-; used to require a "survivor" trace at the handler's first instruction,
-; from reading WinUAE's Exception_cpu_oldpc as the path every exception
-; takes.  It is not: gencpu emits exception_cpu() only for divide-by-zero,
-; CHK, TRAPV, TRAP #n and the RTE format error, and on a 68040 that path
-; forces t0 = false for exactly those; everything else -- op_illg's
-; vector 4 included -- goes through plain Exception(), which clears T0.
-; Hardware settled it: cputest basic/all and fbasic/all both reported
-; "Got unexpected trace exception ... Exception 4 also pending" after the
-; ILLEGAL that terminates every test, for plain integer instructions as
-; well as FP ones.
+; An instruction that takes a group 2 or 3 exception is not traced on the
+; 68060 (MC68060UM 8.2.6, 8.3): ILLEGAL, CHK and TRAP under T1 go to their
+; handlers with no trace, and the instruction after the handler's RTE
+; (which restores T1) is the next one traced.
 	move.w	(cnt_trace).l,d5
-	move.w	#$6000,sr	; T0, supervisor
-	dc.w	$4AFC		; ILLEGAL: no trace at h_ill entry
-	move.w	#$2700,sr	; T0 restored by h_ill's RTE: this SR write
-				; is itself a T0 change-of-flow, so it traces
+	move.w	#$A000,sr	; T1, supervisor (this write is not traced:
+				; T1 was clear when it started)
+	dc.w	$4AFC		; ILLEGAL: no trace
+	move.w	#$2700,sr	; T1 restored by h_ill's RTE: traced
 	move.w	(cnt_trace).l,d6
 	sub.w	d5,d6
-	cmp.w	#1,d6		; the SR write only: no survivor
+	cmp.w	#1,d6		; the SR write only
 	beq.s	ex_t5a_ok
 	failt	109
 ex_t5a_ok:
 	move.w	(cnt_trace).l,d5
-	move.w	#$6000,sr	; T0 again
 	move.l	#5,d0
-	chk.w	#3,d0		; CHK trap: internal, T0 trace CANCELLED
+	move.w	#$A000,sr	; T1 again
+	chk.w	#3,d0		; CHK trap: no trace
 	move.w	#$2700,sr	; only this SR write traces
 	move.w	(cnt_trace).l,d6
 	sub.w	d5,d6
@@ -1469,6 +1600,17 @@ ex_t5a_ok:
 	beq.s	ex_t5b_ok
 	failt	110
 ex_t5b_ok:
+	move.w	(cnt_trace).l,d5
+	move.w	#$A000,sr
+	trap	#0		; TRAP #n: no trace either
+	move.w	#$2700,sr	; traced
+	move.w	(cnt_trace).l,d6
+	sub.w	d5,d6
+	cmp.w	#1,d6
+	beq.s	ex_t5c_ok
+	failt	199
+ex_t5c_ok:
+	subq.w	#1,(cnt_trap0).l
 
 ; BSR and JSR to an ODD target fault BEFORE the return-address push:
 ; A7 must be untouched and no return address stored (hardware cputest
@@ -1671,8 +1813,9 @@ wn2:
 
 ;----------------------------------------------------------------- handlers
 h_trap0:
-	move.w	#1,(hid).l	; X2.3a: identify the handler for hfail
 	move.w	#1,(trap_guard).l	; deliberately the first handler instruction
+	move.w	#1,(trap_guard2).l	; ... and the second (see h_int2)
+	move.w	#1,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$0080,6(sp)
 	bne	hfail
 	addq.w	#1,(cnt_trap0).l
@@ -1699,8 +1842,28 @@ h_ill:
 	move.w	#3,(hid).l	; X2.3a: identify the handler for hfail
 	cmpi.w	#$0010,6(sp)
 	bne	hfail
+	tst.l	(ill_resume).l	; a longer illegal opcode: resume where set
+	beq.s	hill_2
+	move.l	(ill_resume).l,2(sp)
+	clr.l	(ill_resume).l
+	bra.s	hill_n
+hill_2:
 	addq.l	#2,2(sp)	; skip the 2-byte opcode
+hill_n:
 	addq.w	#1,(cnt_ill).l
+	rte
+
+; vector 61: an expected unimplemented integer instruction (format $0, PC
+; = the instruction, exp_pc); resume at (resume)
+h_unimp:
+	move.w	#18,(hid).l
+	cmpi.w	#$00F4,6(sp)
+	bne	hfail
+	move.l	2(sp),d6
+	cmp.l	(exp_pc).l,d6
+	bne	hfail
+	move.l	(resume).l,2(sp)
+	addq.w	#1,(cnt_unimp).l
 	rte
 
 h_aline:
@@ -1804,30 +1967,36 @@ haddr_sr_ok:
 
 h_buserr:
 	move.w	#13,(hid).l	; X2.3a: identify the handler for hfail
-	move.l	$14(sp),(hfa).l	; X2.3a: record the fault address for hfail
+	move.l	8(sp),(hfa).l	; X2.3a: record the fault address for hfail
 	move.l	2(sp),(hfpc).l
-	cmpi.w	#$7008,6(sp)	; format $7, vector 2
+	cmpi.w	#$4008,6(sp)	; format $4, vector 2
 	bne	hfail
-	move.l	$14(sp),d0	; fault address
+	move.l	12(sp),d0	; FSLW: a bus error on a read (RE), and none of
+	btst	#5,d0		; IO PBE SBE PTA PTB IL PF SP WP TWE WE TTR
+	beq	hfail
+	move.l	8(sp),d0	; fault address
 	cmp.l	(fberr_fa).l,d0	; the armed FETCH berr address?
 	beq.s	hb_fetch
 	cmpi.l	#(FCREG+$20),d0
 	bne	hfail
-	move.w	$0C(sp),d0	; SSW
-	andi.w	#$0400,d0	; ATC fault must be clear for physical berr
+	move.l	12(sp),d0
+	and.l	#$0000FFD8,d0
 	bne	hfail
-	move.w	$0C(sp),d0
-	andi.w	#7,d0		; supervisor data FC
+	move.l	12(sp),d0	; TM: the access's function code
+	swap	d0
+	andi.w	#7,d0
 	cmp.w	(buserr_fc).l,d0
 	bne	hfail
 	addq.w	#1,(cnt_buserr).l
 	rte
 
 hb_fetch:
-	move.w	$0C(sp),d0	; SSW
-	andi.w	#$0400,d0	; ATC clear: physical berr
+	move.l	12(sp),d0	; FSLW: an opword fetch (IO), no other cause
+	and.l	#$0000FFD8,d0
+	cmp.l	#$00008000,d0
 	bne	hfail
-	move.w	$0C(sp),d0
+	move.l	12(sp),d0
+	swap	d0
 	andi.w	#7,d0		; supervisor program space
 	cmp.w	#6,d0
 	bne	hfail
@@ -1845,7 +2014,9 @@ h_int2:
 hi2nokick:
 	tst.w	(irq_exc).l
 	beq.s	hi2exc_ok
-	tst.w	(trap_guard).l	; original TRAP handler must not have begun
+	tst.w	(trap_guard).l	; the TRAP handler's first instruction ran ...
+	beq	hfail
+	tst.w	(trap_guard2).l	; ... and its second has not
 	bne	hfail
 	clr.w	(irq_exc).l
 hi2exc_ok:
@@ -1857,21 +2028,16 @@ hi2exc_ok:
 	bne	hfail
 	clr.w	(irq_early).l
 hi2early_ok:
-	move.w	10(sp),d0	; frame format/vector
-	andi.w	#$0FFF,d0
-	cmpi.w	#$0068,d0
+	cmpi.w	#$0068,10(sp)	; format $0 (the 68060's only interrupt frame)
 	bne	hfail
-	move.w	10(sp),d0
-	andi.w	#$F000,d0
+	move.w	4(sp),d0	; capture the stacked SR (d0 is pushed at
+	move.w	d0,(tw_sr).l	; entry, the frame starts at 4(sp))
+	andi.w	#$1000,d0
 	beq.s	hi2f0
-	cmpi.w	#$1000,d0
-	bne	hfail
-	move.w	4(sp),d0	; capture the throwaway SR image (d0 is
-	move.w	d0,(tw_sr).l	; pushed at entry, frame starts at 4(sp))
-	addq.w	#1,(cnt_mflag).l
-	move.w	sr,d0		; M must already be clear on a throwaway
+	move.w	sr,d0		; an interrupt clears M for its handler
 	andi.w	#$1000,d0
 	bne	hfail
+	addq.w	#1,(cnt_mflag).l
 hi2f0:
 	addq.w	#1,(cnt_int2).l
 	tst.w	(hold2).l	; level-sensitivity test: the device is NOT

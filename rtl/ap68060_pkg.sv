@@ -8,13 +8,13 @@ package ap68060_pkg;
 
 //--------------------------------------------------------------------------
 // Register numbers (5 bits).  A7 never appears here: the decoder maps it
-// to USP, ISP or MSP from the S and M bits current at decode time.
+// to USP or ISP from the S bit current at decode time (the 68060 has one
+// supervisor stack pointer; register 17 is unused).
 //--------------------------------------------------------------------------
 localparam logic [4:0] R_D0  = 5'd0;
 localparam logic [4:0] R_A0  = 5'd8;
 localparam logic [4:0] R_USP = 5'd15;
 localparam logic [4:0] R_ISP = 5'd16;
-localparam logic [4:0] R_MSP = 5'd17;
 localparam logic [4:0] R_T0  = 5'd18;   // T0..T13 = 18..31, microcode temps
 
 //--------------------------------------------------------------------------
@@ -56,7 +56,32 @@ typedef struct packed {
 } busreq_t;
 
 //--------------------------------------------------------------------------
-// ATC entry (MC68040UM figure 3-21); pa is PA31-12 (PA12 comes from LA12
+// Fault status long word of the format $4 access error frame (MC68060UM
+// figure 8-6).  SIZE is coded as the SIZ pins are (00 long, 01 byte, 10
+// word, 11 double / MOVE16): the manual's table is wrong, as WinUAE notes;
+// TM holds the access's function code.
+//--------------------------------------------------------------------------
+localparam logic [31:0] FSLW_MA  = 32'h0800_0000;   // second or later part of a misaligned access
+localparam logic [31:0] FSLW_LK  = 32'h0200_0000;   // locked transfer
+localparam logic [31:0] FSLW_R   = 32'h0100_0000;   // RW = 10 read (11 with FSLW_W: RMW)
+localparam logic [31:0] FSLW_W   = 32'h0080_0000;   // RW = 01 write
+localparam logic [31:0] FSLW_IO  = 32'h0000_8000;   // instruction fetch (IO,MA: 1,1 extension word)
+localparam logic [31:0] FSLW_PBE = 32'h0000_4000;   // bus error on a push buffer write
+localparam logic [31:0] FSLW_SBE = 32'h0000_2000;   // bus error on a store buffer write
+localparam logic [31:0] FSLW_PTA = 32'h0000_1000;   // invalid root descriptor
+localparam logic [31:0] FSLW_PTB = 32'h0000_0800;   // invalid pointer descriptor
+localparam logic [31:0] FSLW_IL  = 32'h0000_0400;   // a second indirect descriptor
+localparam logic [31:0] FSLW_PF  = 32'h0000_0200;   // invalid page descriptor
+localparam logic [31:0] FSLW_SP  = 32'h0000_0100;   // supervisor protected
+localparam logic [31:0] FSLW_WP  = 32'h0000_0080;   // write protected
+localparam logic [31:0] FSLW_TWE = 32'h0000_0040;   // bus error during a table search
+localparam logic [31:0] FSLW_RE  = 32'h0000_0020;   // bus error on a read
+localparam logic [31:0] FSLW_WE  = 32'h0000_0010;   // bus error on a write
+localparam logic [31:0] FSLW_TTR = 32'h0000_0008;   // fault on a transparently translated access
+localparam logic [31:0] FSLW_BPE = 32'h0000_0004;   // branch prediction error
+
+//--------------------------------------------------------------------------
+// ATC entry (MC68060UM figure 4-20); pa is PA31-12 (PA12 comes from LA12
 // with 8 Kbyte pages)
 //--------------------------------------------------------------------------
 typedef struct packed {
@@ -101,6 +126,8 @@ localparam logic [2:0] MFC_DFC  = 3'd2;  // MOVES write
 localparam logic [2:0] MFC_SUP  = 3'd3;  // supervisor data (exception stacking)
 localparam logic [2:0] MFC_IACK = 3'd4;  // interrupt acknowledge (TT=3)
 localparam logic [2:0] MFC_EAP  = 3'd5;  // microcode: the EA's space (D2 maps it)
+localparam logic [2:0] MFC_BKPT = 3'd6;  // breakpoint acknowledge read (TT=3, TM=0, A=0)
+localparam logic [2:0] MFC_LPS  = 3'd7;  // LPSTOP broadcast write (TT=3, TM=0)
 
 // control flow
 // internal exception codes of instruction fetch faults (uop.exc); real

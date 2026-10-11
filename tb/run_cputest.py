@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay WinUAE cputest 68040 corpus slices on the AP68060 core.
+"""Replay WinUAE cputest 68060 corpus slices on the AP68060 core.
 
   ./run_cputest.py CORPUS                     smoke set (one slice per group)
   ./run_cputest.py CORPUS --full              every slice
@@ -34,12 +34,17 @@ from replay_gen import generate  # noqa: E402
 SIM = Path(os.environ.get("CPUTEST_SIM", REPO / "obj" / "obj_cputest" / "tb_cputest"))
 MON = Path(os.environ.get("CPUTEST_MON", HERE / "build" / "cputest_mon.bin"))
 
+# group directories are <cpu digit>_<name>: 6_ for the 68060 corpus
 GROUPS = {
-    "4_AE": "AE", "4_BASIC": "Basic", "4_Default": "Default",
-    "4_EXTDST": "FFEXT_DST", "4_EXTSRC": "FFEXT_SRC", "4_FBASIC": "BasicFPU",
-    "4_FINT": "intFPU", "4_FPACK": "PackedFPU", "4_IRQ": "IRQ",
-    "4_ODDEXC": "ODD_EXC", "4_ODDIRQ": "ODD_IRQ", "4_ODDSTK": "ODD_STK",
+    "AE": "AE", "BASIC": "Basic", "Default": "Default",
+    "EXTDST": "FFEXT_DST", "EXTSRC": "FFEXT_SRC", "FBASIC": "BasicFPU",
+    "FINT": "intFPU", "FPACK": "PackedFPU", "IRQ": "IRQ",
+    "ODDEXC": "ODD_EXC", "ODDIRQ": "ODD_IRQ", "ODDSTK": "ODD_STK",
 }
+
+
+def group_name(d: str) -> str:
+    return GROUPS.get(d[2:], d[2:]) if d[:1].isdigit() and d[1:2] == "_" else d
 SMOKE = [("Default", "DIVS.W", "0001"), ("Basic", "ABCD.B", "0001"),
          ("IRQ", "NOP", "0001"), ("AE", "BSR.B", "0001"),
          ("ODD_EXC", "ANDSR.W", "0001")]
@@ -56,10 +61,10 @@ def corpus_root(src: Path, work: Path) -> Path:
                 zf.extractall(dest)
             stamp.write_text(ident)
         src = dest
-    for cand in (src, src / "data040", src / "data"):
-        if any(cand.glob("4_*")):
+    for cand in (src, src / "data060", src / "data040", src / "data"):
+        if any(cand.glob("[46]_*")):
             return cand
-    raise SystemExit("no 4_* groups under %s" % src)
+    raise SystemExit("no 6_* (or 4_*) groups under %s" % src)
 
 
 def unpack_daz(daz: Path, cache: Path) -> Path:
@@ -103,8 +108,8 @@ def match(v, pats):
 
 def discover(root: Path, args):
     out = []
-    for daz in sorted(root.glob("4_*/*/0000.daz")):
-        group = GROUPS.get(daz.parent.parent.name, daz.parent.parent.name)
+    for daz in sorted(root.glob("[46]_*/*/0000.daz")):
+        group = group_name(daz.parent.parent.name)
         instr = daz.parent.name
         if not match(group, args.group) or not match(instr, args.instruction):
             continue

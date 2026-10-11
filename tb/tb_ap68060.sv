@@ -107,7 +107,7 @@ endfunction
 // pins the program drives through $F2C0, and the status pins
 logic  [1:0] pins_r;
 logic        ipend_n;
-logic  [3:0] pst;
+logic  [4:0] pst;
 
 // the bus: the 68040 or the alternate master drives it
 logic        mi_n, cpu_ta_n, cpu_ta_oe, slv_ta_n;
@@ -452,16 +452,18 @@ m68060_alt_master am (
 assign am_trig = bclk_en && !ts_n && a_oe && !am_drive && rw_n && siz == 2'b11 &&
                  a_o[31:4] == am_trig_a[31:4];
 
-// PST never shows a reserved encoding (6 is the 68040V's, 7 reserved),
-// and shows "stopped" (D) once STOP has held for a few clocks
+// PST never shows an encoding MC68060UM table 2-7 leaves undefined ($03,
+// $05-$07, $0C, $13; $08/$0B are the emulator's), and shows "stopped"
+// ($17, LPSTOP $16) once STOP has held for a few clocks
 int stop_clks;
 always_ff @(posedge clk) begin
 	stop_clks <= (rsti_n && dut.be.stopped) ? stop_clks + 1 : 0;
-	if (rsti_n && (pst == 4'h6 || pst == 4'h7)) begin
-		$display("FAIL: PST shows the reserved encoding %h", pst);
+	if (rsti_n && (pst == 5'h03 || pst == 5'h05 || pst == 5'h06 || pst == 5'h07 ||
+	               pst == 5'h08 || pst == 5'h0B || pst == 5'h0C || pst == 5'h13)) begin
+		$display("FAIL: PST shows the undefined encoding %h", pst);
 		errors <= errors + 1;
 	end
-	if (stop_clks > 8 && pst != 4'hD) begin
+	if (stop_clks > 8 && pst != (dut.be.lpstopped ? 5'h16 : 5'h17)) begin
 		$display("FAIL: PST is %h during STOP", pst);
 		errors <= errors + 1;
 	end
@@ -853,9 +855,10 @@ always_ff @(posedge clk) begin
 			end
 		end
 		// IPEND: a claimed request is processed at the next boundary,
-		// except the RTE boundary that resumes a MOVEM (SSW CM): the
-		// continued MOVEM completes first
-		if (dut.be.wb_bound && !dut.be.take_irq && !dut.be.cm_block &&
+		// except where the 68060 defers it: a trace due there goes first,
+		// and the end of an exception's processing (the handler's first
+		// instruction runs before an interrupt)
+		if (dut.be.wb_bound && !dut.be.take_irq && !dut.be.trace_due && !dut.be.xstk &&
 		    dut.be.ipl_q != 3'd0 && dut.be.ipl_q != 3'd7 && tb_qual[dut.be.ipl_q]) begin
 			errors <= errors + 1;
 			$display("FAIL: claimed level %0d request not taken at the boundary of pc=%h",
