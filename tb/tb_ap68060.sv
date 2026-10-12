@@ -127,7 +127,9 @@ logic [31:0] a_o, d_o, d_mem;
 logic        a_oe, d_oe, rw_n, ciout_n, lock_n, locke_n, ts_n, tip_n, lock_oe;
 logic  [1:0] siz, tt, tln, upa;
 logic  [2:0] tm;
-logic        ta_n, tea_n, tra_n, tci_n, tbi_n, cla_n, avec_n;
+logic        tea_n, tra_n, tci_n, tbi_n, cla_n, avec_n;
+logic        slv_ta_n, fr_ta_n;
+wire         ta_n = slv_ta_n & fr_ta_n;   // the slave's and Fast RAM's
 logic        br_n, bb_n_o, bb_oe, btt_n_o, btt_oe, rsto_n;
 logic  [3:0] bs_n;
 logic        sas_n, tip_oe, sas_oe;
@@ -169,6 +171,8 @@ logic  [1:0] am_siz, am_tt;
 logic  [2:0] am_tm;
 wire  [31:0] bus_a    = am_drive ? am_a : a_o;
 wire         bus_ts_n = am_drive ? am_ts_n : ts_n;
+// a TS of the processor's for Fast RAM ($50000000-$500FFFFF, below)
+wire         fr_sel   = !am_drive && a_oe && !ts_n && a_o[31:20] == 12'h500;
 wire         bus_rw_n = am_drive ? am_rw_n : rw_n;
 wire   [1:0] bus_siz  = am_drive ? am_siz : siz;
 wire   [1:0] bus_tt   = am_drive ? am_tt : tt;
@@ -180,7 +184,9 @@ wire  [31:0] bus_dr   = d_mem;                           // read data
 logic  [2:0] ipl_lagm, ipl_lagm_def, ipl_old;
 wire   [2:0] ipl_sk   = (ipl_lvl & ~ipl_lagm) | (ipl_old & ipl_lagm);
 wire   [2:0] ipl_pins = !rsti_n ? ~{md_hold, md_native, md_ign} : ~ipl_sk;
-wire  [31:0] d_pins   = !rsti_n ? {16'd0, md_cnt} : am_d_oe ? am_d : d_mem;
+logic [31:0] fr_d;
+logic        fr_doe;
+wire  [31:0] d_pins   = !rsti_n ? {16'd0, md_cnt} : am_d_oe ? am_d : fr_doe ? fr_d : d_mem;
 
 // the core's area options (build_sim.sh DEFS="+define+AP_FPU_PIPE=0 ..."):
 // the default follows the core: all three off (doc/STATUS.md: their cost)
@@ -235,8 +241,8 @@ wire         itci_req = itci_on && xfer_v && xfer_rd && (xfer_tm == 3'd2 || xfer
 m68060_bus_slave #(.AW(20)) mem (
 	.clk(clk), .nreset(rsti_n), .bclk_en(bclk_en),
 	.a(bus_a), .d_cpu(bus_dw), .d_oe_cpu(d_oe), .rw_n(bus_rw_n), .siz(bus_siz), .bs_n(bs_n),
-	.tt(bus_tt), .tm(bus_tm), .ts_n(bus_ts_n), .sas_n(sas_oe ? sas_n : 1'b1), .cpu_xfer(!am_drive),
-	.d_mem(d_mem), .ta_n(ta_n), .tea_n(tea_n), .tra_n(tra_n), .tbi_n(tbi_n), .tci_n(tci_n),
+	.tt(bus_tt), .tm(bus_tm), .ts_n(bus_ts_n || fr_sel), .sas_n(sas_oe ? sas_n : 1'b1), .cpu_xfer(!am_drive),
+	.d_mem(d_mem), .ta_n(slv_ta_n), .tea_n(tea_n), .tra_n(tra_n), .tbi_n(tbi_n), .tci_n(tci_n),
 	.cla_n(cla_n), .avec_n(avec_n),
 	.m_ign(md_ign), .m_native(md_native), .m_hold(md_hold), .m_cnt(md_cnt),
 	.wait_mode(wait_mode), .tbi_mode(tbi_mode), .retry_pct(retry_pct),
@@ -248,6 +254,34 @@ m68060_bus_slave #(.AW(20)) mem (
 	.ev(ev), .ev_rd(ev_rd), .ev_addr(ev_addr), .ev_data(ev_data), .ev_be(ev_be),
 	.ev_siz(ev_siz), .ev_tt(ev_tt), .ev_tm(ev_tm), .ev_err(ev_err),
 	.perr(perr)
+);
+
+//--------------------------------------------------------------------------
+// Fast RAM at $50000000-$500FFFFF (1 Mbyte): the 68060-bus slave in front
+// of the AP030 Fast RAM front end and its DDR3 side (rtl/fastram), on a
+// DDR3 model with random waits and latency in a clock of its own
+//--------------------------------------------------------------------------
+logic        clk_mem = 1'b0;
+always #3.5 clk_mem = ~clk_mem;
+logic [28:0] ddr_address;
+logic  [7:0] ddr_burstcount, ddr_byteenable;
+logic        ddr_read, ddr_write, ddr_waitrequest, ddr_readdatavalid;
+logic [63:0] ddr_writedata, ddr_readdata;
+ap060_fastram fram (
+	.clk(clk), .clk_mem(clk_mem), .rst(!rsti_n), .bclk_en(bclk_en),
+	.m_ign(md_ign), .m_cnt(md_cnt), .m_hold(md_hold),
+	.a(a_o), .rw_n(rw_n), .siz(siz), .tt(tt), .tm(tm), .bs_n(bs_n), .ts_n(ts_n || am_drive),
+	.ciout_n(ciout_n), .d_cpu(d_o), .sel(fr_sel), .ddr_addr({12'd0, a_o[19:3]}),
+	.ta_n(fr_ta_n), .d_o(fr_d), .d_oe(fr_doe), .busy(),
+	.avm_address(ddr_address), .avm_burstcount(ddr_burstcount), .avm_read(ddr_read),
+	.avm_write(ddr_write), .avm_writedata(ddr_writedata), .avm_byteenable(ddr_byteenable),
+	.avm_waitrequest(ddr_waitrequest), .avm_readdata(ddr_readdata),
+	.avm_readdatavalid(ddr_readdatavalid)
+);
+ddr_model #(.AW(17)) ddr (
+	.clk(clk_mem), .address(ddr_address), .burstcount(ddr_burstcount), .read(ddr_read),
+	.write(ddr_write), .writedata(ddr_writedata), .byteenable(ddr_byteenable),
+	.waitrequest(ddr_waitrequest), .readdata(ddr_readdata), .readdatavalid(ddr_readdatavalid)
 );
 always_ff @(posedge clk)
 	if (perr) begin
@@ -729,6 +763,8 @@ assign push_retry = pr_arm && xfer_v && !am_drive && !xfer_rd &&
 // and with BGR negated the 68060 keeps the bus that long, BG or not
 // (7.11.2): no other master's transfer may fall inside it
 logic ts_lock, ts_locke, lk_open, lk_exc;
+logic fr_ta_q;    // Fast RAM's TA sampled on the previous bus clock edge
+always_ff @(posedge clk) if (bclk_en) fr_ta_q <= !fr_ta_n;
 always_ff @(posedge clk)
 	if (!rsti_n) begin
 		ts_lock <= 1'b0; ts_locke <= 1'b0; lk_open <= 1'b0; lk_exc <= 1'b0;
@@ -740,8 +776,12 @@ always_ff @(posedge clk)
 		end
 		// (a bus error on an instruction fetch inside the sequence does not
 		// end it: it may be a prefetch never used)
+		// (a Fast RAM transfer has no slave event: its beat ends on the edge
+		// that samples its TA; a locked transfer is never a line)
 		if (ev && !am_drive && ts_lock)
 			lk_open <= !(ts_locke || (ev_err && ev_tm != 3'd2 && ev_tm != 3'd6));
+		if (bclk_en && !fr_ta_n && ts_lock)
+			lk_open <= !ts_locke;
 		if (bclk_en && am_drive && !am_ts_n && lk_open && am_bgr_n) begin
 			errors <= errors + 1;
 			$display("FAIL: another master's transfer inside a locked sequence, BGR negated (cycle %0d)", cycles);
@@ -757,7 +797,8 @@ always_ff @(posedge clk)
 		// (a write's event comes a clock after the edge its TA is sampled
 		// on, the edge LOCK negates on after the LOCKE write)
 		if (bclk_en && lk_open && !lk_exc && !am_drive && a_oe && lock_oe && lock_n &&
-		    !(ev && !am_drive && ts_lock && (ts_locke || ev_err))) begin
+		    !(ev && !am_drive && ts_lock && (ts_locke || ev_err)) &&
+		    !(fr_ta_q && ts_lock && ts_locke)) begin
 			errors <= errors + 1;
 			$display("FAIL: LOCK negated inside a locked sequence (cycle %0d, pc=%h)", cycles, dbg_pc);
 		end

@@ -50,6 +50,23 @@ ALMs, validated with Verilator.
   one frozen DMU clock; a snoop has priority over the processor's next
   transfer.
 
+## Fast RAM for an integration (rtl/fastram)
+
+`ap060_fastram.sv` puts DDR3-backed Fast RAM on the 68060 bus: a bus slave
+(`ap060_fastram_bus.sv`) in front of the AP030 Fast RAM front end's native
+port (`ap030_fastram_fe.v`: two 16-byte line buffers, an 8 KiB cache below
+the processor's, posted writes) and its DDR3 side (`ap030_fastram_be.v`, an
+Avalon-MM master), joined by dual-clock FIFOs.  The AP030 files are copied
+unchanged from the Minimig AP030 build.  A line read is one request whose
+long words come back in the 68060's burst order; writes are posted beat by
+beat with BS3-BS0; only TA is driven.  TA is asserted only for clocks the
+processor samples (ignore states, extra write hold, BCLK at half CLK).
+The integration supplies the window decode (`sel`, with TS) and the DDR3
+64-bit word address.  The front end's cache is swept by reset only: no
+other master may write the DDR3 behind it.  The bench maps
+$50000000-$500FFFFF there, on a DDR3 model with random waits and latency in
+a clock of its own; `t_fastram` runs in every configuration.
+
 ## Verification
 
 - `tb/run_tests.sh`: 28 self-checking programs (tb/asm) under ten bus
