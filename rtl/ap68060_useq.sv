@@ -342,6 +342,7 @@ always_comb begin
 	nu.pc     = src.pc;
 	nu.npc    = src.npc;
 	nu.ras    = src.ras;
+	nu.exr     = exc_mode;
 	nu.first  = src_first;
 	nu.last   = uw.last;
 	nu.exc    = (src.exc != 8'd0) ? src.exc : 8'd0;
@@ -671,7 +672,7 @@ always_comb begin
 			logic fxb;
 			fxb = fb_in && mv_fix == 2'd0;
 			p = '0;
-			p.pc = nu.pc; p.npc = nu.npc; p.first = 1'b0;
+			p.pc = nu.pc; p.npc = nu.npc; p.exr = nu.exr; p.first = 1'b0;
 			p.op = OP_MOV; p.sz = SZ_L; p.ccr_we = 5'd0;
 			p.a_src = OS_REG; p.a_reg = fxb ? (R_T0 + 5'd7) : (R_T0 + 5'd6);
 			p.b_src = OS_ZERO;
@@ -685,7 +686,7 @@ always_comb begin
 			// first: T11 = the address, then the transfers from T11
 			uop_t p;
 			p = '0;
-			p.pc = nu.pc; p.npc = nu.npc; p.first = nu.first;
+			p.pc = nu.pc; p.npc = nu.npc; p.exr = nu.exr; p.first = nu.first;
 			p.ag = 1'b1;
 			p.base_v = nu.base_v; p.base = nu.base;
 			p.idx_v = nu.idx_v; p.idx = nu.idx; p.idx_l = nu.idx_l; p.scale = nu.scale;
@@ -760,7 +761,7 @@ always_comb begin
 	if (n_ptr) begin
 		uop_t p;
 		p = '0;
-		p.pc = nu.pc; p.npc = nu.npc; p.first = nu.first; p.last = 1'b0;
+		p.pc = nu.pc; p.npc = nu.npc; p.exr = nu.exr; p.first = nu.first; p.last = 1'b0;
 		p.op = OP_MOV; p.sz = SZ_L; p.msz = SZ_L; p.ccr_we = 5'd0;
 		p.a_src = OS_MEM; p.b_src = OS_ZERO;
 		p.ag = 1'b1;

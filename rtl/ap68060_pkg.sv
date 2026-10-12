@@ -282,6 +282,8 @@ typedef struct packed {
 	logic  [1:0] bhc;       // D1 read (trained in EX)
 	// exceptions and control
 	logic  [7:0] exc;       // decode-time exception vector, 0 = none
+	logic        exr;        // an exception routine's uop: pc/npc are not an
+	                        // instruction's (never refetched from them)
 	logic        ser;       // serialize: flush and refetch npc after WB
 	logic        bcp;       // a branch the branch cache predicted (D1 confirmed it)
 	logic        b_upd;     // operand B is this uop's own (An)+/-(An) register:

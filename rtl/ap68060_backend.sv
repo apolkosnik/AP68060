@@ -480,8 +480,11 @@ end
 // run ahead into (it predicts calls and returns, beyond the 68040's
 // prefetch): the next instruction to reach AG is refetched, with it
 // everything younger.  Instructions already past AG are in execution.
+// An exception routine's uops are not instructions (their pc is 0): the
+// refetch waits for the handler's first instruction, which the routine's
+// final jump fetches afresh anyway.
 logic snp_pend;
-wire  ag_snref = snp_pend && ag_v && ag_u.first;
+wire  ag_snref = snp_pend && ag_v && ag_u.first && !ag_u.exr;
 always_ff @(posedge clk) begin
 	if (!nreset || flush) snp_pend <= 1'b0;
 	else if (sn_ihit) snp_pend <= 1'b1;
