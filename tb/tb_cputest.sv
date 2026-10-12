@@ -79,7 +79,7 @@ ap68060 dut (
 	.br_n(br_n), .bg_n(1'b0), .bgr_n(1'b1), .bb_n_i(1'b1), .bb_n_o(bb_n_o), .bb_oe(bb_oe),
 	.btt_n_i(1'b1), .btt_n_o(btt_n_o), .btt_oe(btt_oe),
 	.rsto_n(rsto_n),
-	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .dbg_halted(dbg_halted)
+	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .dbg_halted(dbg_halted), .dbg_vbr(), .dbg_cacr()
 );
 
 logic        xfer_v, xfer_rd;
