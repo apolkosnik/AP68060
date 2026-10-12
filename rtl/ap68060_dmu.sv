@@ -343,6 +343,9 @@ logic  [6:0] clr_i;                // the clear sweep's set
 logic        clr_rst;              // ... after reset (else CINVA: then E_M_IC)
 // synthesis translate_off
 logic [3:0]  lv  [128];             // (simulation: the flip-flop model, checked)
+// synthesis translate_off
+initial for (int i = 0; i < 128; i++) lv[i] = 4'd0;
+// synthesis translate_on
 // synthesis translate_on
 // dirty [set][way] (the push writes the whole line): four 64x1 LUT RAMs,
 // one read address -- the scan's set, the snooped set, else the fill/push
@@ -456,6 +459,7 @@ generate
 		ap68060_tdp #(.AW(7), .DW(21)) tag (
 			.clk(clk),
 			.addr_a(la_set_n), .we_a(1'b0), .wd_a(21'd0), .q_a(tq_a[gw]),
+			.qa_raw(), .qa_bv(), .qa_bd(),
 			.addr_b(tset_b), .we_b(tw_b && tway_b == 2'(gw)), .wd_b(twd_b), .q_b(tq_b[gw])
 		);
 		ap68060_sdp_be #(.AW(7), .NB(16), .OREG(0)) dat (
@@ -501,8 +505,9 @@ assign dq1 = dq_new ? dqc : dqh;
 //--------------------------------------------------------------------------
 logic        atc_hit;
 atce_t       atc_e;
-logic  [3:0] atc_hv;
-logic [19:0] atc_wpa [4];
+logic  [3:0] atc_hv, atc_hvd;
+logic [19:0] atc_wpa [4], atc_wpad [4];
+logic  [3:0] m1_aset;            // DC1's ATC set, registered with its address
 logic        atc_wr;
 logic [31:0] atc_wla;
 logic        atc_wfc2;
@@ -513,6 +518,7 @@ ap68060_atc datc (
 	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc[11]),
 	.la(steal ? st_la : m1.a), .fc2(steal ? st_fc2 : m1.smode),
 	.hit(atc_hit), .ent(atc_e), .hv(atc_hv), .wpa(atc_wpa),
+	.la_d(m1.a), .fc2_d(m1.smode), .set_d(m1_aset), .hv_d(atc_hvd), .wpa_d(atc_wpad),
 	.wr(atc_wr), .wla(atc_wla), .wfc2(atc_wfc2), .went(atc_went),
 	.flush_all(atc_fall), .flush_page(atc_fpage), .flush_nonglobal(atc_fng)
 );
@@ -614,7 +620,7 @@ always_comb begin
 		logic ma;
 		ma = 1'b0;
 		for (int i = 0; i < 4; i++)
-			if (atc_hv[i] && tq[j] == {atc_wpa[i][19:1], tc_p ? m1.a[12] : atc_wpa[i][0], m1.a[11]})
+			if (atc_hvd[i] && tq[j] == {atc_wpad[i][19:1], tc_p ? m1.a[12] : atc_wpad[i][0], m1.a[11]})
 				ma = 1'b1;
 		mj[j] = lvd_q[j] && (transp ? (tq[j] == m1.a[31:11]) : ma);
 	end
@@ -628,7 +634,9 @@ always_ff @(posedge clk) begin
 	xres_t xo;
 	xo = xlate(m1.a, m1.smode, m1_wr, fc_tt(m1.fc) == TT_ALT, atc_hit, atc_e,
 	           tq_a[0], tq_a[1], tq_a[2], tq_a[3], lvd_q);
-	if (nreset && m1.ack == 2'd0 && (xo.hit != x_dc1.hit || (xo.hit && xo.way != x_dc1.way)))
+	// (while the engine steals the ATC's main port, xlate sees its address,
+	// not DC1's: DC1 waits then)
+	if (nreset && !steal && m1.ack == 2'd0 && (xo.hit != x_dc1.hit || (xo.hit && xo.way != x_dc1.way)))
 	begin
 		$display("FAIL: DMU: the parallel tag compare says hit=%b way=%0d, xlate hit=%b way=%0d",
 		         x_dc1.hit, x_dc1.way, xo.hit, xo.way);
@@ -1078,7 +1086,10 @@ always_ff @(posedge clk) begin
 
 	if (!nreset) begin
 		m1 <= '0; m2 <= '0; m3 <= '0; m4 <= '0;
-		e_st <= E_M_CLR; e_ret <= E_IDLE; e_sret <= E_IDLE; e_wret <= E_IDLE;
+		// (reset leaves the cache alone -- tags, valid and dirty state, data,
+		// 5.3: its valid and dirty bits have their power-up values from
+		// their initial blocks; CINVA clears it when the software asks)
+		e_st <= E_IDLE; e_ret <= E_IDLE; e_sret <= E_IDLE; e_wret <= E_IDLE;
 		e_dc2_done <= 1'b0; e_wst_done <= 1'b0;
 		e_ldata <= '0; e_flt <= 1'b0; e_faddr <= '0; e_fslw <= '0;
 		e_part <= 1'b0; e_x <= '0; e_va <= '0; e_n <= '0; e_acc <= '0; e_fromline <= 1'b0;
@@ -1115,11 +1126,8 @@ always_ff @(posedge clk) begin
 		sn_ph <= SN_IDLE; sn_src <= '0; sn_way <= '0; bo_cancel <= 1'b0; bo_later <= 1'b0; pbe_r <= 1'b0;
 		bo_ingnt <= 1'b0; sn_pvm <= 1'b0; sn_bom <= 1'b0;
 		sn_look <= 1'b0; sn_hit <= 1'b0; sn_dirty <= 1'b0;
-		// synthesis translate_off
-		for (int i = 0; i < 128; i++) lv[i] <= 4'd0;
-		// synthesis translate_on
 		clr_i   <= '0;
-		clr_rst <= 1'b1;
+		clr_rst <= 1'b0;
 	end
 	else begin
 		// the valid/dirty write port: at most one writer per cycle (the
@@ -1147,11 +1155,13 @@ always_ff @(posedge clk) begin
 			m1.noalloc <= dm_noalloc;
 			m1.ack     <= dm_ack;
 			m1_tp      <= transp_of(dm_va, dm_super, dm_fc, dm_ack);
+			m1_aset    <= tc_p ? dm_va[16:13] : dm_va[15:12];
 			m1_stale   <= (dw && dw_src != 2'd0 && dw_set == dm_va[10:4]) || !e_quiet;
 		end
 		else begin
 			if (adv_dc1) m1.v <= 1'b0;
 			m1_tp <= transp_of(m1.a, m1.smode, m1.fc, m1.ack);
+			m1_aset <= tc_p ? m1.a[16:13] : m1.a[15:12];
 			if ((dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet) m1_stale <= 1'b1;
 		end
 
@@ -1486,8 +1496,10 @@ always_ff @(posedge clk) begin
 			else if (rd) begin
 				// cache inhibited, no-allocate miss, locked, MOVE16 miss,
 				// IACK: a matching line is pushed (if dirty) and invalidated
-				// first (4.3.2); the bus access goes in program order
-				if (e_x.hit && (m2.r.lock || e_x.cm[1] || move16)) begin
+				// first (5.4.2, 5.7.2); the bus access goes in program order.
+				// With the data cache disabled (CACR.EDC clear, CDIS) the
+				// cache's contents are left alone (5.3)
+				if (e_x.hit && dc_en && (m2.r.lock || e_x.cm[1] || move16)) begin
 					f_set  <= e_va[10:4];
 					f_way  <= e_x.way;
 					pv_keep <= 1'b0;
@@ -1595,9 +1607,11 @@ always_ff @(posedge clk) begin
 			logic [15:0] be; logic upd;
 			be  = bmask(e_va[3:0], e_n);
 			upd = e_x.hit && dc_en && !e_x.cm[1] && !m4.r.lock && (m4.r.msz != SZ_Q);
-			if (e_x.hit && m4.r.lock) begin
-				// a locked write bypasses the cache (5.2): a line it hits is
-				// pushed if dirty and invalidated before the bus write
+			if (e_x.hit && dc_en && (m4.r.lock || e_x.cm[1])) begin
+				// a locked write bypasses the cache (5.2), a cache-inhibited
+				// one too (5.4.2, 5.7.2): a line it hits is pushed if dirty
+				// and invalidated before the bus write -- unless the data
+				// cache is disabled, which leaves its contents alone (5.3)
 				f_set   <= e_va[10:4];
 				f_way   <= e_x.way;
 				pv_keep <= 1'b0;

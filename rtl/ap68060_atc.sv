@@ -35,6 +35,13 @@ module ap68060_atc
 	output logic  [3:0] hv,            // the hit way (one-hot), and every way's
 	output logic [19:0] wpa [4],       // physical page: a caller's tag compares
 	                                   // run against all four in parallel
+	// a second lookup port (the DMU's DC1: its own copy of the entries, so
+	// no address multiplexer in front of it): its set is given registered
+	input  logic [31:0] la_d,
+	input  logic        fc2_d,
+	input  logic  [3:0] set_d,
+	output logic  [3:0] hv_d,
+	output logic [19:0] wpa_d [4],
 
 	// install (one cycle)
 	input  logic        wr,
@@ -65,6 +72,7 @@ wire [3:0] wset = p8k ? wla[16:13] : wla[15:12];
 
 slot_t s [4];
 slot_t ws [4];
+slot_t sd [4];
 
 genvar w;
 generate
@@ -78,8 +86,14 @@ generate
 			.clk(clk), .we(wr && wway == 2'(w)), .waddr(wset),
 			.wdata({wfc2, wla[31:12], went}), .raddr(wset), .q(wq)
 		);
+		logic [SW-1:0] dq;
+		ap68060_lutram #(.AW(4), .DW(SW)) ram_d (
+			.clk(clk), .we(wr && wway == 2'(w)), .waddr(wset),
+			.wdata({wfc2, wla[31:12], went}), .raddr(set_d), .q(dq)
+		);
 		assign s[w]  = q;
 		assign ws[w] = wq;
+		assign sd[w] = dq;
 	end
 endgenerate
 
@@ -89,6 +103,11 @@ function automatic logic tag_eq(input slot_t t, input logic [31:0] a, input logi
 endfunction
 
 always_comb for (int i = 0; i < 4; i++) wpa[i] = s[i].e.pa;
+always_comb
+	for (int i = 0; i < 4; i++) begin
+		hv_d[i]  = v[set_d][i] && tag_eq(sd[i], la_d, fc2_d, p8k);
+		wpa_d[i] = sd[i].e.pa;
+	end
 always_comb begin
 	for (int i = 0; i < 4; i++) hv[i] = v[lset][i] && tag_eq(s[i], la, fc2, p8k);
 	hit = |hv;

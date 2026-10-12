@@ -234,6 +234,7 @@ logic        f_dnice;          // f_din is an ordinary operand (the FPU pipeline
 logic  [1:0] f_crsel;
 logic [31:0] f_crwd, f_iapc;
 logic        f_done, f_accepted, f_unimp, f_unsupp, f_excreq, f_used, f_wbok;
+// (the FPU's accepted is a register of its own: the holds start from it)
 logic        f_pbusy;          // pipelined operations in flight
 logic        f_pdone;          // the request went into the pipeline (this cycle)
 // the released operation ends cleanly: done, or its F_WB without an
@@ -500,9 +501,10 @@ always_ff @(posedge clk)
 	end
 // synthesis translate_on
 
+logic [31:0] res_g;            // the result as the hold logic forms it (checked, then unused)
 always_comb begin
 	hold    = 1'b0;
-	res     = 32'd0;
+	res_g     = 32'd0;
 	dkill   = 1'b0;
 	taken   = 1'b0;
 	xvec    = 8'd0;
@@ -576,16 +578,16 @@ always_comb begin
 					if (!done_q) hold = 1'b1;
 					if (ea_dn) begin
 						case (fmt)
-							3'd4:    res = {bv[31:16], f_dout[95:80]};
-							3'd6:    res = {bv[31:8], f_dout[95:88]};
-							default: res = f_dout[95:64];
+							3'd4:    res_g = {bv[31:16], f_dout[95:80]};
+							3'd6:    res_g = {bv[31:8], f_dout[95:88]};
+							default: res_g = f_dout[95:64];
 						endcase
 						dkill = sx_kill;
 					end
 					else case (fmt)
-						3'd4:    res = {16'd0, f_dout[95:80]};
-						3'd6:    res = {24'd0, f_dout[95:88]};
-						default: res = f_dout[95:64];
+						3'd4:    res_g = {16'd0, f_dout[95:80]};
+						3'd6:    res_g = {24'd0, f_dout[95:88]};
+						default: res_g = f_dout[95:64];
 					endcase
 				end
 				else if (go && f_unimp) begin
@@ -600,7 +602,7 @@ always_comb begin
 				end
 				else if (!(go && (f_accepted || f_done || f_pdone || f_excreq))) hold = 1'b1;
 			end
-			FC_GET: res = (imm[1:0] == 2'd1) ? get_q[63:32] : get_q[31:0];
+			FC_GET: res_g = (imm[1:0] == 2'd1) ? get_q[63:32] : get_q[31:0];
 			FC_EAL: if (dfr == K_DFPM) begin
 				xvec = VEC_FLINE; xfmt = 4'd4; xnext = 1'b1; xaddr = dfp_addr;
 			end
@@ -615,13 +617,13 @@ always_comb begin
 				end
 			end
 			FC_CRR: begin
-				res   = f_crrd;
+				res_g   = f_crrd;
 				dkill = !cr_slots[imm[1:0]];
 				if (!crr_wait) hold = 1'b1;
 			end
-			FC_LIST: res = (ea_pd) ? -{25'd0, l_bytes} : {25'd0, l_bytes};
+			FC_LIST: res_g = (ea_pd) ? -{25'd0, l_bytes} : {25'd0, l_bytes};
 			FC_MVR: begin
-				res = mv_rev ? f_fmrd[31:0] : f_fmrd[95:64];
+				res_g = mv_rev ? f_fmrd[31:0] : f_fmrd[95:64];
 				if (!mvr_wait) hold = 1'b1;
 			end
 			FC_COND, FC_DBCC: begin
@@ -647,22 +649,62 @@ always_comb begin
 			FC_SV0: begin
 				// (FSAVE takes no exception: an exception state is saved)
 				if (bg) hold = 1'b1;
-				res = ea_pd ? -32'd12 : 32'd12;
+				res_g = ea_pd ? -32'd12 : 32'd12;
 			end
 			FC_SVW: case (imm[3:2])
-				2'd0:    res = {f_xop[95:80], frame_fmt(sv_kind), 5'd0, sv_v};
-				2'd1:    res = f_xop[63:32];
-				default: res = f_xop[31:0];
+				2'd0:    res_g = {f_xop[95:80], frame_fmt(sv_kind), 5'd0, sv_v};
+				2'd1:    res_g = f_xop[63:32];
+				default: res_g = f_xop[31:0];
 			endcase
 			FC_RS0: begin
 				if (bg) hold = 1'b1;
-				res = 32'd12;
+				res_g = 32'd12;
 				if (!rs_ok) xvec = VEC_FMTERR;
 			end
 			default: ;
 		endcase
 	end
 end
+
+// the result, by the sub-operation only: EX takes it when the uop
+// completes, so it need not wait for the hold's conditions (ex_v, safe,
+// the pipeline): those stay off the result's path to the register file
+always_comb begin
+	res = 32'd0;
+	case (sub)
+		FC_DISP: if (ocl == 3'b011) begin
+			if (ea_dn) case (fmt)
+				3'd4:    res = {bv[31:16], f_dout[95:80]};
+				3'd6:    res = {bv[31:8], f_dout[95:88]};
+				default: res = f_dout[95:64];
+			endcase
+			else case (fmt)
+				3'd4:    res = {16'd0, f_dout[95:80]};
+				3'd6:    res = {24'd0, f_dout[95:88]};
+				default: res = f_dout[95:64];
+			endcase
+		end
+		FC_GET:  res = (imm[1:0] == 2'd1) ? get_q[63:32] : get_q[31:0];
+		FC_CRR:  res = f_crrd;
+		FC_LIST: res = (ea_pd) ? -{25'd0, l_bytes} : {25'd0, l_bytes};
+		FC_MVR:  res = mv_rev ? f_fmrd[31:0] : f_fmrd[95:64];
+		FC_SV0:  res = ea_pd ? -32'd12 : 32'd12;
+		FC_SVW:  case (imm[3:2])
+			2'd0:    res = {f_xop[95:80], frame_fmt(sv_kind), 5'd0, sv_v};
+			2'd1:    res = f_xop[63:32];
+			default: res = f_xop[31:0];
+		endcase
+		FC_RS0:  res = 32'd12;
+		default: ;
+	endcase
+end
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && ex_v && res_g != res && res_g != 32'd0) begin
+		$display("FAIL: fpif result %h, the gated one %h (sub %0d)", res, res_g, sub);
+		$finish;
+	end
+// synthesis translate_on
 
 //--------------------------------------------------------------------------
 // sequential

@@ -28,7 +28,11 @@
 ; phase 2 (two resets)
 ;   7    the address error handler never ran
 ;   then a reset while the 68060 owns the bus (the bench checks the end of
-;        tenure and the pins' release); phase 3: the same a clock later
+;        tenure and the pins' release), a dirty line left in the (then
+;        disabled) data cache; phase 3:
+;   10   the reset left the cache alone (5.3): CPUSHA, allowed with the
+;        cache disabled, writes the dirty line;
+;        then the same reset a clock later
 ;        (both phases of a half-rate bus clock); phase 4: done
 ;
 ;   98   an unexpected exception
@@ -159,6 +163,17 @@ phase2:
 	move.l	(cnt_adr).l,d1
 	chkl	d1,0,7
 	move.w	#0,(HALTRST).l
+; a dirty line at $9100 (memory $11112222), the cache disabled after it
+	move.l	#$11112222,($9100).l
+	dc.w	$F4D8			; cinva bc
+	move.l	#$0000A020,d1		; DTT0: supervisor data copyback
+	movec	d1,dtt0
+	move.l	#$80000000,d1
+	movec	d1,cacr
+	move.l	#$AAAABBBB,($9100).l	; dirty
+	moveq	#0,d1
+	movec	d1,cacr
+	movec	d1,dtt0
 ; a reset while the 68060 owns the bus explicitly (back-to-back transfers):
 ; the bench checks its end of tenure (7.11.2) and the pins' release
 	move.w	#61,(TRESET).l
@@ -172,6 +187,9 @@ busy:	move.l	d1,($9000).l
 phase3:
 	cmp.w	#3,d0
 	bne.s	phase4
+	dc.w	$F478			; cpusha dc (the cache disabled: allowed)
+	move.l	($9100).l,d1
+	chkl	d1,$AAAABBBB,10		; the dirty line survived the reset
 	move.w	#62,(TRESET).l
 	bra.s	busy
 

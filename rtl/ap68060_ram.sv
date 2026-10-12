@@ -63,6 +63,9 @@ module ap68060_tdp #(
 	input  logic          we_a,
 	input  logic [DW-1:0] wd_a,
 	output logic [DW-1:0] q_a,
+	output logic [DW-1:0] qa_raw,    // ... the RAM's word, and the write laid
+	output logic          qa_bv,     // over it (qa_bv: q_a is qa_bd), for a
+	output logic [DW-1:0] qa_bd,     // caller comparing both in parallel
 	input  logic [AW-1:0] addr_b,
 	input  logic          we_b,
 	input  logic [DW-1:0] wd_b,
@@ -70,25 +73,30 @@ module ap68060_tdp #(
 );
 	// A read returns the word as written at the edge that registered its
 	// address (a write to the same word at that edge included).  The RAM
-	// itself reads the old word; the write is laid over it by one
-	// multiplexer whose select is a flip-flop (Quartus's inferred bypass
-	// for this put three logic levels in front of the users' compares).
+	// itself reads the old word; the write is laid over it by a compare of
+	// registered addresses and one multiplexer (Quartus's inferred bypass
+	// put three logic levels in front of the users' compares; a compare of
+	// the incoming address would put it behind the address's own logic).
 	(* ramstyle = "M10K, no_rw_check" *) logic [DW-1:0] mem [0:(1<<AW)-1];
-	logic [DW-1:0] qa_r, qb_r, ba_d, bb_d;
-	logic          ba_v, bb_v;
+	logic [DW-1:0] qa_r, qb_r, wa_d, wb_d;
+	logic [AW-1:0] ra, rb, wa_q, wb_q;
+	logic          wa_v, wb_v;
 	always_ff @(posedge clk) begin
 		if (we_a) mem[addr_a] <= wd_a;
 		if (we_b) mem[addr_b] <= wd_b;
 		qa_r <= mem[addr_a];
 		qb_r <= mem[addr_b];
-		// (port B's write wins a same-word collision, as in the old order)
-		ba_v <= (we_a && addr_a == addr_a) || (we_b && addr_b == addr_a);
-		ba_d <= (we_b && addr_b == addr_a) ? wd_b : wd_a;
-		bb_v <= (we_b) || (we_a && addr_a == addr_b);
-		bb_d <= we_b ? wd_b : wd_a;
+		ra   <= addr_a;
+		rb   <= addr_b;
+		wa_v <= we_a; wa_q <= addr_a; wa_d <= wd_a;
+		wb_v <= we_b; wb_q <= addr_b; wb_d <= wd_b;
 	end
-	assign q_a = ba_v ? ba_d : qa_r;
-	assign q_b = bb_v ? bb_d : qb_r;
+	// (port B's write wins a same-word collision, as in the old order)
+	assign q_a    = (wb_v && wb_q == ra) ? wb_d : (wa_v && wa_q == ra) ? wa_d : qa_r;
+	assign qa_raw = qa_r;
+	assign qa_bv  = (wb_v && wb_q == ra) || (wa_v && wa_q == ra);
+	assign qa_bd  = (wb_v && wb_q == ra) ? wb_d : wa_d;
+	assign q_b = (wb_v && wb_q == rb) ? wb_d : (wa_v && wa_q == rb) ? wa_d : qb_r;
 endmodule
 
 module ap68060_lutram #(

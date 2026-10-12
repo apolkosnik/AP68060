@@ -281,6 +281,7 @@ ap68060_atc iatc (
 	.la(iatc_flush_page ? iatc_flush_la : fpc),
 	.fc2(iatc_flush_page ? iatc_flush_fc2 : smode),
 	.hit(atc_hit), .ent(atc_e), .hv(), .wpa(),
+	.la_d(32'd0), .fc2_d(1'b0), .set_d(4'd0), .hv_d(), .wpa_d(),
 	.wr(iatc_wr), .wla(iatc_wla), .wfc2(iatc_wfc2), .went(iatc_went),
 	.flush_all(iatc_flush_all), .flush_page(iatc_flush_page),
 	.flush_nonglobal(iatc_flush_ng)
@@ -307,6 +308,9 @@ logic  [6:0]   ivo_ra;
 logic          inv_rst;         // the invalidation is reset's clear
 // synthesis translate_off
 logic  [3:0]   iv [128];         // (simulation: the flip-flop model, checked)
+// synthesis translate_off
+initial for (int i = 0; i < 128; i++) iv[i] = 4'd0;
+// synthesis translate_on
 // synthesis translate_on
 logic  [1:0]   rr;
 logic  [6:0]   c_raddr;
@@ -365,6 +369,8 @@ logic [31:0] wf_la;
 atce_t       wf_e;
 
 // line buffer: the last line filled (it also serves TCI lines)
+logic        lb_tci;           // ... a TCI line (dropped by the next redirect)
+logic        m_tci;            // the fill in progress was answered with TCI
 logic        lb_v;             // m_line holds the line at lb_pa (the last fill):
 logic [27:0] lb_pa;            // it is also the cache's write data
 
@@ -527,23 +533,21 @@ always_ff @(posedge clk) begin
 		for (int i = 0; i < 2; i++) f2_w[i] <= '0;
 		f3_n  <= '0; f3_f <= 1'b0; f3_d <= 1'b0; f3_a <= 1'b0;
 		for (int i = 0; i < 2; i++) begin f3_w[i] <= '0; f3_p[i] <= '0; end
-		lb_v  <= 1'b0; lb_pa <= '0;
+		lb_v  <= 1'b0; lb_pa <= '0; lb_tci <= 1'b0; m_tci <= 1'b0;
 		busy  <= 1'b0; stale <= 1'b0; b_req_r <= 1'b0;
 		m_la  <= '0; m_pa <= '0; m_upa <= '0; m_s <= 1'b0; m_dem <= 1'b0; m_ci <= 1'b0;
 		m_alloc <= 1'b0; m_way <= '0; m_line <= '0;
 		iw_req <= 1'b0;
 		c_we  <= 1'b0; c_waddr <= '0; c_wway <= '0; c_wtag <= '0;
 		rr    <= '0;
-		// (reset clears every line: the invalidation runs over the sets)
-		inv_busy <= 1'b1; inv_hold <= 1'b0; inv_ph <= 1'b0; inv_i <= '0;
+		// (reset leaves the cache alone, 5.3: its valid bits have their
+		// power-up values from their initial blocks)
+		inv_busy <= 1'b0; inv_hold <= 1'b0; inv_ph <= 1'b0; inv_i <= '0;
 		inv_sn <= 1'b0; inv_scope <= 2'd3; inv_pa <= '0; inv_lbh <= 1'b0;
-		inv_rst <= 1'b1;
+		inv_rst <= 1'b0;
 		sn_ihit <= 1'b0;
 		ic_inv_done <= 1'b0;
 		sn_inv_done <= 1'b0;
-		// synthesis translate_off
-		for (int i = 0; i < 128; i++) iv[i] <= 4'd0;
-		// synthesis translate_on
 		for (int i = 0; i < QN; i++) qw[i] <= '0;
 		qh  <= '0;
 		qp0 <= '0;
@@ -728,6 +732,7 @@ always_ff @(posedge clk) begin
 				m_got   <= 4'd0;
 				lb_v    <= 1'b0;          // its beats go into m_line
 				m_alloc <= !cacr[14];     // NAI: no allocation
+				m_tci   <= 1'b0;
 				m_way   <= !vv[0] ? 2'd0 : !vv[1] ? 2'd1 :
 				           cacr[13] ? {1'b0, rr[0]} :
 				           !vv[2] ? 2'd2 : !vv[3] ? 2'd3 : rr;
@@ -765,7 +770,7 @@ always_ff @(posedge clk) begin
 				ln[127 - 32 * b_rbeat -: 32] = b_rdata;
 				m_line <= ln;
 				m_got[b_rbeat] <= 1'b1;
-				if (b_rtci) m_alloc <= 1'b0;
+				if (b_rtci) begin m_alloc <= 1'b0; m_tci <= 1'b1; end
 			end
 			if (busy && b_done) begin
 				busy  <= 1'b0;
@@ -778,8 +783,11 @@ always_ff @(posedge clk) begin
 					iw_set = m_pa[10:4]; iw_m[m_way] = 1'b1; iw_v = 1'b1;
 					if (ivo_q == 4'hF) rr <= rr + 2'd1;     // (ivo_ra: m_pa's set)
 				end
-				lb_v  <= 1'b1;
+				// (a TCI line whose stream was redirected meanwhile is
+				// nobody's: not kept at all)
+				lb_v  <= !(stale && (m_tci || (b_rvalid && b_rtci)));
 				lb_pa <= m_pa[31:4];
+				lb_tci <= m_tci || (b_rvalid && b_rtci);
 				st    <= S_RUN;
 			end
 			if (busy && b_err) begin
@@ -889,6 +897,9 @@ always_ff @(posedge clk) begin
 			fras_n  <= d_ras_n;
 			fpc   <= {redir_npc[31:1], 1'b0};
 			qpc_r <= redir_npc;
+			// a TCI line serves only the stream it was fetched for: it is
+			// not to be retained, and no later request may take it (5.7.1)
+			if (lb_tci) lb_v <= 1'b0;
 			odd   <= redir_npc[0];
 			fnew  <= 1'b1;
 			if (st == S_FILL || st == S_CI) begin

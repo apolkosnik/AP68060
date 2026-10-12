@@ -21,6 +21,16 @@
 ;   12-14 a misaligned long within one line whose fill gets TEA on its
 ;        second long word (the first arrived): the fault is on a later
 ;        access of the operand, FSLW MA with RE, FA the operand (8.4.4.3)
+;   15-17 a cache-inhibited write (precise, imprecise) that hits a dirty
+;        copyback line: the line is pushed and invalidated before the bus
+;        write (5.4.2, 5.7.2): a cached read then gets the new data from
+;        memory, and no later push overwrites it
+;   18-20 with the data cache disabled (CACR.EDC clear, CDIS) an inhibited
+;        read leaves the cache alone (5.3): memory's data, no push; the
+;        dirty line is still there for CPUSHA afterwards
+;   21-22 a TCI instruction fill (bench $F16A) serves only the stream it was
+;        fetched for: after the code there changes, a new call fetches it
+;        again (5.7.1) -- the line is neither cached nor kept for later
 ;   10-11 RTE's stack reads are exception-stack accesses: a miss does not
 ;        allocate (5.4.3, 7.7.1).  A cold format $0 frame in copyback
 ;        memory, RTE, then an ordinary load of the frame's line: the load
@@ -41,6 +51,8 @@ resume	equ	$3604
 ae_fslw	equ	$3608
 ae_fa	equ	$360C
 DTEA	equ	$F15E		; one-shot TEA on a data read of this long word
+ITCI	equ	$F16A		; TCI on every instruction fetch of this line
+PINS	equ	$F2C0		; bit 0: CDIS
 
 failt	macro
 	move.w	#\1,d7
@@ -204,6 +216,95 @@ rte_back:
 	failt	11
 .r11:
 
+;------------------------------------------------ 15-17 inhibited writes
+	dc.w	$F4D8		; cinva bc
+	move.l	#$11112222,($A100).l	; memory (DTT1: inhibited)
+	move.l	#$0000A020,d0	; DTT0: supervisor copyback
+	movec	d0,dtt0
+	move.l	#$80000000,d0
+	movec	d0,cacr
+	move.l	#$AAAABBBB,($A100).l	; the line allocated, dirty
+	moveq	#0,d0
+	movec	d0,dtt0		; DTT1 again: precise inhibited
+	move.l	#$CCCCDDDD,($A100).l	; hits the dirty line
+	move.l	#$0000A020,d0
+	movec	d0,dtt0
+	move.l	($A100).l,d1	; cached: a fill from memory
+	dc.w	$F478		; cpusha dc
+	moveq	#0,d0
+	movec	d0,dtt0
+	chkl	d1,$CCCCDDDD,15
+	move.l	($A100).l,d1
+	chkl	d1,$CCCCDDDD,16	; not overwritten by a push
+	move.l	#$0000A020,d0	; again, imprecise inhibited (DTT1 CM 11)
+	movec	d0,dtt0
+	move.l	#$AAAABBBB,($A100).l
+	move.l	#$0000A060,d0
+	movec	d0,dtt1
+	moveq	#0,d0
+	movec	d0,dtt0
+	move.l	#$EEEEFFFF,($A100).l
+	nop			; (out of the store buffer)
+	dc.w	$F478		; cpusha dc
+	move.l	#$0000A040,d0
+	movec	d0,dtt1
+	move.l	($A100).l,d1
+	chkl	d1,$EEEEFFFF,17
+	moveq	#0,d0
+	movec	d0,cacr
+
+;------------------------------------------------ 18-20 a disabled cache
+	dc.w	$F4D8		; cinva bc
+	move.l	#$11112222,($A200).l
+	move.l	#$0000A020,d0
+	movec	d0,dtt0
+	move.l	#$80000000,d0
+	movec	d0,cacr
+	move.l	#$AAAABBBB,($A200).l	; dirty in the cache
+	moveq	#0,d0
+	movec	d0,dtt0
+	movec	d0,cacr		; EDC clear
+	move.l	($A200).l,d1	; inhibited: memory, the line untouched
+	chkl	d1,$11112222,18
+	move.l	#$80000000,d0
+	movec	d0,cacr
+	move.w	#1,(PINS).l	; CDIS
+	nop
+	nop
+	nop
+	move.l	($A200).l,d1
+	clr.w	(PINS).l
+	nop
+	nop
+	nop
+	chkl	d1,$11112222,19
+	dc.w	$F478		; cpusha dc: the dirty line is still there
+	moveq	#0,d0
+	movec	d0,cacr
+	move.l	($A200).l,d1
+	chkl	d1,$AAAABBBB,20
+
+;------------------------------------------------ 21-22 a TCI instruction line
+	dc.w	$F4D8		; cinva bc
+	move.l	#$00008000,d0	; instruction cache on
+	movec	d0,cacr
+	move.w	#$2100,(ITCI).l	; the line of tci_rt: TCI
+	moveq	#1,d5		; two rounds: the second with every other line
+.tc:	move.w	#$7001,(tci_rt).l	; moveq #1,d0 -- cached
+	nop
+	jsr	(tci_rt).l
+	move.l	d0,d2
+	move.w	#$7002,(tci_rt).l	; moveq #2,d0
+	nop
+	jsr	(tci_rt).l
+	move.l	d0,d3
+	dbra	d5,.tc
+	clr.w	(ITCI).l
+	moveq	#0,d0
+	movec	d0,cacr
+	chkl	d2,1,21
+	chkl	d3,2,22		; fetched again, not from the old line
+
 ;------------------------------------------------ 12-14 MA within a line fill
 	dc.w	$F4D8		; cinva bc
 	clr.l	(cnt_ae).l
@@ -217,6 +318,9 @@ rte_back:
 	move.l	#ma_back,(resume).l
 	move.l	($9001).l,d0	; the fill: $9000 fine, $9004 TEA
 ma_back:
+	dc.w	$F478		; cpusha dc: the bookkeeping (resume, the counters)
+				; went into the copyback cache with DTT1 off; a
+				; disabled cache is left alone (5.3), so push it
 	moveq	#0,d0
 	movec	d0,cacr
 	movec	d0,tc
@@ -269,3 +373,11 @@ ifill_bad:
 	dc.w	$4AFC,$4AFC	; $200C: never executed, its beat gets TEA
 ifill_far:
 	jmp	(ifill_back).l
+
+; the TCI test's routine: its line ($2100) is answered with TCI
+	org	$2100
+tci_rt:	moveq	#1,d0
+	rts
+	rept	14
+	nop
+	endr

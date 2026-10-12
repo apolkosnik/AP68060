@@ -22,6 +22,8 @@
 //   $F154 word  arm a one-shot bus error on an instruction fetch at the   //
 //               written address (0 disarms)                               //
 //   $F15C word  arm a one-shot TEA on the next LPSTOP broadcast            //
+//   $F16A word  answer every instruction fetch of this line with TCI (0:  //
+//               off)                                                       //
 //   $F168 word  reset the processor this many clocks later (RSTI for 12  //
 //               clocks), counted in $F15A with the halt resets           //
 //   $F15E word  arm a one-shot TEA on the next data read of the long word  //
@@ -208,6 +210,10 @@ logic [31:0] ev_addr, ev_data;
 logic  [3:0] ev_be;
 logic  [1:0] ev_siz, ev_tt;
 logic  [2:0] ev_tm;
+logic        itci_on;
+logic [15:0] itci_a;
+wire         itci_req = itci_on && xfer_v && xfer_rd && (xfer_tm == 3'd2 || xfer_tm == 3'd6) &&
+                        xfer_addr[15:4] == itci_a[15:4];
 
 m68060_bus_slave #(.AW(20)) mem (
 	.clk(clk), .nreset(rsti_n), .bclk_en(bclk_en),
@@ -218,7 +224,7 @@ m68060_bus_slave #(.AW(20)) mem (
 	.m_ign(md_ign), .m_native(md_native), .m_hold(md_hold), .m_cnt(md_cnt),
 	.wait_mode(wait_mode), .tbi_mode(tbi_mode), .retry_pct(retry_pct),
 	.cla_mode(md_cla), .ign_junk(md_junk),
-	.tea_req(tea_req), .retry_req(push_retry), .tci_req(1'b0), .hold(fetch_hold),
+	.tea_req(tea_req), .retry_req(push_retry), .tci_req(itci_req), .hold(fetch_hold),
 	.iack_vector(8'd0), .ext_rdata(32'd0), .ext_inmem(1'b0),
 	.xfer_v(xfer_v), .xfer_addr(xfer_addr), .xfer_rd(xfer_rd), .xfer_siz(xfer_siz),
 	.xfer_tt(xfer_tt), .xfer_tm(xfer_tm), .xfer_beat(xfer_beat),
@@ -812,6 +818,14 @@ always_ff @(posedge clk)
 	if (!rsti_n) lpstea_arm <= 1'b0;
 	else if (ev && !ev_rd && !ev_err && ev_tt == 2'd0 && ev_addr[15:0] == 16'hF15C) lpstea_arm <= 1'b1;
 	else if (ev && ev_tt == 2'd3 && ev_tm == 3'd0 && !ev_rd) lpstea_arm <= 1'b0;
+// $F16A: every instruction fetch of the line at the written address is
+// answered with TCI (0 turns it off)
+always_ff @(posedge clk)
+	if (!rsti_n) begin itci_on <= 1'b0; itci_a <= '0; end
+	else if (ev && !ev_rd && !ev_err && ev_tt == 2'd0 && ev_addr[15:0] == 16'hF16A) begin
+		itci_a  <= ev_word(ev_addr, ev_data);
+		itci_on <= ev_word(ev_addr, ev_data) != 16'd0;
+	end
 // $F168: reset the processor the written number of clocks later
 always_ff @(posedge clk)
 	if (!rsti_n) trst_cnt <= '0;
