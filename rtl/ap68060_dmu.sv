@@ -1082,7 +1082,11 @@ assign dm_hold1 = sn_frz || steal || steal_q ||
                    e_st != E_W_PART && e_st != E_W_DONE && e_st != E_SB);
 
 always_ff @(posedge clk) begin
-	st_rdy_r    <= 1'b0;
+	// a store's answer is kept until WB takes it: WB can be held in the
+	// cycle it comes (sb_wait: an interrupt due while older stores are
+	// buffered), and e_wst_done keeps the engine from doing the store again
+	// -- a pulse there was lost and WB waited for it forever
+	if (adv_wb || !wb_st) st_rdy_r <= 1'b0;
 	mt_done   <= 1'b0;
 	lkend     <= 1'b0;
 	iw_done   <= 1'b0;
