@@ -102,7 +102,8 @@ module ap68060_backend
 	input  logic [31:0] mt_fslw,
 	input  logic        dm_lkend,       // a LOCKE write completed (BUSCR sequences)
 	input  logic        sb_empty,       // the DMU's store buffer is empty
-	input  logic        sb_err,         // ... and one of its writes ended in TEA
+	input  logic        sb_err,         // ... and one of its writes, or a push, ended in TEA
+	input  logic [31:0] sb_fslw,        // ... FSLW.SBE / FSLW.PBE
 	output logic        sb_err_ack,     // the access error for it is being taken
 	output logic        adv_dc1,        // DC1 -> DC2
 	output logic        adv_dc2,        // DC2 -> EX
@@ -1334,7 +1335,7 @@ always_comb begin
 		x_vec  = 8'd2;
 		x_fmt  = 4'h4;
 		x_kind = EK_FMT4;
-		x_fslw = 32'h0000_2000;          // SBE
+		x_fslw = sb_fslw;                // SBE and/or PBE
 		x_addr = 32'd0;
 		if (!(adv_wb && wb_is_exc)) x_pc = (stopped && !wb_v) ? stop_pc : wb_next;
 	end

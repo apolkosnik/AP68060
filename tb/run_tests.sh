@@ -8,7 +8,7 @@
 # JOBS=<n> simulations run in parallel (default: half the CPUs).
 set -e
 cd "$(dirname "$0")"
-PROGS=${*:-"smoke t_integer t_exceptions t_mmu t_cache t_atcprobe t_bitfield_cache t_bitfield_mmu t_movem_restart t_moves_fc t_fpu t_fpu_frames t_snoop t_btb t_stld t_pins t_snstress t_eredir t_cbsplit t_cmodes t_loops t_early t_stbuf"}
+PROGS=${*:-"smoke t_integer t_exceptions t_mmu t_cache t_atcprobe t_bitfield_cache t_bitfield_mmu t_movem_restart t_moves_fc t_fpu t_fpu_frames t_snoop t_btb t_stld t_pins t_snstress t_eredir t_cbsplit t_cmodes t_loops t_early t_stbuf t_berr"}
 WORK=${WORK:-$(cd .. && pwd)/obj}; export WORK
 JOBS=${JOBS:-$(( $(nproc) / 2 ))}
 ./build_asm.sh $PROGS

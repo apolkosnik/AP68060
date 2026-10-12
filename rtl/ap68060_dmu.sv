@@ -157,7 +157,8 @@ module ap68060_dmu
 
 	// store buffer (CACR.ESB, MC68060UM 5.9, 5.10, 8.4.6)
 	output logic        sb_empty,       // no buffered write left
-	output logic        sb_err,         // a buffered write ended in TEA (FSLW.SBE)
+	output logic        sb_err,         // a buffered write or a push ended in TEA
+	output logic [31:0] sb_fslw,        // ... FSLW.SBE and/or FSLW.PBE
 	input  logic        sb_err_ack,     // ... the access error for it is taken
 
 	// bus snooper
@@ -354,6 +355,8 @@ wire         sn_rset = (sn_ph == SN_A) || (sn_ph == SN_B);   // B: the line stay
 logic  [1:0] sn_src;               // found in: 0 a cache way, 1 push buffer, 2 queued push
 logic  [1:0] sn_way;
 logic        bo_cancel;            // the queued push was invalidated by a snoop
+logic        bo_later;             // a piece of this transfer has completed: a
+                                  // bus error now is on a later access (FSLW.MA)
 
 // The lookup set: AG's address (late: register read, address adders)
 // passes one LUT; the other choices are registers, merged beforehand.
@@ -607,7 +610,7 @@ typedef enum logic [5:0] {
 	E_M_PLW, E_M_PL2, E_M_PLD,
 	E_FILL, E_FILLW, E_FILL_W, E_FILL_INS, E_PUSHV, E_PUSHVW, E_PUSHV_W, E_PUSHV_B,
 	E_BUS, E_BUS_W,
-	E_TW_START, E_TW_DESC, E_TW_DBUS, E_TW_EVAL, E_TW_UPD, E_TW_UPD_W,
+	E_TW_START, E_TW_DESC, E_TW_DBUS, E_TW_EVAL, E_TW_UPD, E_TW_UPD_W, E_TW_LKW,
 	E_TW_DONE,
 	E_I_DONE
 } est_t;
@@ -836,6 +839,11 @@ wire         sb_push = (e_st == E_SB) && sb_room;
 wire         sb_sel  = (sb_n != 3'd0) && !sb_fly;
 wire         sb_pop  = own_sb && (bi_done || bi_err);
 assign       sb_empty = (sb_n == 3'd0);
+// a TEA on a buffered write (SBE) or on a push (PBE): recorded, reported
+// as an access error once the buffers are empty (MC68060UM 8.4.6)
+logic        sbe_r, pbe_r;
+assign       sb_err  = sbe_r || pbe_r;
+assign       sb_fslw = (sbe_r ? FSLW_SBE : 32'd0) | (pbe_r ? FSLW_PBE : 32'd0);
 
 // the engine's view of the BIU port
 logic        b_req;
@@ -868,7 +876,7 @@ end
 
 always_ff @(posedge clk) begin
 	if (!nreset) begin
-		sb_n <= '0; sel_q <= 1'b0; own_sb <= 1'b0; sb_fly <= 1'b0; sb_err <= 1'b0;
+		sb_n <= '0; sel_q <= 1'b0; own_sb <= 1'b0; sb_fly <= 1'b0; sbe_r <= 1'b0;
 		for (int i = 0; i < 4; i++) sb[i] <= '0;
 	end
 	else begin
@@ -883,7 +891,7 @@ always_ff @(posedge clk) begin
 		if (sb_pop) begin
 			for (int i = 0; i < 3; i++) sb[i] <= sb[i + 1];
 			n = n - 3'd1;
-			if (bi_err) sb_err <= 1'b1;
+			if (bi_err) sbe_r <= 1'b1;
 		end
 		if (sb_push) begin
 			sbent_t e;
@@ -898,7 +906,7 @@ always_ff @(posedge clk) begin
 			n = n + 3'd1;
 		end
 		sb_n <= n;
-		if (sb_err_ack) sb_err <= 1'b0;
+		if (sb_err_ack) sbe_r <= 1'b0;
 	end
 end
 
@@ -984,7 +992,7 @@ always_ff @(posedge clk) begin
 		wfs_p1 <= 1'b0;
 		e_job <= 1'b0;
 		m1_stale <= 1'b0;
-		sn_ph <= SN_IDLE; sn_src <= '0; sn_way <= '0; bo_cancel <= 1'b0;
+		sn_ph <= SN_IDLE; sn_src <= '0; sn_way <= '0; bo_cancel <= 1'b0; bo_later <= 1'b0; pbe_r <= 1'b0;
 		sn_look <= 1'b0; sn_hit <= 1'b0; sn_dirty <= 1'b0;
 		// synthesis translate_off
 		for (int i = 0; i < 128; i++) lv[i] <= 4'd0;
@@ -1404,9 +1412,13 @@ always_ff @(posedge clk) begin
 			// (an acknowledge cycle's TEA is no access error: IACK takes the
 			// spurious vector, BKPT the illegal instruction exception)
 			if (bo_err && (m2.r.ack == 2'd0)) begin
+				// MA: the fault on the second or later access of a
+				// misaligned operand (8.4.4.3), the next line's part or a
+				// later bus cycle of this one; FA stays the first byte
 				e_flt   <= 1'b1;
 				e_faddr <= m2.r.a;
-				e_fslw  <= mk_fslw(FSLW_RE, m2.r.lock, m2_rw, m2.r.msz, m2.r.fc);
+				e_fslw  <= mk_fslw(FSLW_RE, m2.r.lock, m2_rw, m2.r.msz, m2.r.fc) |
+				           ((e_part || bo_later) ? FSLW_MA : 32'd0);
 				e_st    <= E_S_DONE;
 			end
 			else begin
@@ -1521,7 +1533,8 @@ always_ff @(posedge clk) begin
 				st_rdy_r     <= 1'b1;
 				st_fault_r   <= 1'b1;
 				st_fslw    <= mk_fslw(FSLW_WE, m4.r.lock, (m4.r.mem == M_RMW) ? 2'b11 : 2'b01,
-				                      m4.r.msz, m4.r.fc);
+				                      m4.r.msz, m4.r.fc) |
+				              (((m4.split && e_part) || bo_later) ? FSLW_MA : 32'd0);
 				st_faddr   <= m4.r.a;
 				e_wst_done <= 1'b1;
 				e_st       <= E_IDLE;
@@ -1791,7 +1804,8 @@ always_ff @(posedge clk) begin
 				// the operand's long word did not arrive: an access fault
 				e_flt   <= 1'b1;
 				e_faddr <= m2.r.a;
-				e_fslw  <= mk_fslw(FSLW_RE, 1'b0, m2_rw, m2.r.msz, m2.r.fc);
+				e_fslw  <= mk_fslw(FSLW_RE, 1'b0, m2_rw, m2.r.msz, m2.r.fc) |
+				           (e_part ? FSLW_MA : 32'd0);
 				e_st    <= E_S_DONE;
 			end
 			else if (bo_tci) begin
@@ -1848,6 +1862,7 @@ always_ff @(posedge clk) begin
 		//==============================================================
 		E_BUS: begin
 			bo_err <= 1'b0;
+			bo_later <= 1'b0;
 			bo_tci <= 1'b0;
 			bo_avec <= 1'b0;
 			bo_rd  <= '0;
@@ -1886,7 +1901,10 @@ always_ff @(posedge clk) begin
 			if ((b_err || b_done) && bo.locke && !bo.rd && (bo.line || bo_left == bo_pn))
 				lkend <= 1'b1;
 			if (b_err) begin
-				bo_err <= 1'b1;
+				// a push that ends in TEA: aborted at once, recorded for the
+				// access error (FSLW.PBE, 8.4.6); the line is gone
+				if (bo.line && !bo.rd && bo.tm == TM_PUSH) pbe_r <= 1'b1;
+				else bo_err <= 1'b1;
 				e_st   <= e_ret;
 			end
 			else if (b_done) begin
@@ -1896,7 +1914,7 @@ always_ff @(posedge clk) begin
 					bo_pa   <= bo_pa + {29'd0, bo_pn};
 					bo_left <= bo_left - bo_pn;
 					if (bo_left == bo_pn) e_st <= e_ret;
-					else e_breq <= 1'b1;
+					else begin e_breq <= 1'b1; bo_later <= 1'b1; end
 				end
 			end
 		end
@@ -2018,19 +2036,54 @@ always_ff @(posedge clk) begin
 			needu = !tw_d[3];
 			lk    = needu && !(page && tw_wr);
 			nd    = tw_d | 32'h8 | (setm ? 32'h10 : 32'h0);
-			tw_d  <= nd;
-			if (page) tw_pd <= nd;
-			bo.line <= 1'b0; bo.rd <= 1'b0; bo.tt <= TT_NORMAL;
+			bo.line <= 1'b0; bo.tt <= TT_NORMAL;
 			bo.tm   <= tw_i ? TM_TBL_CODE : TM_TBL_DATA;
-			bo.upa  <= 2'd0; bo.ci <= 1'b1;
-			bo.lock <= lk; bo.locke <= lk;
+			bo.upa  <= 2'd0; bo.ci <= 1'b0;      // CIOUT negated (table 7-2)
 			bo.ack <= 2'd0; bo.tln <= 2'd0;
 			bo_pa   <= tw_da;
 			bo_left <= 3'd4;
-			bo_wd   <= nd;
 			e_wret <= e_ret;
-			e_ret  <= E_TW_UPD_W;
 			e_st   <= E_BUS;
+			if (lk) begin
+				// the locked read-modify-write: the descriptor read again
+				// with LOCK, U set in what it reads, written back with LOCK
+				// and LOCKE (E_TW_LKW; MC68060UM 4.2.5, the 10.3 timings'
+				// extra read)
+				bo.rd   <= 1'b1;
+				bo.lock <= 1'b1; bo.locke <= 1'b0;
+				e_ret   <= E_TW_LKW;
+			end
+			else begin
+				tw_d  <= nd;
+				if (page) tw_pd <= nd;
+				bo.rd   <= 1'b0;
+				bo.lock <= 1'b0; bo.locke <= 1'b0;
+				bo_wd   <= nd;
+				e_ret   <= E_TW_UPD_W;
+			end
+		end
+		E_TW_LKW: begin
+			// the locked read is in: U into it, the locked write ends it
+			logic [31:0] nd;
+			nd = bo_rd | 32'h8;
+			if (bo_err) begin
+				e_ret    <= e_wret;
+				tw_fail  <= 1'b1;
+				tw_berr  <= 1'b1;
+				tw_cause <= FSLW_TWE | FSLW_LK;
+				e_st     <= E_TW_DONE;
+			end
+			else begin
+				tw_d <= nd;
+				if (tw_lvl == TW_PAGE || tw_lvl == TW_IND) tw_pd <= nd;
+				bo.rd   <= 1'b0;
+				bo.lock <= 1'b1; bo.locke <= 1'b1;
+				bo_pa   <= tw_da;
+				bo_left <= 3'd4;
+				bo_wd   <= nd;
+				e_ret   <= E_TW_UPD_W;
+				e_st    <= E_BUS;
+			end
 		end
 		E_TW_UPD_W: begin
 			e_ret <= e_wret;
@@ -2118,6 +2171,7 @@ always_ff @(posedge clk) begin
 		//--------------------------------------------------------------
 		// snoop port
 		//--------------------------------------------------------------
+		if (sb_err_ack) pbe_r <= 1'b0;
 		sn_look <= 1'b0;
 		case (sn_ph)
 		SN_IDLE: if (sn_req) sn_ph <= SN_A;

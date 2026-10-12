@@ -316,8 +316,12 @@ always_ff @(posedge clk) begin
 
 		if (unlock) unlock_pend <= 1'b1;
 		if ((unlock || unlock_pend) && st == S_IDLE) begin
+			// an abandoned locked sequence: LOCK and LOCKE go too
 			locked      <= 1'b0;
 			unlock_pend <= 1'b0;
+			// (the pins change on a bus clock edge: wait for one)
+			if (bclk_en) begin lock_n <= 1'b1; locke_n <= 1'b1; end
+			else unlock_pend <= 1'b1;
 		end
 
 		if (bclk_en) begin
@@ -376,8 +380,12 @@ always_ff @(posedge clk) begin
 						cur   <= breq[pick_c];
 						cur_c <= pick_c;
 						gnt[pick_c] <= 1'b1;
+						// a locked transfer opens or continues the sequence;
+						// the LOCKE transfer keeps it until it terminates
+						// normally (finish_cycle), so a retry of it with BG
+						// negated and BGR negated holds the bus (7.11.2)
 						if (breq[pick_c].lock) begin
-							locked <= !breq[pick_c].locke;
+							locked <= 1'b1;
 							lock_c <= pick_c;
 						end
 					end
@@ -450,6 +458,8 @@ always_ff @(posedge clk) begin
 					// a bus error ends a locked sequence: the requester
 					// takes an access error and will not complete it
 					locked     <= 1'b0;
+					lock_n     <= 1'b1;         // (and the pins with it)
+					locke_n    <= 1'b1;
 					d_oe       <= 1'b0;
 					sas_n      <= 1'b1;
 					st         <= S_IDLE;
