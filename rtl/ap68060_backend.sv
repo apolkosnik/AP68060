@@ -303,6 +303,9 @@ assign adv_ag  = ag_v  && !stall_ag;
 // the skid's first.  The register file is read, and the forwarding formed,
 // for the uop entering AG (ain_u), wherever it comes from.
 logic        sk_v;
+// (a copy of sk_v for the register file's read addresses alone: sk_v
+// selects the whole uop, and its fan-out would delay the reads)
+(* preserve *) logic sk_vr;
 uop_t        sk_u;
 wire         ain_v = sk_v || in_v;
 uop_t        ain_u;
@@ -379,8 +382,15 @@ ap68060_rf #(.NR(5)) rfb (.clk(clk), .we(bwe), .wa(bwa), .wd(bwd), .ra(rra), .rd
 // AG's base and index are read as the uop enters AG (ports 0/1 address
 // the incoming uop) and kept in registers, so AG's address adders, and the
 // data cache's set index after them, start from flip-flops
-assign rra[0] = ain_u.base;
-assign rra[1] = ain_u.idx;
+assign rra[0] = sk_vr ? sk_u.base : in_u.base;   // (= ain_u's)
+assign rra[1] = sk_vr ? sk_u.idx  : in_u.idx;
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && sk_vr != sk_v) begin
+		$display("FAIL: the skid's copy sk_vr %b differs from sk_v %b", sk_vr, sk_v);
+		$finish;
+	end
+// synthesis translate_on
 assign rra[2] = ag_u.upd2_reg;
 assign rra[3] = ag_u.a_reg;
 assign rra[4] = ag_u.b_reg;
@@ -1455,6 +1465,7 @@ always_ff @(posedge clk) begin
 	if (!nreset) begin
 		ag_v  <= 1'b0; dc1_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; wb_v <= 1'b0;
 		sk_v  <= 1'b0;
+		sk_vr <= 1'b0;
 		eredir_pend <= 1'b0;
 		wb_eredir   <= 1'b0;
 		fv <= 32'd0;
@@ -1985,14 +1996,15 @@ always_ff @(posedge clk) begin
 			// the skid: emptied when AG takes it; filled by a popped uop AG
 			// did not take
 			if (sk_v) begin
-				if (ag_take) sk_v <= 1'b0;
+				if (ag_take) begin sk_v <= 1'b0; sk_vr <= 1'b0; end
 			end
 			else if (in_v && in_rdy && !ag_take) begin
-				sk_v <= 1'b1;
-				sk_u <= in_u;
+				sk_v  <= 1'b1;
+				sk_vr <= 1'b1;
+				sk_u  <= in_u;
 			end
 		end
-		if (flush || kill_now) sk_v <= 1'b0;
+		if (flush || kill_now) begin sk_v <= 1'b0; sk_vr <= 1'b0; end
 		if (kill_now) begin
 			ag_v <= 1'b0; dc1_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; wb_v <= 1'b0;
 		end
