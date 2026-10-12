@@ -31,9 +31,10 @@
 // The halves cross with toggles through three-stage synchronisers; each    //
 // side holds its fields (address, size, write data; read data) steady from  //
 // its toggle until the other side answers it, so only the toggles need     //
-// synchronising (Minimig.sdc: the clocks are asynchronous).  IPL, reset,   //
-// RSTO, VBR and the Fast RAM windows cross through synchronisers of their   //
-// own; the last two change only by MOVEC and autoconfiguration.             //
+// synchronising (Minimig.sdc: the clocks are asynchronous).  Reset, RSTO, //
+// VBR and the Fast RAM windows cross through synchronisers of their own   //
+// (VBR and the windows change only by MOVEC and autoconfiguration); IPL  //
+// goes straight to the core, which synchronises and debounces it itself. //
 //                                                                          //
 // The 68060 bus is aligned: a long word never crosses a long-word         //
 // boundary, a word never an odd address.  Read data goes back on both    //
@@ -85,12 +86,23 @@ always @(posedge clk_cpu or negedge nreset)
 	else         nreset_c <= {nreset_c[1:0], 1'b1};
 wire nrst_c = nreset_c[2];
 
-reg  [2:0] ipl_c1 = 3'b111, ipl_c = 3'b111;
 reg  [1:0] z2e_c = 0, z3e0_c = 0, z3e1_c = 0;
 reg  [4:0] z3b0_c1 = 0, z3b0_c = 0;
 reg  [3:0] z3b1_c1 = 0, z3b1_c = 0;
+// IPL goes to the processor as it is: the core synchronises IPL2-IPL0 on
+// its clock and takes a level only once two consecutive samples agree
+// (MC68060UM 7.8.1), so the bits settling in different clocks cannot show
+// it a level nobody raised.  (Simulation: AP060_SIM_IPL_SKEW delays IPL0,
+// as a bit that resolves a clock late on the FPGA would; tests/ap060
+// t_iplglitch.)
+`ifdef AP060_SIM_IPL_SKEW
+wire       ipl0_late;
+assign #(`AP060_SIM_IPL_SKEW) ipl0_late = ipl[0];
+wire [2:0] ipl_in = {ipl[2:1], ipl0_late};
+`else
+wire [2:0] ipl_in = ipl;
+`endif
 always @(posedge clk_cpu) begin
-	ipl_c1  <= ipl;          ipl_c  <= ipl_c1;
 	z2e_c   <= {z2e_c[0], z2ram_ena};
 	z3e0_c  <= {z3e0_c[0], z3ram_ena0};
 	z3e1_c  <= {z3e1_c[0], z3ram_ena1};
@@ -118,7 +130,7 @@ ap68060 #(.NO_FPU(NO_FPU)) cpu (
 	.ciout_n(), .lock_n(), .locke_n(), .lock_oe(),
 	.ts_n(ts_n), .tip_n(), .tip_oe(), .sas_n(), .sas_oe(),
 	.ta_n(ta_n), .tea_n(1'b1), .tra_n(1'b1), .tci_n(tci_n), .tbi_n(tbi_n), .cla_n(1'b1),
-	.ipl_n(nrst_c ? ipl_c : 3'b111), .avec_n(avec_n),
+	.ipl_n(nrst_c ? ipl_in : 3'b111), .avec_n(avec_n),
 	.br_n(), .bg_n(1'b0), .bgr_n(1'b1),
 	.bb_n_i(bb_oe ? bb_n_o : 1'b1), .bb_n_o(bb_n_o), .bb_oe(bb_oe),
 	.btt_n_i(btt_oe ? btt_n_o : 1'b1), .btt_n_o(btt_n_o), .btt_oe(btt_oe),
