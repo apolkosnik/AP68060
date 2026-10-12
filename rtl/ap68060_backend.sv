@@ -605,7 +605,7 @@ ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 	.safe(!wb_v || wb_fpchk), .adv(adv_ex), .kill(kill_now),
 	.hold(fp_hold), .res(fp_res), .dkill(fp_dkill), .taken(fp_taken),
 	.xvec(fp_xvec), .xfmt(fp_xfmt), .xnext(fp_xnext), .xaddr(fp_xaddr),
-	.xcommit(fp_xcommit), .st_kill(fp_stkill),
+	.xcommit(fp_xcommit), .st_kill(fp_stkill), .dfp(pcr_dfp),
 	.mv_slots(fp_mvslots), .cr_slots(fp_crslots)
 );
 
@@ -1629,10 +1629,11 @@ always_ff @(posedge clk) begin
 				wb_exc_fslw <= 32'd0;
 			end
 			else if (ex_is_fp && ex_xvec != 8'd0) begin
-				// FPU exceptions bring their frame format, PC and address
+				// FPU exceptions bring their frame format, PC and address;
+				// the FPU-disabled frame ($4) has the instruction's PC at +$C
 				wb_exc      <= ex_xvec;
 				wb_exc_addr <= fp_xaddr;
-				wb_exc_fslw <= 32'd0;
+				wb_exc_fslw <= (fp_xfmt == 4'h4) ? ex_u.pc : 32'd0;
 			end
 			else begin
 				wb_exc      <= ex_xvec;

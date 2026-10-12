@@ -53,8 +53,14 @@ ALMs, validated with Verilator.
 ### Known deviations of the corpus oracle (the core follows the manual)
 
 - Denormal or unnormal FP source operands: WinUAE stacks a format $3
-  post-instruction frame ("simplification" in fpp.cpp); the manual (6.5.2)
-  says format $0, pre-instruction, for register and memory sources.
+  frame ("simplification" in fpp.cpp); the manual (6.5.2, table 6-10)
+  says format $0 for register and memory sources.  Both stack the next
+  PC with the address register updated (the M68060SP emulates the
+  instruction from the FSAVE frame and returns past it).
+- An unimplemented FPU instruction with an extended -(An) operand: the
+  frame's address is An - 4 (the decremented An + 8, as the M68060SP's
+  _dcalc_ea expects and 8.2.4 states for the FPU-disabled frame);
+  WinUAE reports An - 12.
 - Traced multi-instruction rounds: the generator runs the sequence without
   the trace exceptions in between, so effects of those exceptions are not
   in its expectations (BUSCR L/LE copied to SL/SLE, 7.4), nor is TCR's

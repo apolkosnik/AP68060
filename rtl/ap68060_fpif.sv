@@ -84,6 +84,7 @@ module ap68060_fpif
 	input  logic        safe,           // no older uop is in flight
 	input  logic        adv,            // the uop leaves EX this cycle
 	input  logic        kill,
+	input  logic        dfp,            // PCR.DFP: the FPU is disabled
 
 	output logic        hold,
 	output logic [31:0] res,
@@ -118,7 +119,8 @@ localparam logic [3:0] K_NONE = 4'd0,
                        K_UNIMPM = 4'd5,    // unimplemented, the memory operand's address
                        K_EA60 = 4'd6,      // unimplemented effective address, format $0
                        K_PK = 4'd7,        // packed operand in Dn: vector 55, format $2
-                       K_PKM = 4'd8;       // packed operand in memory, its address
+                       K_PKM = 4'd8,       // packed operand in memory, its address
+                       K_DFPM = 4'd9;      // FPU disabled, the memory operand's address
 
 //--------------------------------------------------------------------------
 // helpers
@@ -458,10 +460,26 @@ endfunction
 wire       rs_ok   = (av[15:8] == 8'h00) || (av[15:8] == 8'h60) || (av[15:8] == 8'hE0);
 wire [1:0] rs_now  = (av[15:8] == 8'hE0) ? 2'd2 : (av[15:8] == 8'h60) ? 2'd1 : 2'd0;
 
-// a fault raised by EAL (CHK's, waiting for the operand address): the
-// packed operand's -(An) address is the decremented An + 8 (WinUAE
-// get_fp_value: the 68060 reports An - 4 for a 12-byte operand)
-wire [31:0] dfr_addr = ea + ((ea_pd && (fmt == 3'd3 || fmt == 3'd7)) ? 32'd8 : 32'd0);
+// a fault raised by EAL (CHK's, waiting for the operand address): a
+// 12-byte operand's -(An) address is the decremented An + 8, extended as
+// well as packed (the M68060SP's _dcalc_ea: "for extended precision and
+// packed is 8 bytes too big"; WinUAE get_fp_value does it for packed)
+wire [31:0] dfr_addr = ea + ((ea_pd && (fmt == 3'd2 || fmt == 3'd3 || fmt == 3'd7)) ? 32'd8 : 32'd0);
+
+// FPU disabled (PCR.DFP, MC68060UM 8.2.4): every floating-point instruction
+// takes vector 11 with a format $4 frame -- PC the next instruction, +8 the
+// memory operand's address (0 for a register operand; for -(An) the first
+// operand byte, An - 4 for extended and packed), +$C the instruction (the
+// backend puts its PC there), the address register not modified.  The
+// operand address comes from the routine's EA uop (EAL, or CHK with it);
+// FSAVE, FRESTORE, FScc/FDBcc/FTRAPcc, FBcc and FMOVEM -(An)/(An)+ have none
+// and report 0.
+wire        dfp_gen  = is_gen && (ext[15:13] == 3'b000 || ext[15:13] == 3'b010 || ext[15:13] == 3'b011);
+wire [31:0] dfp_addr = ea_imm ? 32'd0 :
+                       ea + ((ea_pd && dfp_gen && (fmt == 3'd2 || fmt == 3'd3 || fmt == 3'd7)) ? 32'd8 : 32'd0);
+// the routine reaches an EA uop for this instruction's memory operand
+wire        dfp_mem  = is_gen && (eam >= 3'd2) && !ea_imm &&
+                       !(ext[15:14] == 2'b11 && (ea_pd || ea_pi));
 
 //--------------------------------------------------------------------------
 // the uop in EX
@@ -499,16 +517,27 @@ always_comb begin
 				// the FPU sees it now: done at once if it went into the
 				// pipeline (pdone: the registered done of this cycle may be
 				// a released operation's, which fresh masks)
-				if (fuse && go && fresh && !f_pdone) hold = 1'b1;
+				if (dfp) begin
+					// the FPU disabled: the trap here, or at the EA uop
+					if (eal || !dfp_mem) begin
+						xvec = VEC_FLINE; xfmt = 4'd4; xnext = 1'b1;
+						xaddr = eal ? dfp_addr : 32'd0;
+					end
+				end
+				else if (fuse && go && fresh && !f_pdone) hold = 1'b1;
 				else if (fuse && go) begin
 					// dispatched (below): DISP's outcome.  A datatype trap is
-					// taken before the instruction (format $0, this PC); an
-					// arithmetic exception becomes pending
+					// a pre-instruction exception: format $0 with the NEXT PC
+					// (MC68060UM table 6-10; the M68060SP emulates the
+					// instruction and returns past it); an arithmetic
+					// exception becomes pending
 					if (f_unimp) begin
 						xvec = VEC_FLINE; xfmt = 4'd2; xnext = 1'b1;
 						xaddr = 32'd0; xcommit = 1'b1;
 					end
-					else if (f_unsupp) xvec = VEC_UNSUP;
+					else if (f_unsupp) begin
+						xvec = VEC_UNSUP; xnext = 1'b1; xcommit = 1'b1;
+					end
 					else if (!(f_accepted || f_done || f_pdone || f_excreq)) hold = 1'b1;
 				end
 				else if (bg && !f_end) hold = 1'b1;
@@ -554,13 +583,19 @@ always_comb begin
 					xvec = VEC_FLINE; xfmt = 4'd2; xnext = 1'b1;
 					xaddr = eav ? eaa : 32'd0;
 				end
-				// a datatype trap before the instruction: format $0, this
-				// PC, the address register as it was
-				else if (go && f_unsupp) xvec = VEC_UNSUP;
+				// a datatype trap: format $0, the NEXT PC and the address
+				// register updated ((An)+/-(An) done: the M68060SP takes the
+				// operand from the frame and does not touch An, table 6-10)
+				else if (go && f_unsupp) begin
+					xvec = VEC_UNSUP; xnext = 1'b1; xcommit = 1'b1;
+				end
 				else if (!(go && (f_accepted || f_done || f_pdone || f_excreq))) hold = 1'b1;
 			end
 			FC_GET: res = (imm[1:0] == 2'd1) ? get_q[63:32] : get_q[31:0];
-			FC_EAL: if (dfr != K_NONE) begin
+			FC_EAL: if (dfr == K_DFPM) begin
+				xvec = VEC_FLINE; xfmt = 4'd4; xnext = 1'b1; xaddr = dfp_addr;
+			end
+			else if (dfr != K_NONE) begin
 				xvec = (dfr == K_PKM) ? VEC_UNSUP : VEC_FLINE;
 				xfmt = 4'd2; xnext = 1'b1; xaddr = dfr_addr;
 			end
@@ -643,7 +678,7 @@ always_comb begin
 		n_srcr = '0; n_dstr = '0; n_class = '0; n_opm = '0; n_fmt = '0;
 	end
 	else if (act) case (sub)
-		FC_CHK: if (fuse && !go && !(bg && !f_end) && !chk_pend && chk_k == K_NONE) begin
+		FC_CHK: if (fuse && !go && !(bg && !f_end) && !chk_pend && chk_k == K_NONE && !dfp) begin
 			n_srcr  = ext[12:10];
 			n_dstr  = ext[9:7];
 			n_class = ocl;
@@ -703,7 +738,7 @@ always_ff @(posedge clk) begin
 		f_bok  <= f_okvn[n_dstr];
 
 		if (act) case (sub)
-			FC_CHK: if (fuse && !go && !(bg && !f_end) && !chk_pend && chk_k == K_NONE) begin
+			FC_CHK: if (fuse && !go && !(bg && !f_end) && !chk_pend && chk_k == K_NONE && !dfp) begin
 				// FPm to FPn: CHK's latching and DISP's request at once
 				opw_q   <= opw;
 				ext_q   <= ext;
@@ -741,7 +776,17 @@ always_ff @(posedge clk) begin
 				go    <= 1'b0;
 				done_q <= 1'b0;
 				dfr   <= K_NONE;
-				if (!chk_pend) begin
+				if (dfp) begin
+					// FPU disabled: nothing reaches the FPU; the trap is at
+					// the EA uop when the operand address comes later
+					if (!eal && dfp_mem) dfr <= K_DFPM;
+				end
+				else if (!chk_pend) begin
+					// an implemented instruction leaves the NULL state
+					// (MC68060UM 6.7; WinUAE fpuop_arithmetic: fpu_state = 1),
+					// the data movements too (FMOVE of a control register,
+					// FMOVEM); FNOP and the conditionals stay NULL
+					if (is_gen && chk_k == K_NONE) f_rest_idle <= 1'b1;
 					if (chk_ia) begin
 						f_iawe <= 1'b1;
 						f_iapc <= pc;
@@ -764,7 +809,7 @@ always_ff @(posedge clk) begin
 				eaa <= ea;
 				eav <= !ea_imm;
 				if (adv && dfr != K_NONE) begin
-					f_uack <= 1'b1; f_fsclr <= 1'b1;
+					if (dfr != K_DFPM) begin f_uack <= 1'b1; f_fsclr <= 1'b1; end
 					dfr    <= K_NONE;
 				end
 			end
@@ -787,10 +832,14 @@ always_ff @(posedge clk) begin
 						sx_addr <= eav ? eaa : 32'd0; sx_kill <= 1'b1; sx_commit <= 1'b0;
 					end
 					else if (f_unsupp) begin
-						// a denormal or unnormal register: nothing stored, the
-						// address register as it was (WinUAE mmufixup)
+						// a denormal or unnormal register: nothing stored.  The
+						// M68060SP stores the result itself at the frame's EA
+						// (fout): for B/W/L/S/D the address register update
+						// stands; for X the EA of -(An) is An + 8 and An stays
+						// (_calc_ea_fout)
 						sx_v <= 1'b1; sx_vec <= VEC_UNSUP; sx_fmt <= 4'd3;
-						sx_addr <= ea_dn ? 32'd0 : eaa; sx_kill <= 1'b1; sx_commit <= 1'b0;
+						sx_addr <= ea_dn ? 32'd0 : (eaa + ((ea_pd && fmt == 3'd2) ? 32'd8 : 32'd0));
+						sx_kill <= 1'b1; sx_commit <= (fmt != 3'd2);
 						pend <= 1'b1; pend_vec <= VEC_UNSUP;
 					end
 					else if (f_done && f_excreq) begin

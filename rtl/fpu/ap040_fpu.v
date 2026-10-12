@@ -1124,11 +1124,16 @@ end
 
 // Exceptions (68060): the enabled ones, and OVFL and UNFL whether enabled
 // or not (MC68060UM 6.6: nonmaskable, for the M68060SP to correct the
-// default result).  Enabled SNAN, OPERR and DZ leave the destination
-// register unmodified; OVFL, UNFL and INEX write it before the trap.
+// default result).  Enabled SNAN, OPERR and DZ, and OVFL and UNFL, leave a
+// destination register unmodified (6.6.4, 6.6.5: "the register is not
+// affected, and a pre-instruction exception is reported"; the M68060SP
+// reloads the destination and repeats the operation); an enabled INEX
+// writes it before the trap.  (A memory destination, FMOVE OUT, is
+// written in every case: its own path.)
 wire [7:0] x_en   = (fpsr[15:8] & fpcr[15:8]) | {3'd0, fpsr[12], fpsr[11], 3'd0};
 wire       x_any  = |x_en;
-wire       x_kill = |(fpsr[14:13] & fpcr[14:13]) || (fpsr[10] && fpcr[10]);
+wire       x_kill = |(fpsr[14:13] & fpcr[14:13]) || (fpsr[10] && fpcr[10]) ||
+                    fpsr[12] || fpsr[11];
 
 // unimplemented in the FPU (the core traps these before dispatch): IDLE
 task capture_unimp;
@@ -1611,10 +1616,14 @@ always @(posedge clk) begin
 									end
 									else begin
 										unsupp <= 1;
+										// the frame's operand in the 060's
+										// "skewed" form the M68060SP takes
+										// (fix_skewed_ops): exponent $3F80,
+										// the fraction under a clear J bit
 										capture_datatype(
 										    {3'b010, r_fmt, r_dst, r_op},
-										    {r_din[95], r_din[94:80], 16'd0,
-										     r_din[63:0]}, 3'd5,
+										    {r_din[95], 15'h3F80, 16'd0,
+										     1'b0, r_din[86:64], 40'd0}, 3'd5,
 										    sh_dst, sh_dtag,
 										    1'b0, 1'b0);
 										fst <= F_IDLE;
@@ -1680,10 +1689,11 @@ always @(posedge clk) begin
 									end
 									else begin
 										unsupp <= 1;
+										// skewed: exponent $3C00 (as above)
 										capture_datatype(
 										    {3'b010, r_fmt, r_dst, r_op},
-										    {r_din[95], r_din[94:80], 16'd0,
-										     r_din[63:0]}, 3'd5,
+										    {r_din[95], 15'h3C00, 16'd0,
+										     1'b0, r_din[83:32], 11'd0}, 3'd5,
 										    sh_dst, sh_dtag,
 										    1'b0, 1'b0);
 										fst <= F_IDLE;
@@ -2487,7 +2497,7 @@ always @(posedge clk) begin
 					fstate_et <= sh_src;
 				end
 				if (x_kill) begin
-					// enabled SNAN, OPERR, DZ: the destination is kept
+					// enabled SNAN, OPERR, DZ; OVFL, UNFL: the destination is kept
 					fpu_used <= 1;
 					fst <= F_IDLE;
 				end

@@ -20,6 +20,11 @@ LASTPC  equ     $384C           ; the arithmetic handlers' stacked PC
 LASTFW  equ     $3850           ; ... and format/offset word
 HSAVE   equ     $3860           ; the arithmetic handlers' FSAVE frame
 SKIP    equ     $3870           ; F-line/format-error handler: bytes to skip
+LASTEA  equ     $3854           ; the arithmetic handlers' address field (+8)
+DFPCNT  equ     $3880           ; FPU-disabled exceptions (vector 11, format $4)
+DFPPC   equ     $3884           ; ... their stacked PC, address, instruction PC
+DFPEA   equ     $3888
+DFPIP   equ     $388C
 
 check   macro
         cmp.l   #\2,\1
@@ -82,6 +87,29 @@ clr_cnt:
         check   d0,$5aa54321,5
         frestore (a1)+
         check   a1,FRAME+12,6
+
+;------------------------------------------------ the data movements leave NULL too
+        ; any implemented FPU instruction leaves the NULL state (6.7;
+        ; WinUAE fpuop_arithmetic): a control register read, an FMOVEM
+        ; store.  FNOP does not (WinUAE keeps the conditionals NULL).
+        fmove.l fpsr,d0
+        fsave   (COPY).l
+        move.l  (COPY).l,d0
+        check   d0,$00006000,440       ; IDLE
+        clr.l   (COPY).l
+        frestore (COPY).l              ; NULL again
+        fmovem.x fp0,(COPY+$10).l
+        fsave   (COPY).l
+        move.l  (COPY).l,d0
+        check   d0,$00006000,441       ; IDLE
+        clr.l   (COPY).l
+        frestore (COPY).l
+        fnop
+        fsave   (COPY).l
+        move.l  (COPY).l,d0
+        check   d0,0,442               ; still NULL
+        clr.l   (COPY).l
+        frestore (COPY).l
 
 ;------------------------------------------------ IDLE once the FPU is used
         fmove.l #7,fp0
@@ -318,12 +346,124 @@ priv_back:
         move.l  (CNTPRV).l,d0
         check   d0,3,73
 
+;------------------------------------------------ data type frames (MC68060UM 6.5.2)
+        ; a denormal SINGLE / DOUBLE source: vector 55, format $0, the next
+        ; PC; the frame's operand in the 060's "skewed" extended form the
+        ; M68060SP's fix_skewed_ops takes: exponent $3F80 (single) / $3C00
+        ; (double), the fraction under a clear integer bit
+        move.l  #$00000001,($3400).l   ; the smallest single denormal
+        lea     dts_n(pc),a0
+        move.l  a0,(SKIP).l
+dts_op: fadd.s  ($3400).l,fp0
+dts_n:  move.l  (LASTPC).l,d0
+        check   d0,dts_n,400           ; the next PC
+        move.l  (LASTFW).l,d0
+        check   d0,$00dc,401           ; format $0, vector 55
+        frame3  (HSAVE).l,$3f80e007,$00000100,$00000000,402
+        clr.l   ($3410).l              ; the smallest double denormal
+        move.l  #$00000001,($3414).l
+        lea     dtd_n(pc),a0
+        move.l  a0,(SKIP).l
+        fadd.d  ($3410).l,fp0
+dtd_n:  frame3  (HSAVE).l,$3c00e007,$00000000,$00000800,405
+        ; an (An)+ source: the increment applied (the M68060SP emulates the
+        ; instruction from the frame and returns past it, An untouched)
+        lea     ($3400).l,a1
+        lea     dtp_n(pc),a0
+        move.l  a0,(SKIP).l
+        fadd.s  (a1)+,fp0
+dtp_n:  check   a1,$3404,408
+
+        ; FMOVE OUT of a denormal register: vector 55, format $3, the next
+        ; PC, nothing stored; for B/W/L/S/D the (An)+ / -(An) update stands
+        ; and the address field is the operand's; for X, -(An) is not
+        ; applied and the address field is An - 4 (fpsp.S _calc_ea_fout)
+        move.l  #$00000000,($3420).l   ; a true extended denormal
+        move.l  #$00001000,($3424).l
+        move.l  #$00000000,($3428).l
+        fmovem.x ($3420).l,fp1
+        move.l  #$eeeeeeee,($3430).l
+        lea     ($3430).l,a1
+        lea     dfo_n(pc),a0
+        move.l  a0,(SKIP).l
+        fmove.s fp1,(a1)+
+dfo_n:  move.l  (LASTFW).l,d0
+        check   d0,$30dc,409           ; format $3, vector 55
+        move.l  (LASTEA).l,d0
+        check   d0,$3430,410
+        check   a1,$3434,411           ; (An)+ applied
+        move.l  ($3430).l,d0
+        check   d0,$eeeeeeee,412       ; nothing stored
+        lea     ($3440).l,a1
+        lea     dfx_n(pc),a0
+        move.l  a0,(SKIP).l
+        fmove.x fp1,-(a1)
+dfx_n:  move.l  (LASTEA).l,d0
+        check   d0,$343c,413           ; $3440 - 12 + 8
+        check   a1,$3440,414           ; -(An) not applied
+        move.l  (LASTPC).l,d0
+        check   d0,dfx_n,415
+
+;------------------------------------------------ the FPU disabled (PCR.DFP)
+        ; every FPU instruction: vector 11, format $4, the stacked PC the
+        ; next instruction, +8 the memory operand's address (0 for a
+        ; register; -(An) the first operand byte, An - 4 for extended), +$C
+        ; the instruction; the address register not modified (8.2.4)
+        dc.w    $4e7a,$0808            ; movec pcr,d0
+        move.l  d0,d7
+        bset    #1,d0                  ; DFP
+        dc.w    $4e7b,$0808            ; movec d0,pcr
+        clr.l   (DFPCNT).l
+dfp1:   fadd.x  fp1,fp0                ; a register operand
+dfp1n:  move.l  (DFPPC).l,d0
+        check   d0,dfp1n,420
+        move.l  (DFPEA).l,d0
+        check   d0,0,421
+        move.l  (DFPIP).l,d0
+        check   d0,dfp1,422
+        lea     ($3500).l,a1
+dfp2:   fmove.x (a1)+,fp0
+dfp2n:  move.l  (DFPEA).l,d0
+        check   d0,$3500,423
+        check   a1,$3500,424           ; (An)+ not applied
+        move.l  (DFPPC).l,d0
+        check   d0,dfp2n,425
+        lea     ($350c).l,a1
+        fmove.x -(a1),fp0
+        move.l  (DFPEA).l,d0
+        check   d0,$3508,426           ; An - 4 for extended
+        check   a1,$350c,427
+        lea     ($3510).l,a1
+        fmove.s -(a1),fp0
+        move.l  (DFPEA).l,d0
+        check   d0,$350c,428           ; the first operand byte
+        fmove.l fp0,($3520).l          ; an FPU-to-memory move
+        move.l  (DFPEA).l,d0
+        check   d0,$3520,429
+dfp5:   fnop
+        move.l  (DFPIP).l,d0
+        check   d0,dfp5,430
+        move.l  (DFPCNT).l,d0
+        check   d0,6,431
+        dc.w    $4e7b,$7808            ; movec d7,pcr: the FPU back on
+        fnop
+        move.l  (DFPCNT).l,d0
+        check   d0,6,432
+
         check   sp,$e000,99
         move.w  #$600d,($f102).l
         bra.s   *
 
 ;------------------------------------------------ handlers
 fline_handler:
+        cmpi.w  #$402c,6(sp)           ; the FPU disabled: record, go on
+        bne.s   fl_not_dfp
+        addq.l  #1,(DFPCNT).l
+        move.l  2(sp),(DFPPC).l
+        move.l  8(sp),(DFPEA).l
+        move.l  12(sp),(DFPIP).l
+        rte                            ; the stacked PC is the next one
+fl_not_dfp:
         addq.l  #1,(CNTFL).l
         cmpi.w  #$202c,6(sp)           ; an unimplemented instruction
         beq.s   fl_unimp
@@ -380,6 +520,7 @@ arith_common:
         and.l   #$ffff,d1
         move.l  d1,(LASTFW).l
         move.l  2(sp),(LASTPC).l
+        move.l  8(sp),(LASTEA).l       ; (format $3: the address field)
         and.w   #$0fff,d1
         lsr.w   #2,d1
         cmp.w   d0,d1

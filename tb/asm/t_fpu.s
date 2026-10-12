@@ -642,8 +642,9 @@ unimp_return:
 	fmove.l	#0,fpsr
 
 ; A denormal extended source is an unsupported data type: vector 55 as a
-; PRE-instruction exception (MC68060UM 6.5.2: format $0, the stacked PC
-; the instruction itself, the address register as it was); the FPU is in
+; pre-instruction exception (MC68060UM 6.5.2 and table 6-10: format $0, the
+; stacked PC the NEXT instruction, the address register updated -- the
+; M68060SP emulates the instruction from the frame); the FPU is in
 ; the EXCP state, vector code 7, the operand in the frame.
 	fmove.l	#99,fp0
 	clr.l	($32D0).l
@@ -667,7 +668,7 @@ denx_cont:
 	chkl	d0,denx_op,188		; FPIAR addresses the faulting op
 	chkcnt	cnt_fpunsup,1,66
 	move.l	(unsup_pc).l,d0
-	chkl	d0,denx_op,76	; pre-instruction: the instruction's own PC
+	chkl	d0,denx_cont,76	; pre-instruction, format $0: the NEXT PC (table 6-10)
 	fmove.l	fp0,d0
 	chkl	d0,99,67
 
@@ -749,7 +750,7 @@ den_src_op:
 den_src_cont:
 	chkcnt	cnt_fpunsup,1,80
 	move.l	(unsup_pc).l,d0
-	chkl	d0,den_src_op,81	; pre-instruction: its own PC
+	chkl	d0,den_src_cont,81	; format $0, the next PC (table 6-10)
 	move.l	#$EEEEEEEE,($3320).l
 	fmove.p	fp0,($3320).l		; packed decimal store: data type
 	chkcnt	cnt_fpunsup,2,83
@@ -758,7 +759,9 @@ den_src_cont:
 	move.l	($3320).l,d0
 	chkl	d0,$EEEEEEEE,699	; nothing stored
 
-; a pre-instruction datatype fault leaves an (An)+ source register alone
+; a datatype fault applies an (An)+ source's increment: the M68060SP takes
+; the operand from the FSAVE frame, emulates, and returns past the
+; instruction without touching An (fpsp.S fu_in_exit)
 	lea	($3300).l,a3		; the denormal extended operand above
 	move.l	a3,d2
 	lea	pinc_cont(pc),a0
@@ -768,7 +771,7 @@ pinc_op:
 pinc_cont:
 	move.l	a3,d0
 	sub.l	d2,d0
-	chkl	d0,0,323		; (An)+ not applied
+	chkl	d0,12,323		; (An)+ applied
 	subq.w	#1,(cnt_fpunsup).l	; keep the absolute counts below intact
 
 	move.l	#$40000000,($3310).l	; unnormal: exponent set, msb of
@@ -890,15 +893,15 @@ unnorm_cont:
 	fmove.x	($33A0).l,fp1
 	clr.w	(cnt_fpunfl).l
 	fmul.x	fp1,fp0			; 2^-16393: subnormal
-	fmovem.x	fp0,($33B0).l	; UNFL (nonmaskable) is taken here, the
-	chkcnt	cnt_fpunfl,1,700	; register written first
-	moveq	#0,d0
-	move.w	(exc_fw).l,d0
+	fmovem.x	fp0,($33B0).l	; UNFL (nonmaskable) is taken here; the
+	chkcnt	cnt_fpunfl,1,700	; register is NOT written (MC68060UM
+	moveq	#0,d0			; 6.6.5: "the register is not affected",
+	move.w	(exc_fw).l,d0		; the M68060SP repeats the operation)
 	chkl	d0,$00CC,701		; pre-instruction, vector 51
 	move.l	($33B0).l,d0
-	chkl	d0,0,93			; sign 0, exponent field 0
+	chkl	d0,$00030000,93		; FP0 still 2^-16380
 	move.l	($33B4).l,d0
-	chkl	d0,$00200000,94		; significand shifted right by 10 (-er)
+	chkl	d0,$80000000,94
 	move.l	($33B8).l,d0
 	chkl	d0,0,95
 	fmove.l	fpsr,d0
@@ -929,7 +932,12 @@ unnorm_cont:
 	chkl	d0,0,208		; working exponent 0 is not tiny: no UNFL
 
 ; a TRUE subnormal operand (integer bit clear) is still an unsupported
-; data type: vector 55, as on 040
+; data type: vector 55, as on 040.  (FP0 gets one by FMOVEM, the raw
+; image: the underflow above left FP0 unchanged.)
+	move.l	#$00000000,($33E0).l
+	move.l	#$00200000,($33E4).l
+	move.l	#$00000000,($33E8).l
+	fmovem.x	($33E0).l,fp0
 	move.l	#0,(cnt_fpunsup).l
 	fmove.x	fp0,($33D0).l
 	chkcnt	cnt_fpunsup,1,99
@@ -964,7 +972,7 @@ den_s_cont:
 	move.w	(unsup_fmt).l,d0
 	chkl	d0,$00DC,137
 	move.l	(unsup_pc).l,d0
-	chkl	d0,den_s_op,703
+	chkl	d0,den_s_cont,703
 
 	move.l	#$00001200,($3410).l	; denormalized double
 	move.l	#$D400003F,($3414).l
@@ -1105,11 +1113,11 @@ den_xadd_cont:
 	fmove.l	fpsr,d0
 	and.l	#$00001040,d0
 	chkl	d0,$1040,120		; OVFL and its accrued bit
-	fmovem.x	fp0,($3460).l
+	fmovem.x	fp0,($3460).l	; the register not affected (6.6.4)
 	move.l	($3460).l,d0
-	chkl	d0,$407E0000,121	; largest single, not 2^200
+	chkl	d0,$40630000,121	; FP0 still 2^100
 	move.l	($3464).l,d0
-	chkl	d0,$FFFFFF00,122	; mantissa saturated at the single boundary
+	chkl	d0,$80000000,122
 
 ; and a result below the single-precision minimum underflows to that
 ; precision's minimum exponent, not to the extended denormal encoding
@@ -1131,11 +1139,11 @@ den_xadd_cont:
 	fmove.l	fpsr,d0
 	and.l	#$00000800,d0
 	chkl	d0,$800,123		; UNFL, though extended holds the value
-	fmovem.x	fp2,($3490).l
+	fmovem.x	fp2,($3490).l	; the register not affected (6.6.5)
 	move.l	($3490).l,d0
-	chkl	d0,$3F810000,124	; single's minimum exponent is kept
+	chkl	d0,$3F800000,124	; FP2 still 2^-127
 	move.l	($3494).l,d0
-	chkl	d0,$40000000,125	; significand denormalized by one bit
+	chkl	d0,$80000000,125
 
 ; The move class is range-controlled like everything else: softfloat's
 ; floatx80_move/abs/neg round through roundAndPackFloatx80, whose expOffset
@@ -1150,6 +1158,7 @@ den_xadd_cont:
 	move.l	#$40C70000,($34A0).l	; 2^200
 	move.l	#$80000000,($34A4).l
 	move.l	#$00000000,($34A8).l
+	fmove.l	#3,fp4			; FP4 = 3.0 before
 	fmove.l	#0,fpsr
 	fmove.l	#$50,fpcr		; single precision, round toward zero
 	fmove.x	($34A0).l,fp4
@@ -1161,11 +1170,11 @@ den_xadd_cont:
 	fmove.l	fpsr,d0
 	and.l	#$00000200,d0
 	chkl	d0,0,127		; no INEX2: no mantissa bits discarded
-	fmovem.x	fp4,($34B0).l
+	fmovem.x	fp4,($34B0).l	; the register not affected (6.6.4)
 	move.l	($34B0).l,d0
-	chkl	d0,$407E0000,128	; single's largest normal, extended form
+	chkl	d0,$40000000,128	; FP4 still 3.0
 	move.l	($34B4).l,d0
-	chkl	d0,$FFFFFF00,129
+	chkl	d0,$C0000000,129
 
 ; Register-to-register follows the same rule.  The reserved precision field
 ; behaves as double, so this case discards eleven bits and reports INEX2.
@@ -1255,10 +1264,11 @@ h_fpline:
 	addq.w	#1,(cnt_fpline).l
 	rte
 
-; vector 55: format $0 before an instruction (the stacked PC is the
-; instruction: the test names where to resume), $3 after a store and $2
-; for packed decimal (the stacked PC is the next instruction, the address
-; field the operand's)
+; vector 55: format $0 before an instruction (a datatype fault: the stacked
+; PC the next instruction; a pending UNSUP from an FRESTOREd EXCP frame:
+; the FP instruction about to run -- the test names where to resume), $3
+; after a store and $2 for packed decimal (the stacked PC is the next
+; instruction, the address field the operand's)
 h_fpunsup:
 	move.w	6(sp),d6
 	move.w	d6,(unsup_fmt).l
@@ -4456,7 +4466,7 @@ fregea_cont:
 	move.w	(unsup_fmt).l,d0
 	chkl	d0,$00DC,235		; format $0
 	move.l	(unsup_pc).l,d0
-	chkl	d0,fregea_op,236	; pre-instruction: its own PC
+	chkl	d0,fregea_cont,236	; format $0, the next PC
 	fmove.l	fp5,d0
 	chkl	d0,1,237		; nothing computed
 
@@ -4635,16 +4645,20 @@ fpubench_loop:
 	fmove.l	fpsr,d0
 	chkl	d0,0,261		; every step exact: no status at all
 
-; the same kernel saturates: from 2^16382 the fmul.x by 4 overflows to
-; +inf under round-to-nearest and every following op passes it through
-	move.l	#$7FFE0000,($3700).l	; 2^16382
+; the same kernel overflowing: from 2^16383 the fmul.x by 4 overflows.  On
+; the 68060 OVFL traps and the destination register is not affected (6.6.4:
+; the M68060SP would repeat the operation; this handler only counts), so
+; FP0 stays 2^16383 and the chain continues from it: -3 (absorbed), /4,
+; x3 = 1.5 x 2^16382, +4 and -3 (absorbed), then x4 overflows again and
+; leaves it: two OVFL traps, FP0 = 1.5 x 2^16382
+	move.l	#$7FFE0000,($3700).l	; 2^16383
 	move.l	#$80000000,($3704).l
 	move.l	#$00000000,($3708).l
 	fmovem.x	($3700).l,fp0
 	fmove.l	#0,fpsr
 	clr.w	(cnt_fpovfl).l
 	fadd.x	fp1,fp0			; +3: absorbed, INEX2
-	fmul.x	fp2,fp0			; x4: OVFL -> +inf, trapped at the next
+	fmul.x	fp2,fp0			; x4: OVFL, FP0 kept, trapped at the next
 	fsub.x	fp1,fp0
 	fdiv.x	fp2,fp0
 	fmul.x	fp1,fp0
@@ -4653,13 +4667,14 @@ fpubench_loop:
 	fmul.x	fp2,fp0
 	fmovem.x	fp0,($3710).l
 	move.l	($3710).l,d0
-	chkl	d0,$7FFF0000,262	; +infinity
+	chkl	d0,$7FFD0000,262	; 1.5 x 2^16382
 	move.l	($3714).l,d0
-	chkl	d0,0,263		; created infinity: zero mantissa
+	chkl	d0,$C0000000,263
 	fmove.l	fpsr,d0
-	chkl	d0,$02000048,264	; I code; accrued OVFL+INEX only
-	chkcnt	cnt_fpovfl,1,709	; the one OVFL trap, the handler's FSAVE
-					; ending the EXCP state
+	chkl	d0,$00001048,264	; EXC OVFL (the last x4), accrued OVFL+INEX,
+					; no condition code: FP0 not written
+	chkcnt	cnt_fpovfl,2,709	; the two OVFL traps, the handler's FSAVE
+					; ending the EXCP state each time
 
 ;=========== pointer-rewrite ([0]) sequences -- cputest per-test behavior
 ; cputest rewrites the indirect pointer at absolute 0 immediately before
@@ -5276,7 +5291,11 @@ fsin_nx:
 	failt	266
 fsin_pi:
 	lea	($336C).l,a0
-	move.l	#$3360,(exp_ea).l
+	; -(An) with an extended operand: the address field is the decremented
+	; An + 8 (An - 4), as the M68060SP's _dcalc_ea expects ("8 bytes too
+	; big"; MC68060UM 8.2.4 says the same of the FPU-disabled frame).
+	; WinUAE reports An - 12 here.
+	move.l	#$3368,(exp_ea).l
 	move.w	#1,(exp_ea_v).l
 	dc.w	$F220,$480E	; fsin.x -(a0),fp0
 	cmp.l	#$336C,a0
