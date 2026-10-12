@@ -92,6 +92,8 @@ module ap68060_dmu
 	output logic        st_fault,
 	output logic [31:0] st_fslw,
 	output logic        lkend,          // a LOCKE write completed
+	output logic        iack_end,       // an interrupt acknowledge cycle ended (its
+	                                    // terminal response, after any retries)
 	output logic [31:0] st_faddr,
 
 	// WB maintenance: CINV/CPUSH/PFLUSH/PLPA
@@ -1089,6 +1091,7 @@ always_ff @(posedge clk) begin
 	if (adv_wb || !wb_st) st_rdy_r <= 1'b0;
 	mt_done   <= 1'b0;
 	lkend     <= 1'b0;
+	iack_end  <= 1'b0;
 	iw_done   <= 1'b0;
 	atc_wr    <= 1'b0;
 	atc_fall  <= 1'b0;
@@ -1129,6 +1132,7 @@ always_ff @(posedge clk) begin
 		st_fault_r <= 1'b0; st_fslw <= '0; st_faddr <= '0;
 		mt_pa <= '0; mt_fault <= 1'b0; mt_fslw <= '0;
 		lkend <= 1'b0;
+		iack_end <= 1'b0;
 		atc_wla <= '0; atc_wfc2 <= 1'b0; atc_went <= '0; atc_fng <= 1'b0;
 		iatc_flush_ng <= 1'b0; iatc_flush_la <= '0; iatc_flush_fc2 <= 1'b0;
 		iatc_wla <= '0; iatc_wfc2 <= 1'b0; iatc_went <= '0;
@@ -2096,6 +2100,7 @@ always_ff @(posedge clk) begin
 			// the last write of a locked sequence (LOCKE) is out
 			if ((b_err || b_done) && bo.locke && !bo.rd && (bo.line || bo_left == bo_pn))
 				lkend <= 1'b1;
+			if ((b_err || b_done) && bo.ack == 2'd1) iack_end <= 1'b1;
 			if (b_err) begin
 				// a push that ends in TEA: aborted at once, recorded for the
 				// access error (FSLW.PBE, 8.4.6); the line is gone

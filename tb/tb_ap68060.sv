@@ -372,6 +372,17 @@ always_ff @(posedge clk)
 		end
 	end
 
+// IPEND stays asserted from the interrupt's acceptance until after its
+// acknowledge cycle (7.8.1): asserted at the TS and at the terminal
+// response of every interrupt acknowledge (TT 3, TM the level)
+always_ff @(posedge clk)
+	if (rsti_n && ipend_n &&
+	    ((bclk_en && a_oe && !ts_n && tt == 2'd3 && tm != 3'd0) ||
+	     (ev && !am_drive && ev_tt == 2'd3 && ev_tm != 3'd0))) begin
+		errors <= errors + 1;
+		$display("FAIL: IPEND negated during the interrupt acknowledge cycle (cycle %0d)", cycles);
+	end
+
 // RSTO only once every bus cycle is done (2.8.4): none ends while it is
 // asserted, and TIP is not asserted with it
 always_ff @(posedge clk)

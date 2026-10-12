@@ -101,6 +101,7 @@ module ap68060_backend
 	input  logic        mt_fault,       // ... or its access error
 	input  logic [31:0] mt_fslw,
 	input  logic        dm_lkend,       // a LOCKE write completed (BUSCR sequences)
+	input  logic        dm_iack_end,    // the interrupt acknowledge cycle ended
 	input  logic        sb_empty,       // the DMU's store buffer is empty
 	input  logic        sb_err,         // ... and one of its writes, or a push, ended in TEA
 	input  logic [31:0] sb_fslw,        // ... FSLW.SBE / FSLW.PBE
@@ -2066,7 +2067,16 @@ end
 always_ff @(posedge clk)
 	if (!nreset) xr_dbl <= 1'b1;             // (reset's routine)
 	else if (x_go) xr_dbl <= (x_vec == 8'd2 || x_vec == 8'd3);
-assign irq_pending = irq_pend;
+// IPEND: a request beats the mask, and an accepted interrupt keeps it
+// asserted until the terminal response of its acknowledge cycle (7.8.1),
+// retries included.  (iack_hold is status only: whether to take another
+// interrupt is decided by irq_pend alone.)
+logic iack_hold;
+always_ff @(posedge clk)
+	if (!nreset || halted) iack_hold <= 1'b0;
+	else if (x_go) iack_hold <= take_irq && !(adv_wb && wb_is_exc);
+	else if (dm_iack_end) iack_hold <= 1'b0;
+assign irq_pending = irq_pend || iack_hold;
 // (and from the moment STOP, LPSTOP or RESET is at WB: no fetch cycle may
 // follow the LPSTOP broadcast or run with RSTO asserted; the broadcast is
 // issued from AG, so its access holds the fetch from there until LPSTOP

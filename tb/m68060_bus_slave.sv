@@ -376,7 +376,9 @@ always_ff @(posedge clk) begin
 				perr <= 1'b1;
 			end
 			// a burst-inhibited line's follow-up transfers may not be retried
-			retry = (beat == 2'd0) && (inh_left == 2'd0) && (tt_q != 2'd3) &&
+			// (an interrupt acknowledge may be retried too; the LPSTOP and
+			// breakpoint acknowledges, TM 0, are not)
+			retry = (beat == 2'd0) && (inh_left == 2'd0) && !(tt_q == 2'd3 && tm_q == 3'd0) &&
 			        (retry_req || ((retry_pct > 0) && (($urandom % 100) < retry_pct)));
 			be = lanes(siz_q, base[1:0]);
 			ack <= 1'b1;
