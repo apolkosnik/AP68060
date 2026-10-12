@@ -318,6 +318,7 @@ logic [127:0]  cd [4];
 logic [23:0]   ct [4];
 
 logic [127:0] m_line;            // the line being filled (and the line buffer)
+logic  [3:0] m_got;              // ... the long words of it that arrived
 genvar gw;
 generate
 	for (gw = 0; gw < 4; gw++) begin : g_way
@@ -716,6 +717,7 @@ always_ff @(posedge clk) begin
 				logic [3:0] vv;
 				vv = ivf_q;
 				st      <= S_FILL;
+				m_got   <= 4'd0;
 				lb_v    <= 1'b0;          // its beats go into m_line
 				m_alloc <= !cacr[14];     // NAI: no allocation
 				m_way   <= !vv[0] ? 2'd0 : !vv[1] ? 2'd1 :
@@ -754,6 +756,7 @@ always_ff @(posedge clk) begin
 			if (b_rvalid) begin
 				ln[127 - 32 * b_rbeat -: 32] = b_rdata;
 				m_line <= ln;
+				m_got[b_rbeat] <= 1'b1;
 				if (b_rtci) m_alloc <= 1'b0;
 			end
 			if (busy && b_done) begin
@@ -774,13 +777,38 @@ always_ff @(posedge clk) begin
 			if (busy && b_err) begin
 				busy  <= 1'b0;
 				stale <= 1'b0;
-				if (!stale) begin
+				if (stale) st <= S_RUN;
+				else if (m_got[m_pa[3:2]]) begin
+					// a later beat failed, the long word being fetched had
+					// arrived (the burst starts with it): it is used, the line
+					// is not allocated, and no exception (MC68060UM 7.9.1,
+					// 5.7.1).  The next long word is fetched anew.
+					logic [31:0] lw, nla;
+					lw  = ln[127 - 32 * m_pa[3:2] -: 32];
+					nla = {m_la[31:2], 2'b00} + 32'd4;
+					if (m_la[1]) begin
+						f2_n    <= 2'd1;
+						f2_w[0] <= lw[15:0];
+					end
+					else begin
+						f2_n    <= 2'd2;
+						f2_w[0] <= lw[31:16];
+						f2_w[1] <= lw[15:0];
+					end
+					f2_f  <= 1'b0; f2_d <= 1'b0; f2_a <= 1'b0;
+					m_la  <= nla;
+					m_pa  <= {m_pa[31:2], 2'b00} + 32'd4;
+					m_dem <= 1'b0;
+					fpc   <= nla;
+					fnew  <= 1'b0;
+					st    <= S_RUN;
+				end
+				else begin
 					f2_n <= m_la[1] ? 2'd1 : 2'd2;
 					for (int i = 0; i < 2; i++) f2_w[i] <= 16'd0;
 					f2_f <= 1'b1; f2_d <= m_dem; f2_a <= 1'b0;
 					st   <= S_HALT;
 				end
-				else st <= S_RUN;
 			end
 		end
 		S_CI: begin

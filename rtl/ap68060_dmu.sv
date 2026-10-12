@@ -355,6 +355,7 @@ wire         sn_rset = (sn_ph == SN_A) || (sn_ph == SN_B);   // B: the line stay
 logic  [1:0] sn_src;               // found in: 0 a cache way, 1 push buffer, 2 queued push
 logic  [1:0] sn_way;
 logic        bo_cancel;            // the queued push was invalidated by a snoop
+logic  [3:0] bo_got;               // a line read: the long words that arrived
 logic        bo_later;             // a piece of this transfer has completed: a
                                   // bus error now is on a later access (FSLW.MA)
 
@@ -561,7 +562,9 @@ wire        m1_wtd   = (x_dc1.cm == 2'b00) && ldd_q[x_dc1.way];
 wire        m1_sfast = ((m1.mem == M_LD) || (m1.mem == M_ST && x_dc1.cm == 2'b01)) &&
                        m1_split && x_dc1.ok && !x_dc1.flt && x_dc1.hit && !m1_wtd &&
                        !x_dc1.cm[1] && dc_en && (m1.ack == 2'd0) && !m1.lock;
-wire        m1_fast  = ((m1.mem == M_LD) || (m1.mem == M_RMW && !m1.lock)) &&
+// (locked accesses -- TAS, CAS, BUSCR.L sequences -- bypass the data cache:
+// MC68060UM 5.2; the slow path pushes and invalidates a hit first)
+wire        m1_fast  = (m1.mem == M_LD || m1.mem == M_RMW) && !m1.lock &&
                        x_dc1.ok && !x_dc1.flt && x_dc1.hit && !m1_wtd &&
                        !x_dc1.cm[1] && dc_en && (m1.ack == 2'd0) &&
                        (m1.msz != SZ_Q) && !m1_split;
@@ -919,6 +922,14 @@ always_ff @(posedge clk) begin
 		if (sb_err_ack) sbe_r <= 1'b0;
 	end
 end
+
+// a failed line fill: the long words of the line the access needs (this
+// part's bytes e_va[3:0] .. +e_n-1) all arrived -- a load can complete
+// from them; a store needs none from memory, only that the fill started
+wire  [3:0] fill_last  = {1'b0, e_va[3:0]} + {1'b0, e_n} - 4'd1;
+wire  [3:0] fill_need  = ((4'b1111 << e_va[3:2]) & (4'b1111 >> (2'd3 - fill_last[3:2])));
+wire        fill_late_ok = (m2.r.mem == M_ST) ? (bo_got != 4'd0)
+                                              : ((fill_need & ~bo_got) == 4'd0);
 
 //--------------------------------------------------------------------------
 // BIU request from the engine's bus step
@@ -1482,7 +1493,17 @@ always_ff @(posedge clk) begin
 			logic [15:0] be; logic upd;
 			be  = bmask(e_va[3:0], e_n);
 			upd = e_x.hit && dc_en && !e_x.cm[1] && !m4.r.lock && (m4.r.msz != SZ_Q);
-			if (upd && e_x.cm == 2'b00 && ld_q[e_x.way]) begin
+			if (e_x.hit && m4.r.lock) begin
+				// a locked write bypasses the cache (5.2): a line it hits is
+				// pushed if dirty and invalidated before the bus write
+				f_set   <= e_va[10:4];
+				f_way   <= e_x.way;
+				pv_keep <= 1'b0;
+				e_x.hit <= 1'b0;
+				e_sret  <= E_W_PART;
+				e_st    <= E_PUSHV;
+			end
+			else if (upd && e_x.cm == 2'b00 && ld_q[e_x.way]) begin
 				// a write-through write hit on a dirty line: the line is
 				// pushed first, staying valid (MC68060UM 5.5.4)
 				f_set   <= e_va[10:4];
@@ -1714,7 +1735,8 @@ always_ff @(posedge clk) begin
 			s = ms_i[8:2]; w = ms_i[1:0];
 			m = sc_lv[w] && ((mt_scope == 2'd3) ||
 			                 (mt_scope == 2'd1 && tq_b[w] == mt_addr[31:11]) ||
-			                 (mt_scope == 2'd2 && tq_b[w][20:1] == mt_addr[31:12]));
+			                 (mt_scope == 2'd2 && (tc_p ? tq_b[w][20:2] == mt_addr[31:13]
+			                                            : tq_b[w][20:1] == mt_addr[31:12])));
 			if (m && mt_op == MT_CPUSH && sc_ld[w]) begin
 				// push (invalidated with the push, unless CACR.DPI)
 				f_set   <= s;
@@ -1816,7 +1838,16 @@ always_ff @(posedge clk) begin
 				vp_lwe = 1'b1; vp_lv = 1'b1; vp_dwe = 1'b1; vp_dv = pv_dirty;
 				pv_v <= 1'b0;
 			end
-			if (bo_err) begin
+			if (bo_err && fill_late_ok) begin
+				// a later beat of the line failed, but what the access needs
+				// arrived (MC68060UM 7.9.1, 5.7.1): no exception, the line not
+				// allocated; a load takes its operand from what was read, a
+				// store goes to memory (as for TCI)
+				e_fromline <= (m2.r.mem != M_ST);
+				e_x.cm     <= 2'b11;
+				e_st       <= (m2.r.mem != M_ST) ? E_S_ACT : E_S_NEXT;
+			end
+			else if (bo_err) begin
 				// the operand's long word did not arrive: an access fault
 				e_flt   <= 1'b1;
 				e_faddr <= m2.r.a;
@@ -1879,6 +1910,7 @@ always_ff @(posedge clk) begin
 		E_BUS: begin
 			bo_err <= 1'b0;
 			bo_later <= 1'b0;
+			bo_got <= 4'd0;
 			bo_tci <= 1'b0;
 			bo_avec <= 1'b0;
 			bo_rd  <= '0;
@@ -1906,6 +1938,7 @@ always_ff @(posedge clk) begin
 			if (b_rvalid) begin
 				if (bo.line) begin
 					bo_line[127 - 32*b_rbeat -: 32] <= b_rdata;
+					bo_got[b_rbeat] <= 1'b1;
 					if (b_rbeat == bo_pa[3:2]) bo_tci <= b_rtci;
 				end
 				else begin
