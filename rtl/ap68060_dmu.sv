@@ -674,7 +674,8 @@ wire  [4:0] m1_end   = {1'b0, m1.a[3:0]} + {2'b00, nbytes(m1.msz)};
 wire        m1_split = (m1.msz != SZ_Q) && (m1_end > 5'd16);
 wire  [3:0] ldd_q    = {ldd3[m1.a[10:4]], ldd2[m1.a[10:4]], ldd1[m1.a[10:4]], ldd0[m1.a[10:4]]};
 // a write-through access to a dirty line goes to the engine (it is pushed)
-wire        m1_wtd   = (x_dc1.cm == 2'b00) && ldd_q[x_dc1.way];
+// (the dirty bits picked by the one-hot match, not the encoded way)
+wire        m1_wtd   = (x_dc1.cm == 2'b00) && |(ldd_q & d1_mj);
 wire        m1_sfast = ((m1.mem == M_LD) || (m1.mem == M_ST && x_dc1.cm == 2'b01)) &&
                        m1_split && x_dc1.ok && !x_dc1.flt && x_dc1.hit && !m1_wtd &&
                        !x_dc1.cm[1] && dc_en && (m1.ack == 2'd0) && !m1.lock;
@@ -2469,12 +2470,14 @@ always_ff @(posedge clk) begin
 		// the stage before (DC1's lookup read the valid bits before this
 		// write lands), both parts of a split, and the engine's own
 		//--------------------------------------------------------------
+		// (the record DC1 loads now loses its hit on any invalidation in its
+		// set, whatever the way: its way and translation come late, and its
+		// set is the untranslated page offset; a lost hit sends the access
+		// to the engine, which looks the line up again)
+		if (vp_lwe && !vp_lv && (|vp_wm) && adv_dc1 && m1.a[10:4] == vp_set) m2.x.hit <= 1'b0;
 		if (vp_lwe && !vp_lv) begin
 			for (int j = 0; j < 4; j++) if (vp_wm[j]) begin
-				if (adv_dc1) begin
-					if (x_dc1.hit && x_dc1.pa[10:4] == vp_set && x_dc1.way == 2'(j)) m2.x.hit <= 1'b0;
-				end
-				else begin
+				if (!adv_dc1) begin
 					if (m2.x.hit && m2.x.pa[10:4] == vp_set && m2.x.way == 2'(j)) m2.x.hit <= 1'b0;
 					if (m2.x1.hit && m2.x1.pa[10:4] == vp_set && m2.x1.way == 2'(j)) m2.x1.hit <= 1'b0;
 				end
