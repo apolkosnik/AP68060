@@ -1251,6 +1251,9 @@ logic        wb_stv;          // WB: a store, and no exception
 logic        xstk;            // an exception routine runs (entry to its last uop)
 logic        xr_dbl;          // ... and it is an access error's, an address
                               // error's or reset's (a fault in it: halt)
+logic        x_first;         // the routine is done, its handler's first
+                              // instruction has not completed yet
+wire         xwin = xstk || x_first;   // interrupts are not sampled (8.3)
 logic        wb_cof;          // the uop's control transfer was taken
 
 wire wb_is_exc   = wb_v && !wb_ok;
@@ -1277,6 +1280,9 @@ wire wb_refetch;
 wire take_sbe    = sb_err && sb_empty &&
                    ((adv_wb && wb_is_exc && !wb_refetch) || wb_bound || (stopped && !wb_v));
 wire take_irq    = irq_pend && !trace_due && !take_sbe && ((wb_bound && !xstk) || (stopped && !wb_v));
+// (at the first handler instruction's boundary irq_pend compares with the
+// mask that instruction leaves: it can raise it to keep the interrupt
+// out, 8.1, 8.2.9; no IPEND claim is formed inside xwin)
 wire take_trace  = trace_due && !take_sbe;
 assign sb_err_ack = take_sbe;
 // a speculative fetch fault (code 1) is no exception: WB refetches the
@@ -1290,10 +1296,17 @@ logic        rt_armed;
 logic [31:0] rt_pc;
 // a double bus fault (MC68060UM 7.9.3, 8.2.1): an access or
 // address error while the routine of an access error, an address error or
-// reset runs (stacking, the vector fetch, an odd handler address): the
+// reset runs (stacking, the vector fetch, an odd handler address), or
+// while the first instruction of its handler is fetched (figures 8-1,
+// 8-5: the fetch of the first instruction is part of the exception's
+// processing; a fault of that instruction's operands is a new access
+// error), or a bus error on a buffered write of its stack frame: the
 // processor halts (PST $1C) instead of taking it
-wire dbl_fault   = xstk && xr_dbl && adv_wb && wb_is_exc && !wb_refetch &&
-                   (wb_exc == 8'd2 || wb_exc == 8'd3);
+wire dbl_fault   = xr_dbl && !halted &&
+                   ((adv_wb && wb_is_exc && !wb_refetch &&
+                     ((xstk && (wb_exc == 8'd2 || wb_exc == 8'd3)) ||
+                      (x_first && wb_exc == 8'd2 && (wb_exc_fslw & FSLW_IO) != 32'd0))) ||
+                    (take_sbe && xstk && (sb_fslw & FSLW_SBE) != 32'd0));
 wire x_go        = ((adv_wb && wb_is_exc && !wb_refetch) || take_trace || take_irq || take_sbe) &&
                    !dbl_fault && !halted;
 // a locked sequence ends with its LOCKE write; before that only an
@@ -1344,7 +1357,11 @@ logic mt_seen;                // the DMU finished this WB uop's maintenance
 // synchronizing instruction (MC68060UM 5.10, 8.4.6): WB waits with an
 // exception, a serializing uop, or an instruction's last uop when a trace
 // or an interrupt is due at its boundary
-wire sb_wait = !sb_empty && (wb_is_exc || wb_u.ser || (wb_u.last && (irq_pend || tr_now)));
+// (the last uop of an access error's, address error's or reset's routine
+// waits for its frame's buffered writes: a bus error on one is a double
+// bus fault, decided while the routine still runs)
+wire sb_wait = !sb_empty && (wb_is_exc || wb_u.ser || (wb_u.last && (irq_pend || tr_now)) ||
+                             (wb_u.last && xstk && xr_dbl));
 assign wb_hold = wb_v && (halted || (!wb_is_exc &&
                  ((wb_st && !dm_st_rdy) || (wb_st && dm_st_fault) ||
                   (wb_reset && (!rst_issued || rsto_busy)) ||
@@ -1536,7 +1553,10 @@ always_ff @(posedge clk) begin
 		end
 
 		ipl_q <= ipl;
-		if (ipl_q == 3'd0 || ipl_q == 3'd7 || (ipend_r && ipl_q < ipend_lvl))
+		// (no claim from the start of an exception's processing until its
+		// handler's first instruction has completed, and none carried into
+		// it: that instruction may raise the mask first, 8.1, 8.3)
+		if (ipl_q == 3'd0 || ipl_q == 3'd7 || (ipend_r && ipl_q < ipend_lvl) || x_go || xwin)
 			ipend_r <= 1'b0;
 		else if (ipl_q > sr_r[10:8] && (!ipend_r || ipl_q > ipend_lvl)) begin
 			ipend_r   <= 1'b1;
@@ -2035,6 +2055,13 @@ always_ff @(posedge clk) begin
 	if (!nreset) xstk <= 1'b1;               // reset processing
 	else if (x_go) xstk <= 1'b1;
 	else if (adv_wb && wb_u.last) xstk <= 1'b0;
+end
+// the handler's first instruction: from the routine's end to that
+// instruction's completion (a refetch of it is no completion)
+always_ff @(posedge clk) begin
+	if (!nreset || x_go || halted) x_first <= 1'b0;
+	else if (adv_wb && wb_u.last && xstk) x_first <= 1'b1;
+	else if (wb_bound || (adv_wb && wb_is_exc && !wb_refetch)) x_first <= 1'b0;
 end
 always_ff @(posedge clk)
 	if (!nreset) xr_dbl <= 1'b1;             // (reset's routine)

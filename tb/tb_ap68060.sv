@@ -35,6 +35,10 @@
 //               clocks), counted in $F15A with the halt resets           //
 //   $F15E word  arm a one-shot TEA on the next data read of the long word  //
 //               at the written address (low 16 bits)                       //
+//   $F156 word  every instruction fetch of the long word at the written   //
+//               address (low 16 bits) ends in TEA (0: off); kept through //
+//               a timed reset ($F168), dropped by the reset that answers  //
+//               a halt                                                     //
 //   $F158 word  the number of times the bench answers a halted processor  //
 //               (PST $1C) with a reset: it checks the halt for 64 clocks  //
 //               (PST $1C, no bus cycle, BR negated) then pulses RSTI;     //
@@ -649,6 +653,18 @@ endtask
 logic        berr_armed, wberr_arm, fberr_armed;
 logic [15:0] halt_arm = 16'd0;   // (kept through the bench's resets)
 logic [15:0] fberr_addr;
+// $F156: (not cleared by RSTI; the reset of a halted processor drops it)
+logic        fbk_on = 1'b0;
+logic [15:0] fbk_addr = 16'd0;
+wire         fbk_wr = ev && !ev_rd && !ev_err && ev_tt == 2'd0 && !am_drive &&
+                      (ev_addr[15:0] & 16'hFFFE) == 16'hF156;
+wire  [15:0] fbk_w  = ev_word(ev_addr, ev_data);
+logic        was_halted = 1'b0;
+always_ff @(posedge clk) begin
+	if (rsti_n) was_halted <= dbg_halted;
+	if (!rsti_n && was_halted) fbk_on <= 1'b0;
+	else if (fbk_wr) begin fbk_on <= (fbk_w != 16'd0); fbk_addr <= fbk_w; end
+end
 logic [15:0] ipl_delay;
 logic  [7:0] ipl_pulse, ipl_step;
 logic  [2:0] ipl_next;
@@ -867,6 +883,9 @@ always_comb begin
 			tea_req = 1'b1;
 		if (fberr_armed && (xfer_tm == 3'd2 || xfer_tm == 3'd6) &&
 		    xfer_addr[15:2] == fberr_addr[15:2])
+			tea_req = 1'b1;
+		if (fbk_on && (xfer_tm == 3'd2 || xfer_tm == 3'd6) && !am_drive &&
+		    xfer_addr[31:2] == {16'd0, fbk_addr[15:2]})
 			tea_req = 1'b1;
 		if (wberr_arm && (xfer_tm == 3'd3 || xfer_tm == 3'd4))
 			tea_req = 1'b1;
@@ -1293,7 +1312,10 @@ always_ff @(posedge clk)
 // synchronized level and its SR alone: level L is claimed once it is the
 // visible level and beats the mask, until the level falls below L (the
 // device let go) or an acceptance at L consumes it.  A level hidden behind
-// a higher request holds no claim of its own.
+// a higher request holds no claim of its own.  No claim is formed from the
+// start of an exception's processing until its handler's first instruction
+// has completed, and none survives into it: that instruction may raise the
+// mask to keep a request out (MC68060UM 8.1, 8.2.9, 8.3).
 logic [6:1] tb_qual;
 logic [15:0] ipl_idle_for;
 logic [15:0] ipend_takes;
@@ -1306,7 +1328,7 @@ always_ff @(posedge clk) begin
 	end
 	else begin
 		for (int l = 1; l <= 6; l++) begin
-			if (dut.be.ipl_q < 3'(l))
+			if (dut.be.ipl_q < 3'(l) || dut.be.x_go || dut.be.xwin)
 				tb_qual[l] <= 1'b0;
 			else if (dut.be.ipl_q == 3'(l) && 3'(l) > dut.be.sr_r[10:8])
 				tb_qual[l] <= 1'b1;
