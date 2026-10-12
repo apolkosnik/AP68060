@@ -23,8 +23,11 @@
 //   * the extra data write hold (7.14.3): write data stays one bus clock  //
 //     past its TA (the next beat's data follows then)                     //
 //   * locked sequences: LOCK from the first locked transfer to the end of //
-//     the LOCKE transfer; a negated BG does not take the bus away inside   //
-//     one unless BGR is asserted (7.11)                                    //
+//     the LOCKE transfer, on every transfer between them (instruction      //
+//     fetches too, C.2.2.3); a negated BG does not take the bus away       //
+//     inside one unless BGR is asserted (7.11).  Only the LOCKE transfer's //
+//     end, a bus error on a locked transfer, or the processor abandoning  //
+//     the sequence (unlock: an exception, BUSCR.L cleared) ends it (7.4)   //
 //   * arbitration (7.11, figure 7-41): reset, alternate-master implicit   //
 //     and explicit ownership, implicit and explicit ownership, end of      //
 //     tenure.  Either protocol works: a tenure of another master ends     //
@@ -32,7 +35,8 @@
 //     bus clock and negated one, BB negated one CLK, then three-stated.   //
 //     The bus is driven only in explicit ownership.  A retry with BG      //
 //     negated gives the bus up and retries once it is back (7.9.2).       //
-//   * RSTO for 512 CLK cycles (RESET instruction, 7.13)                    //
+//   * RSTO for 512 CLK cycles (RESET instruction, 7.13), once the transfer //
+//     in progress has ended: no bus cycle overlaps it (2.8.4)              //
 //   * a snoop has priority over the processor (5.6): no transfer starts   //
 //     while the snooper still has invalidations to make                   //
 //                                                                          //
@@ -90,7 +94,7 @@ module ap68060_biu
 	output logic              idle,     // no transaction latched or running
 	output logic              own,      // we hold the bus (implicitly or explicitly)
 
-	input  logic              unlock,   // abandon an open locked sequence
+	input  logic              unlock,   // the processor abandons an open locked sequence
 	input  logic              sn_busy,  // snoop invalidations still pending: no new transfer
 	input  logic              halt,     // the processor halted: end the tenure, BR negated
 	input  logic [NC-1:0]     more,     // another transfer of the client waits behind this one
@@ -99,7 +103,7 @@ module ap68060_biu
 
 	// RESET instruction
 	input  logic              rsto_req,  // pulse
-	output logic              rsto_busy,
+	output logic              rsto_busy, // RSTO asserted, or waiting for the transfer to end
 
 	// the 68060 bus
 	output logic [31:0]       a_o,
@@ -174,7 +178,6 @@ logic  [1:0] beat;        // beats completed so far in a line
 logic  [1:0] a32;         // A3:A2 on the bus
 logic        inhibited;   // line continued as long-word transfers
 logic        locked;      // a locked sequence is open
-logic [CW-1:0] lock_c;
 logic  [3:0] ign;         // ignore states left before sampling
 logic        bb_q;        // BB at the previous bus clock edge
 logic        sas_hold;    // SAS driven negated a bus clock after the release
@@ -188,25 +191,21 @@ logic  [1:0] rst_et;      // reset from explicit ownership: its end of tenure
 logic        h_last;      // S_HOLD follows the transfer's last beat
 
 //--------------------------------------------------------------------------
-// arbitration among requesters: fixed priority, except that an open locked
-// sequence belongs to its requester alone
+// arbitration among requesters: fixed priority.  An open locked sequence
+// does not shut the others out: the instructions between its operand
+// accesses may have to be fetched (MC68060UM C.2.2.3), and every transfer
+// inside it carries LOCK (7.11.2)
 //--------------------------------------------------------------------------
 logic          pick_v;
 logic [CW-1:0] pick_c;
 always_comb begin
 	pick_v = 1'b0;
 	pick_c = '0;
-	if (locked) begin
-		pick_v = req[lock_c];
-		pick_c = lock_c;
-	end
-	else begin
-		for (int i = NC - 1; i >= 0; i--)
-			if (req[i]) begin
-				pick_v = 1'b1;
-				pick_c = CW'(i);
-			end
-	end
+	for (int i = NC - 1; i >= 0; i--)
+		if (req[i]) begin
+			pick_v = 1'b1;
+			pick_c = CW'(i);
+		end
 end
 
 // long-word data for a line's long word at A3:A2
@@ -259,6 +258,7 @@ wire        ts_oth    = !ts_n_i && !(a_oe && !ts_n);
 wire        keep_bus  = !bg_n || (locked && bgr_n);
 
 logic [9:0] rsto_cnt;
+logic       rsto_pend;         // RESET: RSTO once the transfer in progress ends
 logic       unlock_pend;
 logic       end_tenure;        // relinquish once the transfer in progress ends
 
@@ -281,7 +281,6 @@ always_ff @(posedge clk) begin
 		a32       <= 2'd0;
 		inhibited <= 1'b0;
 		locked    <= 1'b0;
-		lock_c    <= '0;
 		ign       <= 4'd0;
 		h_last    <= 1'b0;
 		rclient   <= '0;
@@ -349,6 +348,7 @@ always_ff @(posedge clk) begin
 		endcase
 		rsto_n    <= 1'b1;
 		rsto_cnt  <= '0;
+		rsto_pend <= 1'b0;
 		unlock_pend <= 1'b0;
 		end_tenure  <= 1'b0;
 	end
@@ -364,15 +364,13 @@ always_ff @(posedge clk) begin
 		if (bb_oe && bb_n_o && ab != B_EXP) bb_oe <= 1'b0;
 		if (tip_oe && tip_n && ab != B_EXP) tip_oe <= 1'b0;
 
-		// RESET instruction: RSTO for 512 CLK cycles
+		// RESET instruction: RSTO for 512 CLK cycles, from the end of the
+		// transfer in progress (below)
 		if (rsto_cnt != 0) begin
 			rsto_cnt <= rsto_cnt - 1'd1;
 			if (rsto_cnt == 10'd1) rsto_n <= 1'b1;
 		end
-		if (rsto_req) begin
-			rsto_n   <= 1'b0;
-			rsto_cnt <= 10'd512;
-		end
+		if (rsto_req) rsto_pend <= 1'b1;
 
 		if (unlock) unlock_pend <= 1'b1;
 		if ((unlock || unlock_pend) && st == S_IDLE) begin
@@ -385,8 +383,12 @@ always_ff @(posedge clk) begin
 		end
 
 		if (bclk_en) begin
-			logic start;
-			start = 1'b0;
+			logic start, tbi_now, lk_now;
+			start   = 1'b0;
+			tbi_now = 1'b0;
+			// the sequence stays open for a transfer starting now unless the
+			// processor has just abandoned it
+			lk_now  = locked && !unlock && !unlock_pend;
 
 			bb_q <= bb_n_i;
 			sas_en <= a_oe;
@@ -453,10 +455,7 @@ always_ff @(posedge clk) begin
 						// the LOCKE transfer keeps it until it terminates
 						// normally (finish_cycle), so a retry of it with BG
 						// negated and BGR negated holds the bus (7.11.2)
-						if (breq[pick_c].lock) begin
-							locked <= 1'b1;
-							lock_c <= pick_c;
-						end
+						if (breq[pick_c].lock) locked <= 1'b1;
 					end
 				end
 				else if (ab == B_EXP && (!keep_bus || end_tenure || halt)) begin
@@ -528,11 +527,16 @@ always_ff @(posedge clk) begin
 				else if (t_err) begin
 					err[cur_c] <= 1'b1;
 					errbeat    <= beat;
-					// a bus error ends a locked sequence: the requester
-					// takes an access error and will not complete it
-					locked     <= 1'b0;
-					lock_n     <= 1'b1;         // (and the pins with it)
-					locke_n    <= 1'b1;
+					// a bus error on a locked operand access ends the
+					// sequence: the requester takes an access error and will
+					// not complete it.  (One on an instruction fetch inside
+					// it may be a prefetch never used: an access error taken
+					// for it abandons the sequence through unlock.)
+					if (cur.lock) begin
+						locked  <= 1'b0;
+						lock_n  <= 1'b1;        // (and the pins with it)
+						locke_n <= 1'b1;
+					end
 					d_oe       <= 1'b0;
 					sas_n      <= 1'b1;
 					st         <= S_IDLE;
@@ -583,7 +587,10 @@ always_ff @(posedge clk) begin
 					else begin
 						beat <= beat + 1'd1;
 						if ((beat == 2'd0 && !inhibited && !tbi_n) || inhibited) begin
-							// TBI with the first TA: the rest as long words
+							// TBI with the first TA: the rest as long words,
+							// from the long word after the one just moved,
+							// whatever CLA did to A3:A2 (7.7.2, 7.7.4)
+							tbi_now   = 1'b1;
 							inhibited <= 1'b1;
 							a32       <= lw + 2'd1;
 							sas_n     <= 1'b1;
@@ -612,9 +619,10 @@ always_ff @(posedge clk) begin
 
 			// CLA (7.7.7): sampled from the edge after TS on, on every edge
 			// of a burst, the ignore states included; each sample advances
-			// A3:A2, wrapping in the line.  (A retry's restart overrides.)
+			// A3:A2, wrapping in the line.  (A retry's restart and a TBI's
+			// continuation override it.)
 			if ((st == S_C1 || st == S_DATA || st == S_HOLD) && beat_line && !cla_n &&
-			    !(st == S_DATA && ign == 4'd0 && t_retry)) begin
+			    !(st == S_DATA && ign == 4'd0 && t_retry) && !tbi_now) begin
 				a32      <= a32 + 2'd1;
 				a_o[3:2] <= a32 + 2'd1;
 			end
@@ -640,8 +648,10 @@ always_ff @(posedge clk) begin
 				tm        <= r.tm;
 				tln       <= r.tln;
 				upa       <= r.upa;
-				ciout_n   <= !r.ci;
-				lock_n    <= !r.lock;
+				// (an acknowledge cycle -- interrupt, breakpoint, the LPSTOP
+				// broadcast -- has CIOUT negated, table 7-2)
+				ciout_n   <= !r.ci || (r.tt == 2'd3);
+				lock_n    <= !(r.lock || lk_now);
 				locke_n   <= !(r.lock && r.locke);
 				d_o       <= (r.siz == SIZ_LINE) ? line_word(w, r.addr[3:2]) : w[31:0];
 				d_oe      <= !r.rd;
@@ -650,6 +660,14 @@ always_ff @(posedge clk) begin
 				tip_oe    <= 1'b1;
 				ign       <= icount(r.rd, 1'b0);
 				st        <= S_C1;
+			end
+
+			// RESET: RSTO once no transfer is in progress or starting (the
+			// fetch is held from the request on, the store buffer is empty)
+			if (rsto_pend && st == S_IDLE && !start) begin
+				rsto_pend <= 1'b0;
+				rsto_n    <= 1'b0;
+				rsto_cnt  <= 10'd512;
 			end
 
 			// BR: the internal request, registered (7.11.2): asserted while a
@@ -682,6 +700,6 @@ assign sas_oe    = (a_oe && sas_en) || sas_hold;
 // (rst_et lives through the reset: only power-up clears it)
 initial begin rst_et = 2'd0; lk_hold = 1'b0; sas_hold = 1'b0; sas_en = 1'b0; end
 assign own       = (ab == B_IMP) || (ab == B_EXP);
-assign rsto_busy = !rsto_n;
+assign rsto_busy = !rsto_n || rsto_pend;
 
 endmodule

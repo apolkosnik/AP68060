@@ -132,6 +132,7 @@ module ap68060_backend
 	input  logic        rsto_busy,
 
 	output logic        kill_now,       // this cycle: younger uops are discarded
+	output logic        lk_abandon,     // an open locked sequence is abandoned
 	output logic        adv_ag,         // AG -> DC1
 	output logic [31:0] dtt0,
 	output logic [31:0] dtt1,
@@ -1285,6 +1286,11 @@ wire dbl_fault   = xstk && xr_dbl && adv_wb && wb_is_exc && !wb_refetch &&
                    (wb_exc == 8'd2 || wb_exc == 8'd3);
 wire x_go        = ((adv_wb && wb_is_exc && !wb_refetch) || take_trace || take_irq || take_sbe) &&
                    !dbl_fault && !halted;
+// a locked sequence ends with its LOCKE write; before that only an
+// exception (L and LE go to SL and SLE) or a MOVEC clearing BUSCR.L ends it
+// (MC68060UM 7.4) -- not a pipeline flush, a NOP's included
+assign lk_abandon = x_go || dbl_fault ||
+                    (wb_commit && wb_u.op == OP_SPW && wb_u.imm_b[7:0] == 8'h08 && !wb_res[31]);
 
 // register file write ports.  Front: the AG address updates and the EX
 // result.  Back: the WB commit (a result beats an address update), the

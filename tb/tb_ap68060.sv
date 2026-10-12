@@ -359,6 +359,36 @@ always_ff @(posedge clk)
 		end
 		if (tt == 2'd3)
 			lps_quiet <= (tm == 3'd0) && !rw_n && a_o == 32'hFFFFFFFE;
+		// an acknowledge cycle (interrupt, breakpoint, LPSTOP): CIOUT,
+		// UPA, LOCK and LOCKE negated (table 7-2)
+		if (tt == 2'd3 && (!ciout_n || upa != 2'd0 || !lock_n || !locke_n)) begin
+			errors <= errors + 1;
+			$display("FAIL: acknowledge cycle with CIOUT=%b UPA=%0d LOCK=%b LOCKE=%b (cycle %0d, a=%h)",
+			         ciout_n, upa, lock_n, locke_n, cycles, a_o);
+		end
+	end
+
+// RSTO only once every bus cycle is done (2.8.4): none ends while it is
+// asserted, and TIP is not asserted with it
+always_ff @(posedge clk)
+	if (rsti_n && !rsto_n && ((ev && !am_drive) || (bclk_en && tip_oe && !tip_n))) begin
+		errors <= errors + 1;
+		$display("FAIL: a bus cycle overlaps RSTO (cycle %0d, %s)", cycles,
+		         (ev && !am_drive) ? "a transfer ended" : "TIP asserted");
+	end
+
+// once RSTI negates the processor stays in reset for 27 CLK more (7.13):
+// no TS of its own before then
+int rst_age;
+always_ff @(posedge clk)
+	if (!rsti_n) rst_age <= 0;
+	else begin
+		if (rst_age < 1000) rst_age <= rst_age + 1;
+		if (a_oe && !ts_n && rst_age < 27) begin
+			errors <= errors + 1;
+			$display("FAIL: TS %0d CLK after RSTI negated, inside the 27-CLK internal reset (cycle %0d)",
+			         rst_age, cycles);
+		end
 	end
 
 //--------------------------------------------------------------------------
@@ -671,21 +701,40 @@ assign push_retry = pr_arm && xfer_v && !am_drive && !xfer_rd &&
 // sequence is open from its first transfer to the end of its LOCKE one,
 // and with BGR negated the 68060 keeps the bus that long, BG or not
 // (7.11.2): no other master's transfer may fall inside it
-logic ts_lock, ts_locke, lk_open;
+logic ts_lock, ts_locke, lk_open, lk_exc;
 always_ff @(posedge clk)
 	if (!rsti_n) begin
-		ts_lock <= 1'b0; ts_locke <= 1'b0; lk_open <= 1'b0;
+		ts_lock <= 1'b0; ts_locke <= 1'b0; lk_open <= 1'b0; lk_exc <= 1'b0;
 	end
 	else begin
 		if (bclk_en && !ts_n && a_oe) begin
 			ts_lock  <= !lock_n;
 			ts_locke <= !locke_n;
 		end
-		if (ev && !am_drive && ts_lock) lk_open <= !(ts_locke || ev_err);
+		// (a bus error on an instruction fetch inside the sequence does not
+		// end it: it may be a prefetch never used)
+		if (ev && !am_drive && ts_lock)
+			lk_open <= !(ts_locke || (ev_err && ev_tm != 3'd2 && ev_tm != 3'd6));
 		if (bclk_en && am_drive && !am_ts_n && lk_open && am_bgr_n) begin
 			errors <= errors + 1;
 			$display("FAIL: another master's transfer inside a locked sequence, BGR negated (cycle %0d)", cycles);
 		end
+		// LOCK stays asserted on every transfer inside the sequence and
+		// between them (7.4, 7.11.2), until its LOCKE transfer ends, a bus
+		// error ends it, or an exception abandons it (while the 68060
+		// drives the bus: with BGR asserted a negated BG takes the bus
+		// away inside a sequence, and the end of tenure drives LOCK
+		// negated before three-stating it)
+		if (dut.be.lk_abandon) lk_exc <= 1'b1;
+		if (!lk_open) lk_exc <= 1'b0;
+		// (a write's event comes a clock after the edge its TA is sampled
+		// on, the edge LOCK negates on after the LOCKE write)
+		if (bclk_en && lk_open && !lk_exc && !am_drive && a_oe && lock_oe && lock_n &&
+		    !(ev && !am_drive && ts_lock && (ts_locke || ev_err))) begin
+			errors <= errors + 1;
+			$display("FAIL: LOCK negated inside a locked sequence (cycle %0d, pc=%h)", cycles, dbg_pc);
+		end
+		if (lk_exc && lock_n) lk_open <= 1'b0;
 	end
 
 // PST never shows an encoding MC68060UM table 2-7 leaves undefined ($03,

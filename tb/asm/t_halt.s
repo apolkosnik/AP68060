@@ -17,6 +17,10 @@
 ;        no access error
 ;   3-4  RESET with four writes waiting in the store buffer: they reach
 ;        memory before RSTO (2.8.4), no bus cycle while it is asserted
+;   11   RESET at each of eight places in a line not yet fetched, the
+;        instruction cache on and off: the fetch of the line may be under
+;        way, RSTO waits for it to end (2.8.4; the bench fails a transfer
+;        that overlaps RSTO)
 ;   then an address error whose frame write gets TEA: a double bus fault
 ;        (7.9.3): the processor halts, the bench resets it
 ; phase 1 (one reset)
@@ -136,6 +140,27 @@ lps_next2:
 	move.l	($900C).l,d1
 	chkl	d1,$44444444,4
 
+; 11 RESET with an instruction fetch in flight
+	moveq	#0,d5			; CACR: the instruction cache off, then on
+rs_pass:
+	lea	rs_tab(pc),a2
+	moveq	#7,d4
+rs_loop:
+	dc.w	$F4D8			; cinva bc: the block's line is cold
+	movec	d5,cacr
+	moveq	#0,d2
+	move.l	(a2)+,a1
+	jsr	(a1)
+	chkl	d2,2,11
+	dbra	d4,rs_loop
+	tst.l	d5
+	bne.s	rs_done
+	move.l	#$00008000,d5
+	bra.s	rs_pass
+rs_done:
+	moveq	#0,d0
+	movec	d0,cacr
+
 ; the double bus fault: the address error's frame ($F138-$F143) meets TEA
 	move.w	#1,(HALTRST).l
 	move.w	#1,(BERRARM).l
@@ -197,6 +222,30 @@ phase3:
 phase4:
 	move.w	#$600D,(DONEREG).l
 	bra.s	*
+
+; RESET after n MOVEQs from the start of a line, then more of the line
+rsblk	macro
+	cnop	0,16
+rsb\1:
+	rept	\1
+	moveq	#0,d3
+	endr
+	reset
+	rept	16
+	moveq	#2,d2
+	endr
+	rts
+	endm
+	rsblk	0
+	rsblk	1
+	rsblk	2
+	rsblk	3
+	rsblk	4
+	rsblk	5
+	rsblk	6
+	rsblk	7
+rs_tab:
+	dc.l	rsb0,rsb1,rsb2,rsb3,rsb4,rsb5,rsb6,rsb7
 
 fail_all:
 	move.l	#$3400,sp

@@ -37,7 +37,12 @@ ALMs, validated with Verilator.
   D15-D0 (acknowledge-termination ignore states, native TRA retries,
   extra write hold); acknowledge cycles (IACK, breakpoint, LPSTOP), no
   bus cycle after the LPSTOP broadcast but the waking interrupt's
-  acknowledge; RSTO for 512 clocks once every bus cycle is done.
+  acknowledge; RSTO for 512 clocks from the end of the transfer in
+  progress (the fetch held, the store buffer drained); CIOUT negated on
+  acknowledge cycles; 27 clocks of internal reset after RSTI negates;
+  BUSCR locked sequences with LOCK on every transfer inside them,
+  instruction fetches included, ended only by the LOCKE write, a bus
+  error, an exception or BUSCR.L cleared.
   Snooping invalidates only (SNOOP with TT1 = 0, both caches, the push
   buffer and a push waiting for a retry included) and keeps up with
   snooped transfers on every bus clock: the snooper holds a copy of the

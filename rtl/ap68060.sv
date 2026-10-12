@@ -87,10 +87,16 @@ module ap68060
 
 // reset synchronizer: two bus clocks (RSTI is synchronized to the clock-
 // enabled edges, 2.8.3, 7.13), so the reset -- and the release of the bus
-// pins it begins -- always starts on a bus clock edge
+// pins it begins -- always starts on a bus clock edge.  Once RSTI negates
+// the processor stays in reset for another 27 CLK cycles (7.13).
 logic [1:0] rst_q = 2'b00;
-always_ff @(posedge clk) if (bclk_en) rst_q <= {rst_q[0], rsti_n};
-wire nreset = rst_q[1];
+logic [4:0] rst_hold = 5'd27;
+always_ff @(posedge clk) begin
+	if (bclk_en) rst_q <= {rst_q[0], rsti_n};
+	if (!rst_q[1])            rst_hold <= 5'd27;
+	else if (rst_hold != 5'd0) rst_hold <= rst_hold - 5'd1;
+end
+wire nreset = rst_q[1] && (rst_hold == 5'd0);
 
 // the special modes (7.14): IPL2-IPL0 and D15-D0 registered on the bus
 // clock edges while RSTI is asserted; the last one stands
@@ -174,7 +180,7 @@ ap68060_biu #(.NC(NC)) biu (
 	.gnt(b_gnt), .done(b_done), .err(b_err),
 	.rvalid(b_rvalid), .rclient(b_rclient), .rdata(b_rdata), .rbeat(b_rbeat),
 	.ravec(b_ravec), .rtci(b_rtci), .errbeat(b_errbeat), .idle(b_idle), .own(b_own),
-	.unlock(kill_now), .sn_busy(sn_busy || sn_act), .halt(dbg_halted), .drop({1'b0, b_drop}), .more({1'b0, b_more}),   // (the DMU engine sees no grant while frozen)
+	.unlock(lk_abandon), .sn_busy(sn_busy || sn_act), .halt(dbg_halted), .drop({1'b0, b_drop}), .more({1'b0, b_more}),   // (the DMU engine sees no grant while frozen)
 	.rsto_req(rsto_req), .rsto_busy(rsto_busy),
 	.a_o(a_o), .a_oe(a_oe), .d_i(d_i), .d_o(d_o), .d_oe(d_oe),
 	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
@@ -233,7 +239,7 @@ logic [15:0] sr;
 logic [31:0] vbr, cacr;
 logic        bc_clr;
 logic  [2:0] sfc, dfc;
-logic        kill_now, adv_ag;
+logic        kill_now, adv_ag, lk_abandon;
 logic [31:0] dtt0, dtt1, itt0, itt1, tc;
 logic        q_odd;
 logic        dm_hold1, mt_v, mt_ng, mt_wr, mt_done;
@@ -291,7 +297,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES),
 	.dm_st_faddr(dm_st_faddr),
 	.urp(urp), .srp(srp),
 	.ipl(ipl_v), .iack_lvl(iack_lvl), .rsto_req(rsto_req), .rsto_busy(rsto_busy),
-	.kill_now(kill_now), .adv_ag(adv_ag),
+	.kill_now(kill_now), .lk_abandon(lk_abandon), .adv_ag(adv_ag),
 	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1), .tc(tc),
 	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .halted(dbg_halted), .fetch_stop(be_fstop)
 );

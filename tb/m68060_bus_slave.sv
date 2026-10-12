@@ -7,8 +7,11 @@
 // TBI/TCI/CLA are driven from flip-flops updated on bus clock edges.  A    //
 // burst continues one beat per clock.  The slave counts the beats of a     //
 // line itself and wraps inside the line; A3:A2 must stay as driven with   //
-// TS (cla_mode 0) or advance once per CLA it asserts (cla_mode 1: CLA     //
-// comes with every TA of a burst but the last, 7.7.7).                     //
+// TS (cla_mode 0) or advance once per CLA the processor samples (cla_mode //
+// 1: CLA comes with every TA of a burst but the last, and at random in    //
+// its wait and ignored clocks and with a TBI, 7.7.7).  The long-word      //
+// transfers that finish a burst-inhibited line must move the long words   //
+// after the first one, in order, wrapping in the line (7.7.2, 7.7.4).     //
 //                                                                          //
 // The special modes the processor registered at reset (7.14) are inputs: //
 //   m_ign/m_cnt  the slave counts the ignore states of every beat of a    //
@@ -141,6 +144,8 @@ logic  [3:0] wr_be;
 logic        hold_chk;       // check the extra write hold this clock
 logic [31:0] hold_d;
 logic        cla_q;          // CLA asserted with this TA
+logic  [1:0] cla_cnt;        // CLAs the processor sampled in this line
+logic [31:0] ln_base;        // the burst-inhibited line's first address
 
 // byte lanes selected by SIZ/A1/A0 (table 2-6), D31-24 in bit 3
 function automatic logic [3:0] lanes(input logic [1:0] s, input logic [1:0] a10);
@@ -192,6 +197,13 @@ initial begin
 	void'($urandom(SEED));
 end
 
+// CLA in a clock that is not the beat's answer: at random, in a burst
+// (CLA mode)
+function automatic logic early_cla();
+	return cla_mode && cpu_q && burst && siz_q == 2'b11 && inh_left == 2'd0 &&
+	       ($urandom % 2) == 0;
+endfunction
+
 // a beat starts on this edge: its ignored clocks, junk for the first one
 task automatic beat_start(input logic [4:0] rem);
 	ic       <= (rem != 0) ? rem - 5'd1 : 5'd0;
@@ -211,6 +223,17 @@ task automatic take_ts();
 	tm_q  <= tm;
 	cpu_q <= cpu_xfer;
 	beat  <= 2'd0;
+	cla_cnt <= 2'd0;
+	// the rest of a burst-inhibited line: the next long word of it
+	if (cpu_xfer && inh_left != 2'd0) begin
+		logic [1:0] k;
+		k = 2'd0 - inh_left;     // (4 - inh_left: the first follow-up is 1)
+		if (a != {ln_base[31:4], ln_base[3:2] + k, 2'b00} || siz != 2'b00) begin
+			$display("PROTOCOL: burst-inhibited line at %08x: transfer %0d at %08x SIZ %0d, expected %08x long",
+			         ln_base, k, a, siz, {ln_base[31:4], ln_base[3:2] + k, 2'b00});
+			perr <= 1'b1;
+		end
+	end
 	burst <= (siz == 2'b11);
 	waits <= pick_waits();
 	if (cpu_xfer) begin
@@ -251,6 +274,8 @@ always_ff @(posedge clk) begin
 		wr_pend <= 1'b0;
 		hold_chk <= 1'b0;
 		cla_q  <= 1'b0;
+		cla_cnt <= 2'd0;
+		ln_base <= '0;
 		cpu_q  <= 1'b0;
 	end
 	else if (bclk_en) begin
@@ -267,6 +292,8 @@ always_ff @(posedge clk) begin
 		hold_chk <= 1'b0;
 		cla_q  <= 1'b0;
 		exp_sas <= 1'b0;
+		// the processor samples the CLA we drive at this edge
+		if (busy && !cla_n) cla_cnt <= cla_cnt + 2'd1;
 
 		// the extra data write hold: the clock after a write TA keeps the data
 		if (hold_chk && (!d_oe_cpu || d_cpu != hold_d)) begin
@@ -327,11 +354,14 @@ always_ff @(posedge clk) begin
 			if (ign_junk) begin
 				ta_n <= 1'b0; tea_n <= 1'b0; tra_n <= 1'b0; junk <= 1'b1;
 			end
+			// CLA is sampled in the ignored clocks too
+			if (early_cla()) cla_n <= 1'b0;
 		end
 		else if (waits != 0 || hold) begin
 			// wait states (the bench may hold a beat)
 			if (waits != 0) waits <= waits - 1'd1;
 			if (cpu_q && !sampling) begin sampling <= 1'b1; exp_sas <= 1'b1; end
+			if (early_cla()) cla_n <= 1'b0;
 		end
 		else begin
 			// answer this beat
@@ -339,9 +369,10 @@ always_ff @(posedge clk) begin
 			logic [3:0] be;
 			if (cpu_q && !sampling) begin sampling <= 1'b1; exp_sas <= 1'b1; end
 			// the A3:A2 rule: held as driven with TS, or advanced by CLA
-			if (cpu_q && siz_q == 2'b11 && inh_left == 2'd0 && a[3:2] != (cla_mode ? a32 : base[3:2])) begin
-				$display("PROTOCOL: A3:A2 = %0d in beat %0d of the line at %08x (CLA %s)",
-				         a[3:2], beat, base, cla_mode ? "on" : "off");
+			if (cpu_q && siz_q == 2'b11 && inh_left == 2'd0 &&
+			    a[3:2] != (cla_mode ? base[3:2] + cla_cnt : base[3:2])) begin
+				$display("PROTOCOL: A3:A2 = %0d in beat %0d of the line at %08x (CLA %s, %0d sampled)",
+				         a[3:2], beat, base, cla_mode ? "on" : "off", cla_cnt);
 				perr <= 1'b1;
 			end
 			// a burst-inhibited line's follow-up transfers may not be retried
@@ -351,6 +382,7 @@ always_ff @(posedge clk) begin
 			ack <= 1'b1;
 			if (tea_req || (!inmem && tt_q != 2'd3)) begin
 				tea_n  <= 1'b0;
+				inh_left <= 2'd0;        // (a bus error ends the line)
 				ev     <= 1'b1;
 				ev_err <= 1'b1;
 				ev_rd   <= rd_q;
@@ -397,6 +429,10 @@ always_ff @(posedge clk) begin
 					tbi_n <= 1'b0;
 					burst <= 1'b0;
 					inh_left <= 2'd3;
+					ln_base <= base;
+					// CLA may come with the TBI: it does not move the
+					// long words that finish the line
+					if (cla_mode && cpu_q && ($urandom % 2) == 0) cla_n <= 1'b0;
 				end
 				else if (cla_mode && cpu_q && burst && beat != 2'd3) begin
 					cla_n <= 1'b0;
