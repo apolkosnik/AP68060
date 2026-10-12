@@ -26,6 +26,11 @@
 //               off)                                                       //
 //   $F16C word  nonzero: after each fetch beat of that line's long word at //
 //               +4, rewrite its upper word to MOVEQ #n,D0 (n counts them)  //
+//   $F16E word  IPL skew: bits 2:0 the IPL bits that change one clock    //
+//               after the others (an FPGA's unequal pin delays; the level //
+//               passes through one nobody raised), kept until rewritten;  //
+//               bits 15:8 nonzero: raise level bits 6:4 that many clocks  //
+//               later                                                      //
 //   $F168 word  reset the processor this many clocks later (RSTI for 12  //
 //               clocks), counted in $F15A with the halt resets           //
 //   $F15E word  arm a one-shot TEA on the next data read of the long word  //
@@ -94,6 +99,8 @@
 // TRA retries, +whold the extra write hold.  +cla: the slave asserts CLA  //
 // for the processor to advance A3:A2 in a burst.  +bgr: the alternate    //
 // master asserts BGR when it takes BG away.                              //
+// +iplskew=<mask>: those IPL bits change one clock late from reset on    //
+// (the $F16E skew).                                                       //
 // Every bus protocol violation the slave detects fails the run.           //
 //--------------------------------------------------------------------------//
 
@@ -165,7 +172,10 @@ wire   [2:0] bus_tm   = am_drive ? am_tm : tm;
 wire  [31:0] bus_dw   = am_d_oe ? am_d : d_o;            // write data
 wire  [31:0] bus_dr   = d_mem;                           // read data
 // while RSTI is asserted, IPL2-IPL0 and D15-D0 carry the modes
-wire   [2:0] ipl_pins = !rsti_n ? ~{md_hold, md_native, md_ign} : ~ipl_lvl;
+// (the bits in ipl_lagm a clock late: ipl_old is the level a clock ago)
+logic  [2:0] ipl_lagm, ipl_lagm_def, ipl_old;
+wire   [2:0] ipl_sk   = (ipl_lvl & ~ipl_lagm) | (ipl_old & ipl_lagm);
+wire   [2:0] ipl_pins = !rsti_n ? ~{md_hold, md_native, md_ign} : ~ipl_sk;
 wire  [31:0] d_pins   = !rsti_n ? {16'd0, md_cnt} : am_d_oe ? am_d : d_mem;
 
 // the core's area options (build_sim.sh DEFS="+define+AP_FPU_PIPE=0 ..."):
@@ -202,6 +212,7 @@ ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EAR
 // slave
 logic  [1:0] wait_mode, tbi_mode;
 int          retry_pct;
+int          iplskew;
 logic        tea_req;
 logic        xfer_v, xfer_rd;
 logic [31:0] xfer_addr;
@@ -611,6 +622,8 @@ logic [15:0] fberr_addr;
 logic [15:0] ipl_delay;
 logic  [7:0] ipl_pulse, ipl_step;
 logic  [2:0] ipl_next;
+logic  [7:0] ipl_skw;         // $F16E raise countdown
+logic  [2:0] ipl_skw_lvl;
 logic  [1:0] irq_exc_armed;   // $F144
 logic  [2:0] fetch_stall;     // hold the next instruction fetch this many clocks
 logic        fetch_hold;
@@ -859,8 +872,12 @@ always_ff @(posedge clk)
 
 always_ff @(posedge clk) begin
 	cycles <= cycles + 1;
+	ipl_old <= ipl_lvl;
 	if (!rsti_n) begin
 		ipl_lvl     <= 3'd0;
+		ipl_lagm    <= ipl_lagm_def;
+		ipl_skw     <= '0;
+		ipl_skw_lvl <= '0;
 		berr_armed  <= 1'b1;     // the first access to $F140 is rejected (old bench)
 		wberr_arm   <= 1'b0;
 		fberr_armed <= 1'b0;
@@ -1006,6 +1023,10 @@ always_ff @(posedge clk) begin
 			ipl_step <= ipl_step - 1'd1;
 			if (ipl_step == 8'd1) ipl_lvl <= ipl_next;
 		end
+		if (ipl_skw != 0) begin
+			ipl_skw <= ipl_skw - 1'd1;
+			if (ipl_skw == 8'd1) ipl_lvl <= ipl_skw_lvl;
+		end
 		if (ev && ev_err) begin
 			// one-shot injections clear themselves
 			if (ev_addr[15:0] == 16'hF140) berr_armed <= 1'b0;
@@ -1063,6 +1084,7 @@ always_ff @(posedge clk) begin
 				16'hF150: begin ipl_lvl <= w[2:0]; ipl_next <= w[6:4]; ipl_step <= w[15:8]; end
 				16'hF154: begin fberr_armed <= (w != 16'd0); fberr_addr <= w; end
 				16'hF158: halt_arm <= w;
+				16'hF16E: begin ipl_lagm <= w[2:0]; ipl_skw_lvl <= w[6:4]; ipl_skw <= w[15:8]; end
 				16'hF2C0: pins_r <= w[1:0];
 				16'hF2C4: begin
 					rs_en    <= w[15];
@@ -1309,6 +1331,8 @@ initial begin
 	md_cla    = $test$plusargs("cla");
 	md_junk   = $test$plusargs("ignjunk");
 	md_bgr    = $test$plusargs("bgr");
+	if (!$value$plusargs("iplskew=%d", iplskew)) iplskew = 0;
+	ipl_lagm_def = iplskew[2:0];
 	trace = $test$plusargs("trace");
 	ptrace = $test$plusargs("ptrace");
 	prof = $test$plusargs("prof");

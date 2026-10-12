@@ -130,13 +130,19 @@ always_ff @(posedge clk) begin
 	end
 end
 
-// interrupt level synchronizer (two bus-clock samples)
-logic [2:0] ipl_s1, ipl_s2;
-always_ff @(posedge clk)
-	if (bclk_en) begin
-		ipl_s1 <= ~ipl_n;
-		ipl_s2 <= ipl_s1;
-	end
+// interrupt level synchronizer: IPL2-IPL0 are synchronized to CLK, and a
+// level is valid once it has been held for two consecutive CLK periods
+// (7.8.1, before figure 7-25).  The three pins settle at
+// different times when the level changes, so for a clock the synchronized
+// value can be one no device raised (0 to 3 passing through 1); the two
+// samples must agree before the core sees a new level.
+logic [2:0] ipl_s1 = 3'd0, ipl_s2 = 3'd0, ipl_s3 = 3'd0, ipl_v = 3'd0;
+always_ff @(posedge clk) begin
+	ipl_s1 <= ~ipl_n;
+	ipl_s2 <= ipl_s1;
+	ipl_s3 <= ipl_s2;
+	if (ipl_s2 == ipl_s3) ipl_v <= ipl_s3;
+end
 
 //--------------------------------------------------------------------------
 // BIU: client 0 data (DMU), client 1 instruction fetch
@@ -284,7 +290,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES),
 	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
 	.dm_st_faddr(dm_st_faddr),
 	.urp(urp), .srp(srp),
-	.ipl(ipl_s2), .iack_lvl(iack_lvl), .rsto_req(rsto_req), .rsto_busy(rsto_busy),
+	.ipl(ipl_v), .iack_lvl(iack_lvl), .rsto_req(rsto_req), .rsto_busy(rsto_busy),
 	.kill_now(kill_now), .adv_ag(adv_ag),
 	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1), .tc(tc),
 	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .halted(dbg_halted), .fetch_stop(be_fstop)

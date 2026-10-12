@@ -1,14 +1,15 @@
 #!/bin/bash
-# AP68060 regression: every program under ten bus configurations -- the
+# AP68060 regression: every program under eleven bus configurations -- the
 # 68040-protocol ones (wait states, burst inhibit, retries, BCLK at half
-# CLK) and the 68060 reset modes (ignore states with junk terminations in
-# the ignored clocks, native TRA retries, extra write hold, CLA, BGR).
+# CLK), the 68060 reset modes (ignore states with junk terminations in
+# the ignored clocks, native TRA retries, extra write hold, CLA, BGR) and
+# IPL bits 1-0 changing a clock after bit 2 (unequal pin delays).
 # The bench's slave checks the bus protocol on every transfer.
 # Usage: run_tests.sh [program ...]   (default: the passing set)
 # JOBS=<n> simulations run in parallel (default: half the CPUs).
 set -e
 cd "$(dirname "$0")"
-PROGS=${*:-"smoke t_integer t_exceptions t_mmu t_cache t_atcprobe t_bitfield_cache t_bitfield_mmu t_movem_restart t_moves_fc t_fpu t_fpu_frames t_snoop t_btb t_stld t_pins t_snstress t_eredir t_cbsplit t_cmodes t_loops t_early t_stbuf t_berr t_irq7 t_mmu060 t_cache060 t_halt t_snirq"}
+PROGS=${*:-"smoke t_integer t_exceptions t_mmu t_cache t_atcprobe t_bitfield_cache t_bitfield_mmu t_movem_restart t_moves_fc t_fpu t_fpu_frames t_snoop t_btb t_stld t_pins t_snstress t_eredir t_cbsplit t_cmodes t_loops t_early t_stbuf t_berr t_irq7 t_mmu060 t_cache060 t_halt t_snirq t_iplglitch"}
 WORK=${WORK:-$(cd .. && pwd)/obj}; export WORK
 JOBS=${JOBS:-$(( $(nproc) / 2 ))}
 ./build_asm.sh $PROGS
@@ -25,6 +26,7 @@ CFGS=(
 	"+whold +waits +tbi=2"
 	"+cla +whold +ign=2101 +ignjunk +native +retry=10 +bclk2 +tbi=2"
 	"+bgr +waits"
+	"+iplskew=3 +waits +retry=10"
 )
 out=$(for p in $PROGS; do for c in "${CFGS[@]}"; do printf '%s|%s\n' "$p" "$c"; done; done |
 	xargs -d '\n' -P "$JOBS" -I{} bash -c '
