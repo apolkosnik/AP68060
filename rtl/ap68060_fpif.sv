@@ -57,7 +57,8 @@
 module ap68060_fpif
 	import ap68060_pkg::*;
 #(
-	parameter bit         FPU_PIPE     = 1
+	parameter bit         FPU_PIPE     = 1,
+	parameter bit         NO_FPU       = 0      // the MC68LC060: no FPU (dfp is held high above)
 )(
 	input  logic        clk,
 	input  logic        nreset,
@@ -347,29 +348,48 @@ logic [15:0] rs_w0;            // the exponent word's upper half
 logic [31:0] rs_w1;
 logic [31:0] f_rwd;            // the last word
 
-ap040_fpu #(.PIPE(FPU_PIPE)) fpu (
-	.clk(clk), .nreset(nreset), .ce(1'b1),
-	.req(f_req), .op_class(f_class), .opmode(f_opm), .wb_ok(f_wbok),
-	.src_fmt(f_fmt), .src_r(f_srcr), .dst_r(f_dstr),
-	.din(f_din), .din_nice(f_dnice), .din_cls(f_dcls), .din_nrm(f_dcf[14:13]),
-	.done(f_done), .accepted(f_accepted),
-	.known(f_known), .end_ok(f_endok),
-	.unimp(f_unimp), .unsupp(f_unsupp),
-	.exc_req(f_excreq), .exc_vec(f_excvec), .dout(f_dout),
-	.fpcc(f_cc),
-	.cr_sel(f_crsel), .cr_we(f_crwe), .cr_wdata(f_crwd), .cr_rdata(f_crrd),
-	.bsun_req(f_bsun), .bsun_enable(f_bsun_en),
-	.ia_we(f_iawe), .ia_wdata(f_iapc),
-	.fm_sel(f_fmsel), .fm_we(f_fmwe), .fm_wdata(f_din), .fm_rdata(f_fmrd),
-	.fpu_used(f_used), .pbusy(f_pbusy), .pdone(f_pdone),
-	.okv_next(f_okvn), .sel_x(1'b1), .aok_x(f_aok), .bok_x(f_bok),
-	.rfl_next(f_rfln), .sfl_x(f_sfl), .dfl_x(f_dfl), .src_r_n(n_srcr), .dst_r_n(n_dstr),
-	.opmode_n(n_opm), .op_class_n(n_class), .src_fmt_n(n_fmt),
-	.fstate_et(f_xop), .frestore_idle(f_rest_idle),
-	.frestore_we(f_rwe), .frestore_wd({rs_w0, rs_w1, f_rwd}),
-	.unimp_ack(f_uack), .unimp_keep(f_ukeep), .fs_clr(f_fsclr),
-	.fp_reset(f_rst)
-);
+generate if (!NO_FPU) begin : g_fpu
+	ap040_fpu #(.PIPE(FPU_PIPE)) fpu (
+		.clk(clk), .nreset(nreset), .ce(1'b1),
+		.req(f_req), .op_class(f_class), .opmode(f_opm), .wb_ok(f_wbok),
+		.src_fmt(f_fmt), .src_r(f_srcr), .dst_r(f_dstr),
+		.din(f_din), .din_nice(f_dnice), .din_cls(f_dcls), .din_nrm(f_dcf[14:13]),
+		.done(f_done), .accepted(f_accepted),
+		.known(f_known), .end_ok(f_endok),
+		.unimp(f_unimp), .unsupp(f_unsupp),
+		.exc_req(f_excreq), .exc_vec(f_excvec), .dout(f_dout),
+		.fpcc(f_cc),
+		.cr_sel(f_crsel), .cr_we(f_crwe), .cr_wdata(f_crwd), .cr_rdata(f_crrd),
+		.bsun_req(f_bsun), .bsun_enable(f_bsun_en),
+		.ia_we(f_iawe), .ia_wdata(f_iapc),
+		.fm_sel(f_fmsel), .fm_we(f_fmwe), .fm_wdata(f_din), .fm_rdata(f_fmrd),
+		.fpu_used(f_used), .pbusy(f_pbusy), .pdone(f_pdone),
+		.okv_next(f_okvn), .sel_x(1'b1), .aok_x(f_aok), .bok_x(f_bok),
+		.rfl_next(f_rfln), .sfl_x(f_sfl), .dfl_x(f_dfl), .src_r_n(n_srcr), .dst_r_n(n_dstr),
+		.opmode_n(n_opm), .op_class_n(n_class), .src_fmt_n(n_fmt),
+		.fstate_et(f_xop), .frestore_idle(f_rest_idle),
+		.frestore_we(f_rwe), .frestore_wd({rs_w0, rs_w1, f_rwd}),
+		.unimp_ack(f_uack), .unimp_keep(f_ukeep), .fs_clr(f_fsclr),
+		.fp_reset(f_rst)
+	);
+end else begin : g_nofpu
+	// the MC68LC060: the FPU is disabled for good (dfp), every FPU
+	// instruction traps at CHK or EAL, so nothing reaches the unit
+	assign f_accepted = 1'b0;
+	assign f_wbok     = 1'b0;
+	assign f_cc       = 4'd0;
+	assign f_crrd     = 32'd0;
+	assign f_bsun_en  = 1'b0;
+	assign f_fmrd     = 96'd0;
+	assign f_pdone    = 1'b0;
+	assign f_okvn     = 8'hFF;
+	assign f_pbusy    = 1'b0;
+	always_comb begin
+		f_done = 1'b0; f_unimp = 1'b0; f_unsupp = 1'b0; f_excreq = 1'b0;
+		f_excvec = 8'd0; f_dout = 96'd0; f_used = 1'b0; f_xop = 96'd0;
+		f_known = 1'b0; f_endok = 1'b0; f_rfln = 32'd0;
+	end
+end endgenerate
 
 //--------------------------------------------------------------------------
 // state
@@ -553,7 +573,10 @@ function automatic logic [3:0] chk_dx(input logic [15:0] ow, input logic [15:0] 
 	gen  = (ow[15:6] == 10'b1111_0010_00);
 	dgen = gen && (ew[15:13] == 3'b000 || ew[15:13] == 3'b010 || ew[15:13] == 3'b011);
 	x12  = (fm == 3'd2 || fm == 3'd3 || fm == 3'd7);
-	chk_dx = {gen && (em >= 3'd2) && !im && !(ew[15:14] == 2'b11 && (pd || em == 3'd3)),
+	// [3]: the trap waits for the operand's address (a memory operand's EA
+	// uop; FScc <mem>: its COND)
+	chk_dx = {(gen && (em >= 3'd2) && !im && !(ew[15:14] == 2'b11 && (pd || em == 3'd3))) ||
+	          ((ow[15:6] == 10'b1111_0010_01) && (em != 3'd1) && (em >= 3'd2) && !(em == 3'd7 && er >= 3'd2)),
 	          im, pd && dgen && x12, pd && x12};
 endfunction
 // the decodes of the uop in DC2, registered as it enters DC2 (CHK's words
@@ -680,6 +703,9 @@ wire [31:0] dfp_addr = ea_imm ? 32'd0 :
 // the routine reaches an EA uop for this instruction's memory operand
 wire        dfp_mem  = is_gen && (eam >= 3'd2) && !ea_imm &&
                        !(ext[15:14] == 2'b11 && (ea_pd || ea_pi));
+// FScc <mem> (not FTRAPcc, whose mode 7 words are its operand): the address
+// comes with its COND uop
+wire        dfp_scc  = is_cc && !is_fdbcc && (eam >= 3'd2) && !(eam == 3'd7 && ear >= 3'd2);
 
 //--------------------------------------------------------------------------
 // the uop in EX
@@ -940,7 +966,7 @@ always_ff @(posedge clk) begin : seq
 				if (dfp) begin
 					// FPU disabled: nothing reaches the FPU; the trap is at
 					// the EA uop when the operand address comes later
-					if (!eal && dfp_mem) dfr <= K_DFPM;
+					if (!eal && (dfp_mem || dfp_scc) && !(chk_k == K_FLINE || chk_k == K_ILL)) dfr <= K_DFPM;
 				end
 				else if (!chk_pend && (chk_k == K_UNIMPM || chk_k == K_PKM) && !eal)
 					dfr <= chk_k;
@@ -1233,7 +1259,7 @@ function automatic pst_t pred_f(input logic a, input logic ac);
 		else begin
 			r.sx_v = 1'b0; r.sx_kill = 1'b0; r.go = 1'b0; r.done_q = 1'b0; r.dfr = K_NONE;
 			if (dfp) begin
-				if (!eal && dfp_mem) r.dfr = K_DFPM;
+				if (!eal && (dfp_mem || dfp_scc) && !(chk_k == K_FLINE || chk_k == K_ILL)) r.dfr = K_DFPM;
 			end
 			else if (!chk_pend && (chk_k == K_UNIMPM || chk_k == K_PKM) && !eal)
 				r.dfr = chk_k;
@@ -1403,8 +1429,8 @@ function automatic fout_t out_f(input fview_t v);
 	// front of the 32 address flip-flops; sx_addr is a register of its own)
 	case (v.sub)
 		FC_CHK: begin
-			o.xa = (v.dfp && chk_k_ != K_FLCR) ? eaf_ : dfr_addr_;
-			o.xk = (v.dfp && chk_k_ != K_FLCR) ? (v.eal ? 2'd2 : 2'd0) :
+			o.xa = (v.dfp && !(chk_k_ == K_FLCR || chk_k_ == K_FLINE || chk_k_ == K_ILL)) ? eaf_ : dfr_addr_;
+			o.xk = (v.dfp && !(chk_k_ == K_FLCR || chk_k_ == K_FLINE || chk_k_ == K_ILL)) ? (v.eal ? 2'd2 : 2'd0) :
 			       (v.fuse && goc) ? (v.unimp ? 2'd0 : 2'd1) :
 			       chk_pend_ ? 2'd1 :
 			       (chk_k_ == K_UNIMP || chk_k_ == K_FMOVECR || chk_k_ == K_PK) ? 2'd0 :
@@ -1458,8 +1484,10 @@ function automatic fout_t out_f(input fview_t v);
 		o.hs = 1'b1;
 	else case (v.sub)
 		FC_CHK: begin
-			if (v.dfp && chk_k_ != K_FLCR) begin
-				// the FPU disabled: the trap here, or at the EA uop
+			if (v.dfp && !(chk_k_ == K_FLCR || chk_k_ == K_FLINE || chk_k_ == K_ILL)) begin
+				// the FPU disabled: the trap here, or at the EA uop (FScc
+				// <mem>: its COND).  Words the FPU would not recognise keep
+				// their F-line and illegal instruction exceptions (8.2.4)
 				if (v.eal || !dfp_mem_) begin
 					o.xvec = VEC_FLINE; o.xfmt = 4'd4; o.xnext = 1'b1;
 				end
@@ -1538,7 +1566,11 @@ function automatic fout_t out_f(input fview_t v);
 		end
 		FC_MVR: if (!v.r.mvr_ok) o.hs = 1'b1;
 		FC_COND, FC_DBCC: begin
-			if (!is_bcc_l_) begin
+			if (v.r.dfr == K_DFPM) begin
+				// FScc <mem>, the FPU disabled: its operand's address
+				o.xvec = VEC_FLINE; o.xfmt = 4'd4; o.xnext = 1'b1;
+			end
+			else if (!is_bcc_l_) begin
 				// FScc, FDBcc, FTRAPcc: unimplemented on the 68060.  The
 				// frame's address: FScc's operand address (none for Dn),
 				// FDBcc's extension word and displacement, FTRAPcc none

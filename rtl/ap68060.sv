@@ -26,7 +26,8 @@ module ap68060
 	parameter bit         EARLY_RES    = 0,      // (unused here: AG's early results are not built)
 	parameter bit         DC1_ATC      = 1,      // (unused here: the DMU's DT stage compares the tags)
 	parameter bit         SKID         = 1,      // the skid register in front of AG (65 MHz timing: +400 ALMs)
-	parameter logic [7:0] PCR_REV      = 8'h06   // PCR revision number
+	parameter logic [7:0] PCR_REV      = 8'h06,  // PCR revision number
+	parameter bit         NO_FPU       = 0       // the MC68LC060: no FPU, FPU instructions take the disabled exception
 )(
 
 	input  logic        clk,
@@ -84,7 +85,10 @@ module ap68060
 	// debug / test
 	output logic [31:0] dbg_pc,
 	output logic        dbg_retire,
-	output logic        dbg_halted
+	output logic        dbg_halted,
+	// system glue: VBR (the NMI vector's address) and CACR (cache enables)
+	output logic [31:0] dbg_vbr,
+	output logic [31:0] dbg_cacr
 );
 
 // reset synchronizer: two bus clocks (RSTI is synchronized to the clock-
@@ -255,6 +259,8 @@ logic  [4:0] exc_ssp;
 logic        ucond_v, ucond;
 logic [15:0] sr;
 logic [31:0] vbr, cacr;
+assign dbg_vbr  = vbr;
+assign dbg_cacr = cacr;
 logic        bc_clr;
 logic  [2:0] sfc, dfc;
 logic        kill_now, adv_ag, lk_abandon;
@@ -302,7 +308,7 @@ uop_t        uq0;
 logic        uo_rdy;
 
 ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
-                  .PCR_REV(PCR_REV)) be (
+                  .PCR_REV(PCR_REV), .NO_FPU(NO_FPU)) be (
 	.clk(clk), .nreset(nrst_be),
 	.in_v(uq_n != 2'd0), .in_eb(uq_eb), .in_u(uq0), .in_rdy(uo_rdy), .uq_n(uq_n),
 	.nx_b0(nx_b0), .nx_i0(nx_i0), .nx_b1(nx_b1), .nx_i1(nx_i1),
