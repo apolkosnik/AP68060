@@ -280,7 +280,7 @@ ap68060_atc iatc (
 	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc[10]),
 	.la(iatc_flush_page ? iatc_flush_la : fpc),
 	.fc2(iatc_flush_page ? iatc_flush_fc2 : smode),
-	.hit(atc_hit), .ent(atc_e),
+	.hit(atc_hit), .ent(atc_e), .hv(), .wpa(),
 	.wr(iatc_wr), .wla(iatc_wla), .wfc2(iatc_wfc2), .went(iatc_went),
 	.flush_all(iatc_flush_all), .flush_page(iatc_flush_page),
 	.flush_nonglobal(iatc_flush_ng)
@@ -396,9 +396,13 @@ logic        x_ok, x_flt, x_walk, x_cach, x_hit, x_lb;
 logic [31:0] x_pa;
 logic  [1:0] x_cm, x_upa, x_way;
 logic [31:0] x_chunk;
+logic  [3:0] x_mj;
 // the ITT matches are formed in F0 (the TTRs change only by MOVEC, which
 // serializes and refetches), so F1 starts from them
 logic        f1_tt0, f1_tt1;
+// ... and whether translation is on (TCR.E, MDIS), taken with them: F1's
+// translation and its tag compare select both start from flip-flops
+logic        f1_tce;
 always_comb begin
 	logic tt0, tt1, use_t;
 	logic [20:0] tg;
@@ -411,7 +415,7 @@ always_comb begin
 		x_cm  = tt0 ? itt0[6:5] : itt1[6:5];
 		x_upa = tt0 ? itt0[9:8] : itt1[9:8];
 	end
-	else if (!tc_e) begin
+	else if (!f1_tce) begin
 		// the default translation: the TCR's DCI and DUI (MC68060UM 4.1.2)
 		x_ok  = 1'b1;
 		x_cm  = tc[4:3];
@@ -430,18 +434,21 @@ always_comb begin
 	// TTR or no translation) and the ATC's, and the translation selects
 	// the outcome: it stays off the front of the compare (the ATC's
 	// address matters only with a hit, x_cach is clear without one)
-	use_t  = !(tt0 || tt1) && tc_e;
+	use_t  = !(tt0 || tt1) && f1_tce;
 	tg     = {f1_e.pa[19:1], tc_p ? f1_pc[12] : f1_e.pa[0], f1_pc[11]};
 	x_hit  = 1'b0;
 	x_way  = 2'd0;
-	for (int i = 3; i >= 0; i--)
-		if (ivf_q[i] && (use_t ? (ct[i][20:0] == tg) : (ct[i][20:0] == f1_pc[31:11]))) begin
-			x_hit = 1'b1; x_way = 2'(i);
-		end
+	for (int i = 3; i >= 0; i--) begin
+		x_mj[i] = ivf_q[i] && (use_t ? (ct[i][20:0] == tg) : (ct[i][20:0] == f1_pc[31:11]));
+		if (x_mj[i]) begin x_hit = 1'b1; x_way = 2'(i); end
+	end
 	x_hit  = x_hit && x_cach;
 	x_lb   = x_cach && lb_v && (use_t ? (lb_pa == {tg, f1_pc[10:4]}) : (lb_pa == f1_pc[31:4]));
-	x_chunk = x_lb ? m_line[127 - 32 * f1_pc[3:2] -: 32]
-	               : cd[x_way][127 - 32 * f1_pc[3:2] -: 32];
+	// (the chunk by the one-hot match, AND-OR: no encoded way on the path;
+	// at most one way holds a line)
+	x_chunk = '0;
+	for (int i = 0; i < 4; i++) if (x_mj[i]) x_chunk = x_chunk | cd[i][127 - 32 * f1_pc[3:2] -: 32];
+	if (x_lb) x_chunk = m_line[127 - 32 * f1_pc[3:2] -: 32];
 end
 wire f1_go      = f1_v && !redir_any;
 wire f1_deliver = f1_go && (x_hit || x_lb);
@@ -510,7 +517,7 @@ always_ff @(posedge clk) begin
 		f1_wff <= 1'b0;
 		wf_v  <= 1'b0; wf_ok <= 1'b0; wf_fc2 <= 1'b0; wf_la <= '0; wf_e <= '0;
 		if_cause <= '0;
-		f1_tt0 <= 1'b0; f1_tt1 <= 1'b0;
+		f1_tt0 <= 1'b0; f1_tt1 <= 1'b0; f1_tce <= 1'b0;
 		f1_btok <= 1'b0;
 		fras_tp <= '0; fras_n <= '0;
 		f2_b  <= '0; f2_t <= '0; f3_b <= '0; f3_t <= '0;
@@ -641,6 +648,7 @@ always_ff @(posedge clk) begin
 			f1_s   <= smode;
 			f1_tt0 <= ttr_hit(itt0, fpc, smode);
 			f1_tt1 <= ttr_hit(itt1, fpc, smode);
+			f1_tce <= tc_e;
 			f1_dem <= fnew;
 			begin
 				// the ATC, else the page's last walk (formed here, as the

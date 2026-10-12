@@ -450,6 +450,68 @@ dfp5:   fnop
         move.l  (DFPCNT).l,d0
         check   d0,6,432
 
+;------------------------------------------- FMOVE OUT overflow: EXC.INEX2
+; OVFL (vector 53, taken by the 060 even when disabled) sets EXC.INEX2 only
+; when significand bits are lost; accrued INEX comes with the overflow
+; either way (MC68060UM 6.6.4, 6.6.7; WinUAE SoftFloat roundAndPackFloat32/64)
+        clr.l   (COUNT+4*5).l
+        fmove.l #0,fpsr
+        fmove.x ovx_s,fp0              ; exactly 2^128
+        fmove.s fp0,d0
+        fmove.l fpsr,d1
+        move.l  d1,d2
+        and.l   #$ff00,d1
+        check   d1,$1000,450           ; OVFL, not INEX2
+        and.l   #$f8,d2
+        check   d2,$48,451             ; accrued OVFL and INEX
+        fmove.l #0,fpsr
+        fmove.x ovx_d,fp0              ; exactly 2^1024
+        fmove.d fp0,($3520).l
+        fmove.l fpsr,d1
+        and.l   #$ff00,d1
+        check   d1,$1000,452
+        fmove.l #0,fpsr
+        fmove.x ovx_si,fp0             ; 2^128 (1 + 2^-63): bits lost
+        fmove.s fp0,d0
+        fmove.l fpsr,d1
+        and.l   #$ff00,d1
+        check   d1,$1200,453           ; OVFL and INEX2
+        move.l  (COUNT+4*5).l,d0
+        check   d0,3,454               ; three overflow exceptions
+        fmove.l #0,fpsr
+;------------------------------------- underflow decided before rounding
+; a tiny intermediate result that rounds up to the smallest normal number
+; still underflows (MC68060UM 6.4.1, 6.6.5; SoftFloat 68K): UNFL and INEX2,
+; vector 51 (taken by the 060 whatever the enables) at the next FPU
+; instruction, the destination register unchanged
+        clr.l   (COUNT+4*3).l
+        fmove.x unf_small_s,fp0        ; 2^-152
+        fmove.x unf_min_s,fp1          ; -2^-126
+        fmove.l #0,fpsr
+        fsadd.x fp1,fp0                ; single: -2^-126 + -0.. rounds to -2^-126
+        fmove.l fpsr,d0
+        move.l  (COUNT+4*3).l,d1
+        check   d1,1,460               ; vector 51
+        and.l   #$0a00,d0
+        check   d0,$0a00,461           ; UNFL and INEX2
+        fmovem.x fp0,(COPY).l
+        move.l  (COPY).l,d0
+        check   d0,$3f670000,462       ; FP0 unchanged
+        clr.l   (COUNT+4*3).l
+        fmove.x unf_small_d,fp0        ; 2^-1077
+        fmove.x unf_min_d,fp1          ; -2^-1022
+        fmove.l #0,fpsr
+        fdadd.x fp1,fp0
+        fmove.l fpsr,d0
+        move.l  (COUNT+4*3).l,d1
+        check   d1,1,463
+        and.l   #$0a00,d0
+        check   d0,$0a00,464
+        fmovem.x fp0,(COPY).l
+        move.l  (COPY).l,d0
+        check   d0,$3bca0000,465
+        fmove.l #0,fpsr
+
         check   sp,$e000,99
         move.w  #$600d,($f102).l
         bra.s   *
@@ -539,3 +601,12 @@ arith_rte:
 fail:
         move.w  #$bad0,($f102).l
         bra.s   *
+
+        cnop    0,4
+ovx_s:  dc.l    $407f0000,$80000000,$00000000
+ovx_d:  dc.l    $43ff0000,$80000000,$00000000
+ovx_si: dc.l    $407f0000,$80000000,$00000001
+unf_small_s: dc.l $3f670000,$80000000,$00000000
+unf_min_s:   dc.l $bf810000,$80000000,$00000000
+unf_small_d: dc.l $3bca0000,$80000000,$00000000
+unf_min_d:   dc.l $bc010000,$80000000,$00000000

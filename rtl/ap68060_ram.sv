@@ -68,16 +68,27 @@ module ap68060_tdp #(
 	input  logic [DW-1:0] wd_b,
 	output logic [DW-1:0] q_b
 );
+	// A read returns the word as written at the edge that registered its
+	// address (a write to the same word at that edge included).  The RAM
+	// itself reads the old word; the write is laid over it by one
+	// multiplexer whose select is a flip-flop (Quartus's inferred bypass
+	// for this put three logic levels in front of the users' compares).
 	(* ramstyle = "M10K, no_rw_check" *) logic [DW-1:0] mem [0:(1<<AW)-1];
-	logic [AW-1:0] ra, rb;
+	logic [DW-1:0] qa_r, qb_r, ba_d, bb_d;
+	logic          ba_v, bb_v;
 	always_ff @(posedge clk) begin
 		if (we_a) mem[addr_a] <= wd_a;
 		if (we_b) mem[addr_b] <= wd_b;
-		ra <= addr_a;
-		rb <= addr_b;
+		qa_r <= mem[addr_a];
+		qb_r <= mem[addr_b];
+		// (port B's write wins a same-word collision, as in the old order)
+		ba_v <= (we_a && addr_a == addr_a) || (we_b && addr_b == addr_a);
+		ba_d <= (we_b && addr_b == addr_a) ? wd_b : wd_a;
+		bb_v <= (we_b) || (we_a && addr_a == addr_b);
+		bb_d <= we_b ? wd_b : wd_a;
 	end
-	assign q_a = mem[ra];
-	assign q_b = mem[rb];
+	assign q_a = ba_v ? ba_d : qa_r;
+	assign q_b = bb_v ? bb_d : qb_r;
 endmodule
 
 module ap68060_lutram #(

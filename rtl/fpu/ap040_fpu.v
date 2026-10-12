@@ -1434,21 +1434,32 @@ always @(posedge clk) begin
 									sh_ret <= F_PACKS;
 									fst <= F_SHR;
 								end
-								else begin
-								mr = {1'b0, a_m[63:40]} +
-								     {24'd0, round_up(a_m[40], a_m[39],
-								                      (a_m[38:0] != 0), a_s)};
+								else begin : pk_s_rnd
+								// (the increment, the exponent and the overflow
+								// test are formed for both outcomes beside the
+								// rounding decision, which selects: a timing path)
+								reg up, cy, ov0, ov1;
+								reg [24:0] mi;
+								up = round_up(a_m[40], a_m[39], (a_m[38:0] != 0), a_s);
+								mi = {1'b0, a_m[63:40]} + 25'd1;
+								cy = up && mi[24];
+								mr = up ? mi : {1'b0, a_m[63:40]};
 								inx = a_m[39:0] != 0;
-								eun = a_e + {16'd0, mr[24]};       // renorm on carry
-								if (mr[24]) mr = {1'b0, 1'b1, 23'd0};
-								if ($signed({1'b0, eun}) - 18'sd16383 > 18'sd127) begin
+								ov0 = $signed({1'b0, a_e}) - 18'sd16383 > 18'sd127;
+								ov1 = $signed({1'b0, a_e}) - 18'sd16382 > 18'sd127;
+								eun = a_e + {16'd0, cy};           // renorm on carry
+								if (cy) mr = {1'b0, 1'b1, 23'd0};
+								if (cy ? ov1 : ov0) begin
 									tomax = (rnd_mode == 2'b01) ||
 									        (rnd_mode == 2'b10 && !a_s) ||
 									        (rnd_mode == 2'b11 && a_s);
 									dout <= tomax ? {a_s, 8'hFE, 23'h7FFFFF, 64'd0} :
 									                 {a_s, 8'hFF, 23'd0, 64'd0};
+									// (EXC.INEX2 only for bits actually lost:
+									// accrued INEX comes with the overflow, 6.6.7)
 									fpsr[12] <= 1; fpsr[6] <= 1;
-									fpsr[9] <= 1;  fpsr[3] <= 1;
+									if (inx) fpsr[9] <= 1;
+									fpsr[3] <= 1;
 								end
 								else begin : pk_s_enc
 									reg [16:0] enc;
@@ -1486,21 +1497,29 @@ always @(posedge clk) begin
 									sh_ret <= F_PACKS;
 									fst <= F_SHR;
 								end
-								else begin
-								mr = {1'b0, a_m[63:11]} +
-								     {53'd0, round_up(a_m[11], a_m[10],
-								                      (a_m[9:0] != 0), a_s)};
+								else begin : pk_d_rnd
+								reg up, cy, ov0, ov1;
+								reg [53:0] mi;
+								up = round_up(a_m[11], a_m[10], (a_m[9:0] != 0), a_s);
+								mi = {1'b0, a_m[63:11]} + 54'd1;
+								cy = up && mi[53];
+								mr = up ? mi : {1'b0, a_m[63:11]};
 								inx = a_m[10:0] != 0;
-								eun = a_e + {16'd0, mr[53]};
-								if (mr[53]) mr = {1'b0, 1'b1, 52'd0};
-								if ($signed({1'b0, eun}) - 18'sd16383 > 18'sd1023) begin
+								ov0 = $signed({1'b0, a_e}) - 18'sd16383 > 18'sd1023;
+								ov1 = $signed({1'b0, a_e}) - 18'sd16382 > 18'sd1023;
+								eun = a_e + {16'd0, cy};
+								if (cy) mr = {1'b0, 1'b1, 52'd0};
+								if (cy ? ov1 : ov0) begin
 									tomax = (rnd_mode == 2'b01) ||
 									        (rnd_mode == 2'b10 && !a_s) ||
 									        (rnd_mode == 2'b11 && a_s);
 									dout <= tomax ? {a_s, 11'h7FE, 52'hFFFFFFFFFFFFF, 32'd0} :
 									                 {a_s, 11'h7FF, 52'd0, 32'd0};
+									// (EXC.INEX2 only for bits actually lost:
+									// accrued INEX comes with the overflow, 6.6.7)
 									fpsr[12] <= 1; fpsr[6] <= 1;
-									fpsr[9] <= 1;  fpsr[3] <= 1;
+									if (inx) fpsr[9] <= 1;
+									fpsr[3] <= 1;
 								end
 								else begin : pk_d_enc
 									reg [16:0] enc;
@@ -2356,7 +2375,11 @@ always @(posedge clk) begin
 					// (decided for the exponent with and without the rounding
 					// carry side by side, the carry selecting: a timing path)
 					ovf = (up && mi[64]) ? (e_w >= emax) : (e_w > emax);
-					unf = (up && mi[64]) ? (e_w + 18'sd1 < emin) : (e_w < emin);
+					// underflow from the intermediate result, before rounding
+					// (MC68060UM 6.4.1, 6.6.5; SoftFloat's 68K roundAndPack:
+					// zExp < expOffset + 1): a rounding carry into the
+					// normal range does not undo it
+					unf = (e_w < emin);
 					// WBTEMP capture for a possible BUSY frame: rounded for
 					// OVFL and the plain inexact path, unrounded for UNFL
 					wb_s   <= a_s;
@@ -2701,7 +2724,10 @@ always @(posedge clk) begin
 				// minimum exponent, matching softfloat's packFloatx80 of
 				// (expOffset + 1).  Rounding that carries into the integer
 				// bit has reached the next exponent up either way.
-				if (mr[64]) begin
+				// (the class and exponent decided beside the rounding: an
+				// incremented significand that does not carry out is never
+				// zero, so the result is zero only unrounded with mk zero)
+				if (up && mi[64]) begin
 					a_m <= 64'h8000_0000_0000_0000;
 					a_e <= e_w[16:0] + 17'd1;
 					fst <= F_WB;
@@ -2710,8 +2736,8 @@ always @(posedge clk) begin
 					// (a zero takes a_m = 0 as well: the zero test only
 					// decides the class and exponent)
 					a_m <= mr[63:0];
-					if (mr[63:0] == 64'd0) a_t <= T_ZERO;
-					else a_e <= (mr[63] || e_w != 18'sd1) ? e_w[16:0] : 17'd0;
+					if (!up && mk[63:0] == 64'd0) a_t <= T_ZERO;
+					else a_e <= ((up ? mi[63] : mk[63]) || e_w != 18'sd1) ? e_w[16:0] : 17'd0;
 					fst <= F_WB;
 				end
 			end

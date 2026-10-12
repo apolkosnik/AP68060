@@ -21,6 +21,11 @@
 //   $F150 word  IPL = bits 2:0, falls to bits 6:4 after bits 15:8 clocks  //
 //   $F154 word  arm a one-shot bus error on an instruction fetch at the   //
 //               written address (0 disarms)                               //
+//   $F15C word  arm a one-shot TEA on the next LPSTOP broadcast            //
+//   $F168 word  reset the processor this many clocks later (RSTI for 12  //
+//               clocks), counted in $F15A with the halt resets           //
+//   $F15E word  arm a one-shot TEA on the next data read of the long word  //
+//               at the written address (low 16 bits)                       //
 //   $F158 word  the number of times the bench answers a halted processor  //
 //               (PST $1C) with a reset: it checks the halt for 64 clocks  //
 //               (PST $1C, no bus cycle, BR negated) then pulses RSTI;     //
@@ -104,13 +109,13 @@ assign bclk_en = bclk2 ? bclk_ph : 1'b1;
 
 // bus
 logic [31:0] a_o, d_o, d_mem;
-logic        a_oe, d_oe, rw_n, ciout_n, lock_n, locke_n, ts_n, tip_n;
+logic        a_oe, d_oe, rw_n, ciout_n, lock_n, locke_n, ts_n, tip_n, lock_oe;
 logic  [1:0] siz, tt, tln, upa;
 logic  [2:0] tm;
 logic        ta_n, tea_n, tra_n, tci_n, tbi_n, cla_n, avec_n;
 logic        br_n, bb_n_o, bb_oe, btt_n_o, btt_oe, rsto_n;
 logic  [3:0] bs_n;
-logic        sas_n, tip_oe;
+logic        sas_n, tip_oe, sas_oe;
 logic  [2:0] ipl_lvl;
 // the reset modes
 logic        md_ign, md_native, md_hold, md_cla, md_junk, md_bgr;
@@ -178,8 +183,8 @@ ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EAR
 	.cdis_n(!pins_r[0]), .mdis_n(!pins_r[1]), .ipend_n(ipend_n), .pst(pst),
 	.d_i(d_pins), .d_o(d_o), .d_oe(d_oe),
 	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
-	.ciout_n(ciout_n), .lock_n(lock_n), .locke_n(locke_n),
-	.ts_n(ts_n), .tip_n(tip_n), .tip_oe(tip_oe), .sas_n(sas_n),
+	.ciout_n(ciout_n), .lock_n(lock_n), .locke_n(locke_n), .lock_oe(lock_oe),
+	.ts_n(ts_n), .tip_n(tip_n), .tip_oe(tip_oe), .sas_n(sas_n), .sas_oe(sas_oe),
 	.ta_n(ta_n), .tea_n(tea_n), .tra_n(tra_n),
 	.tci_n(tci_n), .tbi_n(tbi_n), .cla_n(cla_n), .ipl_n(ipl_pins), .avec_n(avec_n),
 	.br_n(br_n), .bg_n(am_bg_n), .bgr_n(am_bgr_n),
@@ -207,7 +212,7 @@ logic  [2:0] ev_tm;
 m68060_bus_slave #(.AW(20)) mem (
 	.clk(clk), .nreset(rsti_n), .bclk_en(bclk_en),
 	.a(bus_a), .d_cpu(bus_dw), .d_oe_cpu(d_oe), .rw_n(bus_rw_n), .siz(bus_siz), .bs_n(bs_n),
-	.tt(bus_tt), .tm(bus_tm), .ts_n(bus_ts_n), .sas_n(a_oe ? sas_n : 1'b1), .cpu_xfer(!am_drive),
+	.tt(bus_tt), .tm(bus_tm), .ts_n(bus_ts_n), .sas_n(sas_oe ? sas_n : 1'b1), .cpu_xfer(!am_drive),
 	.d_mem(d_mem), .ta_n(ta_n), .tea_n(tea_n), .tra_n(tra_n), .tbi_n(tbi_n), .tci_n(tci_n),
 	.cla_n(cla_n), .avec_n(avec_n),
 	.m_ign(md_ign), .m_native(md_native), .m_hold(md_hold), .m_cnt(md_cnt),
@@ -226,6 +231,89 @@ always_ff @(posedge clk)
 		errors <= errors + 1;
 		$display("FAIL: bus protocol (cycle %0d, pc=%h)", cycles, dbg_pc);
 	end
+
+// internal consistency checks of the core (simulation only)
+always_ff @(posedge clk)
+	if (dut.dmu.sim_xchk) begin
+		errors <= errors + 1;
+		$display("FAIL: DMU consistency check (cycle %0d)", cycles);
+	end
+
+// bus pin release (sampled at the bus clock edges): LOCK and LOCKE
+// asserted when the address bus is released are driven negated for one bus
+// clock, then three-stated, else three-stated with it (2.3.7, 2.3.8); BB and
+// TIP are driven negated for one CLK (not a bus clock) before they are
+// three-stated (2.4.2, 7.1, 7.13); SAS is driven negated for a bus clock
+// after the address bus is released, then three-stated (2.4.3); a reset
+// in explicit ownership goes through the end of tenure, one BTT bus clock
+// asserted (7.11.2)
+logic p_aoe, p_lkoe, p_lk, p_bboe, p_bb, p_tipoe, p_tip, rs_own, p_rsti, p_sasoe;
+int   rs_btt;
+always_ff @(posedge clk) begin
+	p_rsti <= rsti_n;
+	// (BB and TIP: every CLK)
+	p_bboe <= bb_oe; p_bb <= !bb_n_o; p_tipoe <= tip_oe; p_tip <= !tip_n;
+	if ((p_bboe && p_bb && !bb_oe) || (p_tipoe && p_tip && !tip_oe)) begin
+		errors <= errors + 1;
+		$display("FAIL: BB or TIP three-stated while asserted (cycle %0d)", cycles);
+	end
+	if (p_rsti && !rsti_n) begin
+		rs_own <= bb_oe && !bb_n_o;
+		rs_btt <= 0;
+	end
+	if (bclk_en) begin
+		p_aoe <= a_oe; p_lkoe <= lock_oe; p_lk <= lock_oe && (!lock_n || !locke_n);
+		p_sasoe <= sas_oe;
+		if (!p_aoe && a_oe && sas_oe) begin
+			errors <= errors + 1;
+			$display("FAIL: SAS driven in the first TS clock of a tenure (cycle %0d)", cycles);
+		end
+		if (p_aoe && !a_oe && !(sas_oe && sas_n)) begin
+			errors <= errors + 1;
+			$display("FAIL: SAS not driven negated after the bus release (cycle %0d)", cycles);
+		end
+		if (!p_aoe && !a_oe && p_sasoe && sas_oe) begin
+			errors <= errors + 1;
+			$display("FAIL: SAS driven two bus clocks after the bus release (cycle %0d)", cycles);
+		end
+		if (p_aoe && !a_oe) begin
+			if (p_lk && !(lock_oe && lock_n && locke_n)) begin
+				errors <= errors + 1;
+				$display("FAIL: LOCK/LOCKE not driven negated after the bus release (cycle %0d)", cycles);
+			end
+			if (!p_lk && lock_oe) begin
+				errors <= errors + 1;
+				$display("FAIL: LOCK/LOCKE driven after the bus release (cycle %0d)", cycles);
+			end
+		end
+		if (!p_aoe && !a_oe && p_lkoe && lock_oe) begin
+			errors <= errors + 1;
+			$display("FAIL: LOCK/LOCKE driven two bus clocks after the bus release (cycle %0d)", cycles);
+		end
+		if (!rsti_n && btt_oe && !btt_n_o) rs_btt <= rs_btt + 1;
+	end
+	if (!p_rsti && rsti_n && cycles > 20 && rs_btt != (rs_own ? 1 : 0)) begin
+		errors <= errors + 1;
+		$display("FAIL: reset %s explicit ownership with %0d BTT bus clocks (cycle %0d)",
+		         rs_own ? "in" : "out of", rs_btt, cycles);
+	end
+end
+
+// ... and those release intervals are whole bus clocks, counted in CLKs
+// (a release that starts between bus clock edges is too short)
+int lkneg_n, sasneg_n;
+always_ff @(posedge clk) begin
+	lkneg_n  <= (lock_oe && lock_n && locke_n && !a_oe) ? lkneg_n + 1 : 0;
+	sasneg_n <= (sas_oe && sas_n && !a_oe) ? sasneg_n + 1 : 0;
+	if (!(lock_oe && !a_oe) && lkneg_n != 0 && lkneg_n < (bclk2 ? 2 : 1)) begin
+		errors <= errors + 1;
+		$display("FAIL: LOCK/LOCKE driven negated %0d CLK, less than a bus clock (cycle %0d)", lkneg_n, cycles);
+	end
+	if (!(sas_oe && !a_oe) && sasneg_n != 0 && sasneg_n < (bclk2 ? 2 : 1)) begin
+		errors <= errors + 1;
+		$display("FAIL: SAS driven negated %0d CLK, less than a bus clock (cycle %0d)", sasneg_n, cycles);
+	end
+end
 
 // the processor starts no transfer while another master owns the bus
 always_ff @(posedge clk)
@@ -697,6 +785,10 @@ always_ff @(posedge clk) begin
 end
 int          cap;
 
+logic lpstea_arm;
+logic [15:0] trst_cnt;
+logic        dtea_arm;
+logic [15:0] dtea_a;
 always_comb begin
 	tea_req = 1'b0;
 	if (xfer_v) begin
@@ -708,8 +800,33 @@ always_comb begin
 			tea_req = 1'b1;
 		if (wberr_arm && (xfer_tm == 3'd3 || xfer_tm == 3'd4))
 			tea_req = 1'b1;
+		if (lpstea_arm && xfer_tt == 2'd3 && xfer_tm == 3'd0 && !xfer_rd)
+			tea_req = 1'b1;
+		if (dtea_arm && xfer_rd && xfer_tt == 2'd0 && (xfer_tm == 3'd1 || xfer_tm == 3'd5) &&
+		    xfer_addr[15:2] == dtea_a[15:2])
+			tea_req = 1'b1;
 	end
 end
+// $F15C: a one-shot TEA on the next LPSTOP broadcast (spent by it)
+always_ff @(posedge clk)
+	if (!rsti_n) lpstea_arm <= 1'b0;
+	else if (ev && !ev_rd && !ev_err && ev_tt == 2'd0 && ev_addr[15:0] == 16'hF15C) lpstea_arm <= 1'b1;
+	else if (ev && ev_tt == 2'd3 && ev_tm == 3'd0 && !ev_rd) lpstea_arm <= 1'b0;
+// $F168: reset the processor the written number of clocks later
+always_ff @(posedge clk)
+	if (!rsti_n) trst_cnt <= '0;
+	else if (ev && !ev_rd && !ev_err && ev_tt == 2'd0 && ev_addr[15:0] == 16'hF168)
+		trst_cnt <= ev_word(ev_addr, ev_data);
+	else if (trst_cnt != 16'd0) trst_cnt <= trst_cnt - 16'd1;
+// $F15E: a one-shot TEA on the next data read of the long word at the
+// written address (spent by it)
+always_ff @(posedge clk)
+	if (!rsti_n) begin dtea_arm <= 1'b0; dtea_a <= '0; end
+	else if (ev && !ev_rd && !ev_err && ev_tt == 2'd0 && ev_addr[15:0] == 16'hF15E) begin
+		dtea_arm <= 1'b1;
+		dtea_a   <= ev_word(ev_addr, ev_data);
+	end
+	else if (ev && ev_rd && ev_err && ev_addr[15:2] == dtea_a[15:2]) dtea_arm <= 1'b0;
 
 always_ff @(posedge clk) begin
 	cycles <= cycles + 1;
@@ -1023,8 +1140,10 @@ int pin_from;
 initial if (!$value$plusargs("pintrace=%d", pin_from)) pin_from = -1;
 always_ff @(posedge clk)
 	if (pin_from >= 0 && cycles >= pin_from && cycles < pin_from + 60)
-		$display("%8d PIN bclk=%b a=%08x rw=%b siz=%0d ts=%b sas=%b ta=%b tea=%b tra=%b tbi=%b cla=%b d_oe=%b d=%08x | biu st=%0d beat=%0d ign=%0d | slv busy=%b beat=%0d ic=%0d exp_sas=%b",
-		         cycles, bclk_en, bus_a, bus_rw_n, bus_siz, bus_ts_n, sas_n, ta_n, tea_n, tra_n, tbi_n, cla_n,
+		$display("%8d PIN bclk=%b rsti=%b bb=%s tip=%s btt=%s lock=%s a_oe=%b a=%08x rw=%b siz=%0d ts=%b sas=%b ta=%b tea=%b tra=%b tbi=%b cla=%b d_oe=%b d=%08x | biu st=%0d beat=%0d ign=%0d | slv busy=%b beat=%0d ic=%0d exp_sas=%b",
+		         cycles, bclk_en, rsti_n, bb_oe ? (bb_n_o ? "1" : "0") : "z", tip_oe ? (tip_n ? "1" : "0") : "z",
+		         btt_oe ? (btt_n_o ? "1" : "0") : "z", lock_oe ? (lock_n ? "1" : "0") : "z", a_oe,
+		         bus_a, bus_rw_n, bus_siz, bus_ts_n, sas_n, ta_n, tea_n, tra_n, tbi_n, cla_n,
 		         d_oe, d_o, dut.biu.st, dut.biu.beat, dut.biu.ign, mem.busy, mem.beat, mem.ic, mem.exp_sas);
 
 // +engtrace=<from>: the DMU engine's bus handshake for 80 cycles
@@ -1178,6 +1297,14 @@ initial begin
 	repeat (8) @(posedge clk);
 	rsti_n = 1'b1;
 	while (result == 0 && cycles < timeout) begin
+		if (trst_cnt == 16'd1) begin
+			// the program's timed reset ($F168): RSTI for 12 clocks
+			rsti_n = 1'b0;
+			repeat (12) @(posedge clk);
+			halts++;
+			mem.mem[16'hF158 >> 2] = {mem.mem[16'hF158 >> 2][31:16], 16'(halts)};
+			rsti_n = 1'b1;
+		end
 		if (dbg_halted) begin
 			if (halts >= int'(halt_arm)) break;
 			halt_reset();

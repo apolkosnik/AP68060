@@ -202,7 +202,12 @@ module ap68060_dmu
 
 localparam logic [2:0] MT_CINV = 3'd1, MT_CPUSH = 3'd2, MT_PFLUSH = 3'd3, MT_PLPA = 3'd4;
 
-wire tc_e  = tc[15] && !mdis;
+// MDIS, sampled once here: DC1's registered translation decision (m1_tp)
+// is formed from the pin a clock ahead, so the two always agree
+logic mdis_q = 1'b0;
+always_ff @(posedge clk) mdis_q <= mdis;
+wire tc_e   = tc[15] && !mdis_q;
+wire tc_e_n = tc[15] && !mdis;      // (tc_e at the next clock)
 wire tc_p  = tc[14];
 wire dc_en = cacr[31] && !cdis;
 wire dc_nad = cacr[30];           // no allocate
@@ -407,6 +412,8 @@ logic [20:0] twd_b;
 
 // data: write port for stores and fills, read port for DC1 / engine
 logic [127:0] dq1;                 // DC2's copy of its hit way's line (fast path)
+logic [127:0] dqc, dqh;            // ... DC1's line, every clock; DC2's own, held
+logic         dq_new;              // DC2 took a new uop at the last edge: dqc
 xres_t        x_dc1;               // DC1's translation and lookup
 logic [127:0] dq_rn [4];           // unregistered output (engine)
 logic         dw;
@@ -464,33 +471,38 @@ endgenerate
 // it are merged in (the RAM output misses the writes landing at the last
 // edge and this one), so a load after a store to its line stays on the
 // fast path
+// (Both are captured every clock and the registered advance picks: the
+// stall chain behind adv_dc1 is too late for a 128-bit enable.)
+// (the line by the one-hot match, AND-OR, and the merges by it too: no
+// encoded way on the path; without a match the line is not used)
 always_ff @(posedge clk) begin
-	logic [127:0] l;
-	if (adv_dc1) begin
-		l = dq_rn[x_dc1.way];
-		if (dwq && dwq_src == 2'd0 && dwq_set == m1.a[10:4] && dwq_way == x_dc1.way)
-			l = mrg(l, dwq_be, dwq_word);
-		if (dw && dw_src == 2'd0 && dw_set == m1.a[10:4] && dw_way == x_dc1.way)
-			l = mrg(l, dw_be, dw_word);
-		if (wfm && wfm_set == m1.a[10:4] && wfm_way == x_dc1.way)
-			l = mrg(l, wfm_be, wfm_word);
-		dq1 <= l;
-	end
-	else begin
-		l = dq1;
-		if (dw && dw_src == 2'd0 && dw_set == m2.r.a[10:4] && dw_way == m2.x.way)
-			l = mrg(l, dw_be, dw_word);
-		if (wfm && wfm_set == m2.r.a[10:4] && wfm_way == m2.x.way)
-			l = mrg(l, wfm_be, wfm_word);
-		dq1 <= l;
-	end
+	logic [127:0] l, h;
+	l = '0;
+	for (int j = 0; j < 4; j++) if (d1_mj[j]) l = l | dq_rn[j];
+	if (dwq && dwq_src == 2'd0 && dwq_set == m1.a[10:4] && d1_mj[dwq_way])
+		l = mrg(l, dwq_be, dwq_word);
+	if (dw && dw_src == 2'd0 && dw_set == m1.a[10:4] && d1_mj[dw_way])
+		l = mrg(l, dw_be, dw_word);
+	if (wfm && wfm_set == m1.a[10:4] && d1_mj[wfm_way])
+		l = mrg(l, wfm_be, wfm_word);
+	dqc <= l;
+	h = dq1;
+	if (dw && dw_src == 2'd0 && dw_set == m2.r.a[10:4] && dw_way == m2.x.way)
+		h = mrg(h, dw_be, dw_word);
+	if (wfm && wfm_set == m2.r.a[10:4] && wfm_way == m2.x.way)
+		h = mrg(h, wfm_be, wfm_word);
+	dqh <= h;
+	dq_new <= adv_dc1;
 end
+assign dq1 = dq_new ? dqc : dqh;
 
 //--------------------------------------------------------------------------
 // D-ATC
 //--------------------------------------------------------------------------
 logic        atc_hit;
 atce_t       atc_e;
+logic  [3:0] atc_hv;
+logic [19:0] atc_wpa [4];
 logic        atc_wr;
 logic [31:0] atc_wla;
 logic        atc_wfc2;
@@ -500,7 +512,7 @@ logic        atc_fall, atc_fpage, atc_fng;
 ap68060_atc datc (
 	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc[11]),
 	.la(steal ? st_la : m1.a), .fc2(steal ? st_fc2 : m1.smode),
-	.hit(atc_hit), .ent(atc_e),
+	.hit(atc_hit), .ent(atc_e), .hv(atc_hv), .wpa(atc_wpa),
 	.wr(atc_wr), .wla(atc_wla), .wfc2(atc_wfc2), .went(atc_went),
 	.flush_all(atc_fall), .flush_page(atc_fpage), .flush_nonglobal(atc_fng)
 );
@@ -575,9 +587,62 @@ endfunction
 wire        m1_wr  = (m1.mem == M_ST) || (m1.mem == M_RMW);
 // the FSLW RW field of the DC2 access: read, write, read-modify-write
 wire  [1:0] m2_rw  = (m2.r.mem == M_LD) ? 2'b10 : (m2.r.mem == M_ST) ? 2'b01 : 2'b11;
+// DC1's cache tag compare in parallel with the translation (the timing
+// path): each way's tag against the untranslated address and against the
+// physical page of each of the ATC's four ways; the ATC's hit vector, not
+// its selected entry, then picks.  Whether the access may use the hit (a
+// translation that is valid and does not fault) still comes from xlate.
+logic       d1_hit;
+logic [1:0] d1_way;
+logic [3:0] d1_mj;            // the matching way, one-hot (for the line select)
+// whether DC1's address is used untranslated (alternate space, a TTR,
+// translation off, CPU space): registered with the address, and again
+// every clock DC1 holds, so the compare select starts from a flip-flop
+logic       m1_tp;
+function automatic logic transp_of(input logic [31:0] a, input logic s, input logic [2:0] fc,
+                                   input logic [1:0] ack);
+	transp_of = (fc_tt(fc) == TT_ALT) || ttr_hit(dtt0, a, s) || ttr_hit(dtt1, a, s) ||
+	            !tc_e_n || (ack != 2'd0);
+endfunction
+always_comb begin
+	logic        transp;
+	logic [20:0] tq [4];
+	logic  [3:0] mj;
+	tq[0] = tq_a[0]; tq[1] = tq_a[1]; tq[2] = tq_a[2]; tq[3] = tq_a[3];
+	transp = m1_tp;
+	for (int j = 0; j < 4; j++) begin
+		logic ma;
+		ma = 1'b0;
+		for (int i = 0; i < 4; i++)
+			if (atc_hv[i] && tq[j] == {atc_wpa[i][19:1], tc_p ? m1.a[12] : atc_wpa[i][0], m1.a[11]})
+				ma = 1'b1;
+		mj[j] = lvd_q[j] && (transp ? (tq[j] == m1.a[31:11]) : ma);
+	end
+	d1_hit = |mj;
+	d1_way = mj[3] ? 2'd3 : mj[2] ? 2'd2 : mj[1] ? 2'd1 : 2'd0;
+	d1_mj  = mj;
+end
+// synthesis translate_off
+logic sim_xchk = 1'b0;        // (the bench fails the run on it)
+always_ff @(posedge clk) begin
+	xres_t xo;
+	xo = xlate(m1.a, m1.smode, m1_wr, fc_tt(m1.fc) == TT_ALT, atc_hit, atc_e,
+	           tq_a[0], tq_a[1], tq_a[2], tq_a[3], lvd_q);
+	if (nreset && m1.ack == 2'd0 && (xo.hit != x_dc1.hit || (xo.hit && xo.way != x_dc1.way)))
+	begin
+		$display("FAIL: DMU: the parallel tag compare says hit=%b way=%0d, xlate hit=%b way=%0d",
+		         x_dc1.hit, x_dc1.way, xo.hit, xo.way);
+		sim_xchk <= 1'b1;
+	end
+end
+// synthesis translate_on
+
 always_comb begin
 	x_dc1 = xlate(m1.a, m1.smode, m1_wr, fc_tt(m1.fc) == TT_ALT, atc_hit, atc_e,
 	              tq_a[0], tq_a[1], tq_a[2], tq_a[3], lvd_q);
+	// (the same hit and way, from the parallel compare)
+	x_dc1.hit = d1_hit && x_dc1.ok && !x_dc1.flt;
+	x_dc1.way = d1_way;
 	if (m1.ack != 2'd0) begin
 		// CPU space (interrupt acknowledge) is never translated nor cached
 		x_dc1     = '0;
@@ -1081,10 +1146,12 @@ always_ff @(posedge clk) begin
 			m1.smode   <= dm_super;
 			m1.noalloc <= dm_noalloc;
 			m1.ack     <= dm_ack;
+			m1_tp      <= transp_of(dm_va, dm_super, dm_fc, dm_ack);
 			m1_stale   <= (dw && dw_src != 2'd0 && dw_set == dm_va[10:4]) || !e_quiet;
 		end
 		else begin
 			if (adv_dc1) m1.v <= 1'b0;
+			m1_tp <= transp_of(m1.a, m1.smode, m1.fc, m1.ack);
 			if ((dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet) m1_stale <= 1'b1;
 		end
 
@@ -1597,7 +1664,9 @@ always_ff @(posedge clk) begin
 			end
 		end
 		E_W_DONE: begin
-			if (bo_err) begin
+			// (the LPSTOP broadcast completes with TA or TEA alike: the
+			// processor enters the low-power stop either way, 7.8.2.1)
+			if (bo_err && m4.r.ack != 2'd3) begin
 				st_rdy_r     <= 1'b1;
 				st_fault_r   <= 1'b1;
 				st_fslw    <= mk_fslw(FSLW_WE, m4.r.lock, (m4.r.mem == M_RMW) ? 2'b11 : 2'b01,
@@ -1883,11 +1952,14 @@ always_ff @(posedge clk) begin
 				e_st       <= (m2.r.mem != M_ST) ? E_S_ACT : E_S_NEXT;
 			end
 			else if (bo_err) begin
-				// the operand's long word did not arrive: an access fault
+				// the operand's long word did not arrive: an access fault --
+				// on a later access of a misaligned operand (MA, 8.4.4.3) in
+				// the next line's part, or when its first long word arrived
+				// and a later one of the same line did not
 				e_flt   <= 1'b1;
 				e_faddr <= m2.r.a;
 				e_fslw  <= mk_fslw(FSLW_RE, 1'b0, m2_rw, m2.r.msz, m2.r.fc) |
-				           (e_part ? FSLW_MA : 32'd0);
+				           ((e_part || bo_got[e_va[3:2]]) ? FSLW_MA : 32'd0);
 				e_st    <= E_S_DONE;
 			end
 			else if (bo_tci) begin

@@ -7,7 +7,10 @@
 // edges that are bus clock (BCLK) edges.  Bidirectional pins are split     //
 // into _i/_o/_oe: a_i, ts_n_i and tt_i are the bus as another master      //
 // drives it (snooped with SNOOP), d_i the data bus in either direction;   //
-// a_oe covers the address, the transfer attributes, TS, SAS and BS3-BS0.  //
+// a_oe covers the address, the transfer attributes, TS and BS3-BS0;      //
+// lock_oe LOCK and LOCKE (driven negated a bus clock past a_oe when the   //
+// bus is released with either asserted, 2.3.7); sas_oe SAS (driven        //
+// negated a bus clock past a_oe, 2.4.3).                                  //
 // At reset (the last bus clock with RSTI asserted) IPL2-IPL0 and D15-D0   //
 // select the special modes (7.14): IPL0 the ignore states (D15-D0 their   //
 // counts), IPL1 the native acknowledge termination (TRA), IPL2 the extra  //
@@ -47,6 +50,8 @@ module ap68060
 	output logic        ciout_n,
 	output logic        lock_n,
 	output logic        locke_n,
+	output logic        lock_oe,        // LOCK and LOCKE driven
+	output logic        sas_oe,         // SAS driven
 	output logic        ts_n,
 	output logic        tip_n,
 	output logic        tip_oe,
@@ -80,9 +85,11 @@ module ap68060
 	output logic        dbg_halted
 );
 
-// reset synchronizer
-logic [1:0] rst_q;
-always_ff @(posedge clk) rst_q <= {rst_q[0], rsti_n};
+// reset synchronizer: two bus clocks (RSTI is synchronized to the clock-
+// enabled edges, 2.8.3, 7.13), so the reset -- and the release of the bus
+// pins it begins -- always starts on a bus clock edge
+logic [1:0] rst_q = 2'b00;
+always_ff @(posedge clk) if (bclk_en) rst_q <= {rst_q[0], rsti_n};
 wire nreset = rst_q[1];
 
 // the special modes (7.14): IPL2-IPL0 and D15-D0 registered on the bus
@@ -165,8 +172,8 @@ ap68060_biu #(.NC(NC)) biu (
 	.rsto_req(rsto_req), .rsto_busy(rsto_busy),
 	.a_o(a_o), .a_oe(a_oe), .d_i(d_i), .d_o(d_o), .d_oe(d_oe),
 	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
-	.ciout_n(ciout_n), .lock_n(lock_n), .locke_n(locke_n),
-	.ts_n(ts_n), .tip_n(tip_n), .tip_oe(tip_oe), .sas_n(sas_n),
+	.ciout_n(ciout_n), .lock_n(lock_n), .locke_n(locke_n), .lk_oe(lock_oe),
+	.ts_n(ts_n), .tip_n(tip_n), .tip_oe(tip_oe), .sas_n(sas_n), .sas_oe(sas_oe),
 	.ta_n(ta_n), .tea_n(tea_n), .tra_n(tra_n),
 	.tci_n(tci_n), .tbi_n(tbi_n), .avec_n(avec_n), .cla_n(cla_n),
 	.br_n(br_n), .bg_n(bg_n), .bgr_n(bgr_n), .ts_n_i(ts_n_i),

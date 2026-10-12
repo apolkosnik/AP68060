@@ -12,6 +12,9 @@
 ;   1-2  LPSTOP #$2000 with IPL 2 raised 200 clocks later: one level 2
 ;        interrupt, its frame's PC the instruction after LPSTOP (7.8.2.1);
 ;        the bus quiet between (the bench's check)
+;   8-9  LPSTOP again, its broadcast terminated by TEA: TEA completes it as
+;        TA does (7.8.2.1), the stop is entered and the interrupt wakes it;
+;        no access error
 ;   3-4  RESET with four writes waiting in the store buffer: they reach
 ;        memory before RSTO (2.8.4), no bus cycle while it is asserted
 ;   then an address error whose frame write gets TEA: a double bus fault
@@ -24,6 +27,9 @@
 ;        double bus fault too
 ; phase 2 (two resets)
 ;   7    the address error handler never ran
+;   then a reset while the 68060 owns the bus (the bench checks the end of
+;        tenure and the pins' release); phase 3: the same a clock later
+;        (both phases of a half-rate bus clock); phase 4: done
 ;
 ;   98   an unexpected exception
 
@@ -33,6 +39,8 @@ BERRARM	equ	$F142
 IPLDLY	equ	$F148
 HALTRST	equ	$F158
 HALTCNT	equ	$F15A
+LPSTEA	equ	$F15C
+TRESET	equ	$F168
 IPLREG	equ	$F110
 
 cnt_irq	equ	$3600
@@ -95,6 +103,19 @@ lps_next:
 	chkl	d1,lps_next,2
 	move.w	#$2700,sr
 
+; 8-9 LPSTOP with TEA on its broadcast
+	clr.l	(cnt_irq).l
+	move.w	#1,(LPSTEA).l
+	move.w	#200,(IPLDLY).l
+	dc.w	$F800,$01C0,$2000	; lpstop #$2000
+lps_next2:
+	nop
+	move.l	(cnt_irq).l,d1
+	chkl	d1,1,8
+	move.l	(irq_pc).l,d1
+	chkl	d1,lps_next2,9
+	move.w	#$2700,sr
+
 ; 3-4 RESET with the store buffer full
 	move.l	#$20000000,d0		; CACR ESB
 	movec	d0,cacr
@@ -133,9 +154,29 @@ phase1:
 
 ;------------------------------------------------ phase 2
 phase2:
+	cmp.w	#2,d0
+	bne.s	phase3
 	move.l	(cnt_adr).l,d1
 	chkl	d1,0,7
 	move.w	#0,(HALTRST).l
+; a reset while the 68060 owns the bus explicitly (back-to-back transfers):
+; the bench checks its end of tenure (7.11.2) and the pins' release
+	move.w	#61,(TRESET).l
+busy:	move.l	d1,($9000).l
+	move.l	($9000).l,d1
+	bra.s	busy
+
+;------------------------------------------------ phase 3
+; again a clock later: with BCLK at half CLK the two resets are recognised
+; in the two phases of the bus clock
+phase3:
+	cmp.w	#3,d0
+	bne.s	phase4
+	move.w	#62,(TRESET).l
+	bra.s	busy
+
+;------------------------------------------------ phase 4
+phase4:
 	move.w	#$600D,(DONEREG).l
 	bra.s	*
 

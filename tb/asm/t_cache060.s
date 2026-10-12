@@ -18,6 +18,13 @@
 ;        pushed over it afterwards
 ;   8-9  CPUSHP with 8K pages (TCR.P) pushes a dirty line anywhere in the
 ;        8K page, and none outside it
+;   12-14 a misaligned long within one line whose fill gets TEA on its
+;        second long word (the first arrived): the fault is on a later
+;        access of the operand, FSLW MA with RE, FA the operand (8.4.4.3)
+;   10-11 RTE's stack reads are exception-stack accesses: a miss does not
+;        allocate (5.4.3, 7.7.1).  A cold format $0 frame in copyback
+;        memory, RTE, then an ordinary load of the frame's line: the load
+;        finds no line and fills it (4 beats after RTE's own reads)
 ;
 ;   98   an unexpected exception
 
@@ -31,6 +38,9 @@ WRD	equ	$F2D8
 WWR	equ	$F2DC
 cnt_ae	equ	$3600
 resume	equ	$3604
+ae_fslw	equ	$3608
+ae_fa	equ	$360C
+DTEA	equ	$F15E		; one-shot TEA on a data read of this long word
 
 failt	macro
 	move.w	#\1,d7
@@ -162,6 +172,65 @@ ifill_back:
 	chkl	d2,0,8		; nothing pushed for $C000
 	chkl	d3,4,9		; the line pushed for $B000 (four beats)
 
+;------------------------------------------------ 10-11 RTE does not allocate
+	dc.w	$F4D8		; cinva bc
+	move.w	#$2700,($D000).l	; the frame: SR
+	move.l	#rte_back,($D002).l	; PC
+	move.w	#$0000,($D006).l	; format $0, vector 0
+	watch	$D000,$D010	; (the bench registers before DTT0 covers them)
+	move.l	#$0000A020,d0	; supervisor data copyback (DTT0)
+	movec	d0,dtt0
+	move.l	#$80000000,d0
+	movec	d0,cacr
+	movea.l	sp,a5
+	lea	($D000).l,sp
+	rte
+rte_back:
+	movea.l	a5,sp
+	moveq	#0,d0		; (the counters through DTT1: uncached)
+	movec	d0,dtt0
+	move.l	(WRD).l,d2	; RTE's reads
+	move.l	#$0000A020,d0
+	movec	d0,dtt0
+	move.l	($D000).l,d0	; an ordinary load of the line
+	moveq	#0,d0
+	movec	d0,dtt0
+	move.l	(WRD).l,d3
+	movec	d0,cacr
+	sub.l	d2,d3
+	chkl	d3,4,10		; the load filled the line: RTE left none
+	cmp.l	#3,d2		; RTE: its operand reads, not a line
+	bhs.s	.r11
+	failt	11
+.r11:
+
+;------------------------------------------------ 12-14 MA within a line fill
+	dc.w	$F4D8		; cinva bc
+	clr.l	(cnt_ae).l
+	move.w	#$9004,(DTEA).l
+	moveq	#0,d0
+	movec	d0,dtt1		; TCR's default: copyback, cachable
+	move.l	#$00000100,d0
+	movec	d0,tc
+	move.l	#$80000000,d0
+	movec	d0,cacr
+	move.l	#ma_back,(resume).l
+	move.l	($9001).l,d0	; the fill: $9000 fine, $9004 TEA
+ma_back:
+	moveq	#0,d0
+	movec	d0,cacr
+	movec	d0,tc
+	move.l	#$0000A040,d0
+	movec	d0,dtt1
+	clr.l	(resume).l
+	move.l	(cnt_ae).l,d1
+	chkl	d1,1,12
+	move.l	(ae_fslw).l,d1
+	and.l	#$09000020,d1	; MA, R, RE
+	chkl	d1,$09000020,13
+	move.l	(ae_fa).l,d1
+	chkl	d1,$9001,14
+
 	move.w	#$600D,(DONEREG).l
 	bra.s	*
 
@@ -175,6 +244,8 @@ fail_all:
 
 h_ae:
 	addq.l	#1,(cnt_ae).l
+	move.l	12(sp),(ae_fslw).l
+	move.l	8(sp),(ae_fa).l
 	tst.l	(resume).l
 	beq.s	h_bad
 	move.l	(resume).l,2(sp)

@@ -607,6 +607,9 @@ always_comb begin
 		logic        pd, pi, lastx, base_in, fb_in, fx_in;
 		logic  [4:0] an, xreg;
 		logic [31:0] off;
+		logic [15:0] low;
+		logic  [3:0] k_an, k_x;
+		logic        is_an, is_x;
 		m  = mv_act ? mv_mask : src.ext1;
 		pd = (src.ea0.m == EM_APD);
 		pi = (src.ea0.m == EM_AIP);
@@ -614,10 +617,21 @@ always_comb begin
 		for (int i = 15; i >= 0; i--) if (m[i]) bi = 4'(i);
 		rn = pd ? (4'd15 - bi) : bi;
 		r  = rn[3] ? areg(rn[2:0], sp_reg) : dreg(rn[2:0]);
-		n_mv_rest = m & ~(16'd1 << bi);
+		// (the lowest set bit cleared: m & ~low, no encoder on the way to
+		// the last-transfer test, which pops the decoder's record)
+		low   = m & (~m + 16'd1);
+		n_mv_rest = m & ~low;
 		lastx = (n_mv_rest == 16'd0);
 		sb = (src.sz == SZ_L) ? 3'd4 : 3'd2;
 		an = areg(src.ea0.r, sp_reg);
+		// whether this transfer's register is An or the index register,
+		// from the mask's lowest set bit directly (not through the encoder
+		// and the register number: a timing path); the register numbers
+		// are one-to-one, so r == an exactly when rn is {1, An}
+		k_an  = pd ? (4'd15 - {1'b1, src.ea0.r}) : {1'b1, src.ea0.r};
+		k_x   = {src.ea0.xa, src.ea0.xr};
+		is_an = low[k_an];
+		is_x  = low[k_x];
 		// A load list that contains a register of the EA (the base, or the
 		// index of an indexed mode) works from a copy of the address in
 		// T11, and the loaded base/index commits only after the last
@@ -638,14 +652,14 @@ always_comb begin
 		nu.last = lastx && !fb_in && !fx_in;
 		if (uw.d == S_MVR) begin
 			nu.d_v = 1'b1; nu.d_reg = r;
-			if (fb_in && r == an)         nu.d_reg = R_T0 + 5'd7;
-			else if (fx_in && r == xreg)  nu.d_reg = R_T0 + 5'd6;
-			else if (pi && r == an)       nu.d_v   = 1'b0;
+			if (fb_in && is_an)           nu.d_reg = R_T0 + 5'd7;
+			else if (fx_in && !pd && is_x) nu.d_reg = R_T0 + 5'd6;
+			else if (pi && is_an)         nu.d_v   = 1'b0;
 		end
 		else begin
 			nu.a_src = OS_REG; nu.a_reg = r;
 			// -(An) storing An itself writes An - size (68020 and later)
-			if (pd && r == an) begin
+			if (pd && is_an) begin
 				nu.op = OP_SUB; nu.sz = SZ_L;
 				nu.a_src = OS_IMM; nu.imm = {29'd0, sb};
 				nu.b_src = OS_REG; nu.b_reg = an;

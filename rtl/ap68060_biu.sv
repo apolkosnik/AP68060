@@ -116,6 +116,8 @@ module ap68060_biu
 	output logic  [1:0]       upa,
 	output logic              ciout_n,
 	output logic              lock_n,
+	output logic              lk_oe,     // LOCK and LOCKE driven (2.3.7, 2.3.8)
+	output logic              sas_oe,    // SAS driven (2.4.3)
 	output logic              locke_n,
 	output logic              ts_n,
 	output logic              tip_n,
@@ -175,6 +177,14 @@ logic        locked;      // a locked sequence is open
 logic [CW-1:0] lock_c;
 logic  [3:0] ign;         // ignore states left before sampling
 logic        bb_q;        // BB at the previous bus clock edge
+logic        sas_hold;    // SAS driven negated a bus clock after the release
+logic        sas_en;      // a_oe a bus clock ago: SAS stays three-stated in
+                          // the first TS clock of a tenure (2.4.3)
+logic        lk_hold;     // LOCK/LOCKE driven negated a bus clock after the
+                          // address bus is released (they were asserted)
+logic  [1:0] rst_et;      // reset from explicit ownership: its end of tenure
+                          // (1 waits for a bus clock edge, 2 BTT asserted,
+                          // 3 BTT negated), 7.11.2 and 7.13
 logic        h_last;      // S_HOLD follows the transfer's last beat
 
 //--------------------------------------------------------------------------
@@ -258,7 +268,11 @@ always_ff @(posedge clk) begin
 	err    <= '0;
 	rvalid <= 1'b0;
 
-	if (!nreset) begin
+	// (a reset acts on the bus clock edges only: the pins it releases change
+	// there, and the release intervals are whole bus clocks, 2.3.7, 2.4.3)
+	if (!nreset && !bclk_en) begin
+	end
+	else if (!nreset) begin
 		st        <= S_IDLE;
 		ab        <= B_RESET;
 		cur       <= '0;
@@ -291,21 +305,61 @@ always_ff @(posedge clk) begin
 		lock_n    <= 1'b1;
 		locke_n   <= 1'b1;
 		ts_n      <= 1'b1;
-		tip_n     <= 1'b1;
-		tip_oe    <= 1'b0;
 		sas_n     <= 1'b1;
+		sas_en    <= 1'b0;
 		br_n      <= 1'b1;
 		bb_q      <= 1'b1;
-		bb_n_o    <= 1'b1;
-		bb_oe     <= 1'b0;
-		btt_n_o   <= 1'b1;
-		btt_oe    <= 1'b0;
+		// BB, TIP and BTT: a reset in explicit ownership goes through the
+		// end of tenure first, so other masters see the bus released (BTT
+		// a bus clock asserted, one negated); BB and TIP are driven negated
+		// before they are three-stated
+		case (rst_et)
+			2'd0: begin
+				if (ab == B_EXP) begin
+					rst_et   <= 2'd1;           // (BB still asserted)
+					// SAS, and LOCK/LOCKE if asserted, as in an end of
+					// tenure: driven negated, three-stated with BB
+					sas_hold <= 1'b1;
+					lk_hold  <= !lock_n || !locke_n;
+				end
+				else begin
+					sas_hold <= 1'b0;
+					lk_hold  <= 1'b0;
+					if (bb_oe && !bb_n_o) bb_n_o <= 1'b1; else bb_oe <= 1'b0;
+					if (tip_oe && !tip_n) tip_n <= 1'b1; else tip_oe <= 1'b0;
+					btt_n_o <= 1'b1;
+					btt_oe  <= 1'b0;
+				end
+			end
+			2'd1: if (bclk_en) begin
+				btt_n_o <= 1'b0; btt_oe <= 1'b1;
+				bb_n_o  <= 1'b1; tip_n  <= 1'b1;
+				sas_hold <= 1'b0; lk_hold <= 1'b0;
+				rst_et  <= 2'd2;
+			end
+			2'd2: if (bclk_en) begin
+				btt_n_o <= 1'b1;
+				bb_oe   <= 1'b0; tip_oe <= 1'b0;
+				rst_et  <= 2'd3;
+			end
+			default: if (bclk_en) begin
+				btt_oe <= 1'b0;
+				rst_et <= 2'd0;
+			end
+		endcase
 		rsto_n    <= 1'b1;
 		rsto_cnt  <= '0;
 		unlock_pend <= 1'b0;
 		end_tenure  <= 1'b0;
 	end
 	else begin
+		// (a reset shorter than its end of tenure: release the pins)
+		if (rst_et != 2'd0) begin
+			rst_et  <= 2'd0;
+			sas_hold <= 1'b0; lk_hold <= 1'b0;
+			btt_n_o <= 1'b1; btt_oe <= 1'b0;
+			bb_oe   <= 1'b0; tip_oe <= 1'b0;
+		end
 		// BB and TIP: negated for one CLK, then three-stated (7.1)
 		if (bb_oe && bb_n_o && ab != B_EXP) bb_oe <= 1'b0;
 		if (tip_oe && tip_n && ab != B_EXP) tip_oe <= 1'b0;
@@ -335,6 +389,7 @@ always_ff @(posedge clk) begin
 			start = 1'b0;
 
 			bb_q <= bb_n_i;
+			sas_en <= a_oe;
 
 			//--------------------------------------------------------------
 			// arbitration
@@ -363,6 +418,8 @@ always_ff @(posedge clk) begin
 			B_EXP: ;
 			B_END1: begin
 				btt_n_o <= 1'b1;         // BTT negated for one bus clock
+				lk_hold <= 1'b0;         // LOCK/LOCKE three-stated
+				sas_hold <= 1'b0;        // SAS three-stated
 				ab      <= B_END2;
 			end
 			B_END2: begin
@@ -414,6 +471,10 @@ always_ff @(posedge clk) begin
 					a_oe       <= 1'b0;
 					lock_n     <= 1'b1;
 					locke_n    <= 1'b1;
+					// (asserted ones are driven negated for a bus clock more)
+					lk_hold    <= !lock_n || !locke_n;
+					sas_hold   <= 1'b1;
+					sas_n      <= 1'b1;
 				end
 				else if (ab == B_EXP) begin
 					// explicit owner with nothing to do: TIP negated, the
@@ -616,6 +677,10 @@ task automatic finish_cycle();
 endtask
 
 assign idle      = (st == S_IDLE);
+assign lk_oe     = a_oe || lk_hold;
+assign sas_oe    = (a_oe && sas_en) || sas_hold;
+// (rst_et lives through the reset: only power-up clears it)
+initial begin rst_et = 2'd0; lk_hold = 1'b0; sas_hold = 1'b0; sas_en = 1'b0; end
 assign own       = (ab == B_IMP) || (ab == B_EXP);
 assign rsto_busy = !rsto_n;
 

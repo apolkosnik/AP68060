@@ -276,6 +276,7 @@ ap040_fpu #(.PIPE(FPU_PIPE)) fpu (
 // state
 //--------------------------------------------------------------------------
 logic [15:0] opw_q, ext_q;     // the instruction's words (latched by CHK)
+logic        fsr_q;            // ... it is FSAVE or FRESTORE (for END's hold)
 logic        bg;               // a released operation is running
 logic        pend;             // the EXCP state: its exception, taken by every FPU
 logic  [7:0] pend_vec;         // instruction but FSAVE and FRESTORE
@@ -489,7 +490,15 @@ wire chk_pend = pend && !chk_fs;     // (CHK's) FSAVE/FRESTORE save or replace i
 // the latched result; END of an instruction with no store exception
 // pending and not FSAVE/FRESTORE does nothing (a fault of an older uop
 // discards it with the rest)
-wire nosafe = (sub == FC_GET) || (sub == FC_END && !sx_v && !is_fsave && !is_frest);
+// (END's instruction is the latched one: fsr_q, not the opcode decode)
+wire nosafe = (sub == FC_GET) || (sub == FC_END && !sx_v && !fsr_q);
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && ex_v && sub == FC_END && fsr_q != (is_fsave || is_frest)) begin
+		$display("FAIL: fpif: fsr_q %b, the instruction's FSAVE/FRESTORE %b", fsr_q, is_fsave || is_frest);
+		$finish;
+	end
+// synthesis translate_on
 
 always_comb begin
 	hold    = 1'b0;
@@ -699,7 +708,7 @@ end
 
 always_ff @(posedge clk) begin
 	if (!nreset) begin
-		opw_q <= '0; ext_q <= '0;
+		opw_q <= '0; ext_q <= '0; fsr_q <= 1'b0;
 		bg <= 1'b0; pend <= 1'b0; pend_vec <= '0; fresh <= 1'b0;
 		go <= 1'b0; done_q <= 1'b0; eaa <= '0; eav <= 1'b0;
 		sx_v <= 1'b0; sx_vec <= '0; sx_fmt <= '0; sx_addr <= '0; sx_kill <= 1'b0;
@@ -741,6 +750,7 @@ always_ff @(posedge clk) begin
 			FC_CHK: if (fuse && !go && !(bg && !f_end) && !chk_pend && chk_k == K_NONE && !dfp) begin
 				// FPm to FPn: CHK's latching and DISP's request at once
 				opw_q   <= opw;
+				fsr_q   <= is_fsave || is_frest;
 				ext_q   <= ext;
 				eav     <= 1'b0;
 				sx_v    <= 1'b0;
@@ -767,6 +777,7 @@ always_ff @(posedge clk) begin
 			end
 			else if (adv) begin
 				opw_q <= opw;
+				fsr_q <= is_fsave || is_frest;
 				ext_q <= ext;
 				// (an immediate operand has no address: its frames, EA 0)
 				eav   <= eal && !ea_imm;

@@ -411,11 +411,13 @@ R('CAS',
 # use: $0 8, $2 and $3 12, $4 16 bytes), then SR and PC; SP += length and
 # RTE loads SR and jumps.  The 68060 restarts every faulted instruction,
 # so no frame carries state back.
+# The stack reads are exception-stack accesses: a miss does not allocate
+# (MC68060UM 5.4.3, 7.7.1), as the stacking writes (mfc SUP).
 R('RTE',
-  U(op='MOV', sz='W', msz='W', a='LD', d='T3', ag='BASED', agb='SP', const=6),
+  U(op='MOV', sz='W', msz='W', a='LD', d='T3', ag='BASED', agb='SP', const=6, mfc='SUP'),
   U(op='RTEF', sz='W', a='T3', d='T0'),
-  U(op='MOV', sz='W', msz='W', a='LD', d='T1', ag='BASED', agb='SP', const=0),
-  U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2),
+  U(op='MOV', sz='W', msz='W', a='LD', d='T1', ag='BASED', agb='SP', const=0, mfc='SUP'),
+  U(op='MOV', sz='L', msz='L', a='LD', d='T2', ag='BASED', agb='SP', const=2, mfc='SUP'),
   U(ag='ADDT0', agb='SP', agw='SP'),
   U(op='RTE', sz='W', a='T1', b='T2', last=1))
 # RTR: CCR = (SP)+ word, PC = (SP)+ long

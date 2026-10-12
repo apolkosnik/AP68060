@@ -32,6 +32,9 @@ module ap68060_atc
 	input  logic        fc2,
 	output logic        hit,
 	output atce_t       ent,
+	output logic  [3:0] hv,            // the hit way (one-hot), and every way's
+	output logic [19:0] wpa [4],       // physical page: a caller's tag compares
+	                                   // run against all four in parallel
 
 	// install (one cycle)
 	input  logic        wr,
@@ -85,7 +88,7 @@ function automatic logic tag_eq(input slot_t t, input logic [31:0] a, input logi
 	tag_eq = (t.fc2 == f2) && (t.lpn[19:1] == a[31:13]) && (p8 || (t.lpn[0] == a[12]));
 endfunction
 
-logic [3:0] hv;
+always_comb for (int i = 0; i < 4; i++) wpa[i] = s[i].e.pa;
 always_comb begin
 	for (int i = 0; i < 4; i++) hv[i] = v[lset][i] && tag_eq(s[i], la, fc2, p8k);
 	hit = |hv;
