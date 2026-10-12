@@ -206,6 +206,23 @@ end
 //--------------------------------------------------------------------------
 int jf, jn;
 int errors, ran, mism, skipped, report_lim, trace_round;
+// +busprof: where the clocks go -- the processor's bus beats by kind (the
+// monitor's at $4211xxxx-$4213xxxx, the test's elsewhere), per round
+longint bp_clk = 0, bp_mi = 0, bp_md = 0, bp_ti = 0, bp_td = 0, bp_poll = 0;
+logic   busprof;
+always @(posedge clk) begin
+	bp_clk++;
+	if (ev) begin
+		logic mon, ins;
+		mon = (ev_addr[31:16] >= 16'h4211) && (ev_addr[31:16] <= 16'h4213);
+		ins = (ev_tm == 3'd2 || ev_tm == 3'd6);
+		if (mon && ins) bp_mi++; else if (mon) bp_md++; else if (ins) bp_ti++; else bp_td++;
+		if (ev_rd && (ev_addr == MBOX || ev_addr == MBOX + 32'h200)) bp_poll++;
+	end
+end
+final if (busprof && ran > 0)
+	$display("busprof: %0d rounds, %0d clocks/round; beats/round: monitor fetch %0d, monitor data %0d (GO/CMD polls %0d), test fetch %0d, test data %0d",
+	         ran, bp_clk / ran, bp_mi / ran, bp_md / ran, bp_poll / ran, bp_ti / ran, bp_td / ran);
 always @(posedge clk)
 	if (perr) begin
 		errors++;
@@ -406,6 +423,8 @@ task automatic run_round();
 	wrv(MBOX + 32'h044, 8'd2, frm_addr);
 	wrv(MBOX + 32'h048, 8'd2, i_msp);
 	wrv(MBOX + 32'h04C, 8'd2, CAPV);
+	// (a round that does not use the FPU: its FP state not loaded or saved)
+	wrv(MBOX + 32'h050, 8'd1, (flags & F_FPU) ? 32'd0 : 32'd1);
 	for (int i = 0; i < 8; i++) begin
 		wrv(MBOX + 32'h060 + 12 * i, 8'd2, {i_fe[i][15:0], 16'd0});
 		wrv(MBOX + 32'h064 + 12 * i, 8'd2, i_fm[i][63:32]);
@@ -526,6 +545,7 @@ initial begin
 	errors = 0; ran = 0; mism = 0; skipped = 0;
 	wait_mode = $test$plusargs("waits") ? 2'd1 : 2'd0;
 	if (!$value$plusargs("report=%d", report_lim)) report_lim = 40;
+	busprof = $test$plusargs("busprof");
 	if (!$value$plusargs("trace_round=%d", trace_round)) trace_round = -1;
 	if (!$value$plusargs("limit=%d", limit)) limit = 32'h7FFF_FFFF;
 	if (!$value$plusargs("watch=%h", watch_addr)) watch_addr = 32'hFFFF_FFFF;
