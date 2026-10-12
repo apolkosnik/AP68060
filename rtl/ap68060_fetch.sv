@@ -232,32 +232,33 @@ logic [BTB_DW-1:0] btb_q0, btb_q1, btb_q;
 logic        btb_cf;
 // The branch cache (MC68060UM 5.11) is used only with CACR.EBC.  CACR.CABC
 // or CUBC (no supervisor/user tag is kept: CUBC clears the supervisor
-// entries too, which only costs predictions) and every CINV or CPUSH of
-// the instruction cache clear it at once: the entries' valid bits are
-// flip-flops (read as the RAM reads, F0's address registered).
+// entries too, which only costs predictions), every CINV or CPUSH of the
+// instruction cache, and reset clear it at once: each entry carries the
+// epoch it was written in, a clear starts a new epoch, and only entries of
+// the current one are valid.  (After 16 clears an old entry could match
+// again: a prediction D1 checks like any other, at worst a redirect.)
 wire                 bc_go = bc_clr || (ic_inv && !inv_busy && !inv_hold && st != S_FILL && !c_we);
-logic [(1<<BTB_AW)-1:0] bv0, bv1;
-logic                bvq0, bvq1;
-ap68060_sdpr #(.AW(BTB_AW), .DW(BTB_DW)) btb0 (
+logic  [3:0]         bep;          // the current epoch
+logic                bs_q;         // F1's read was made in a clear's clock
+logic  [3:0]         bep0, bep1;   // the epochs read with the entries
+ap68060_sdpr #(.AW(BTB_AW), .DW(BTB_DW + 4)) btb0 (
 	.clk(clk), .we(btb_we && !btb_wslot), .waddr(btb_wi),
-	.wdata({btb_wv, btb_wtag, btb_wkind, btb_wtgt}),
-	.raddr(fpc[BTB_AW+1:2]), .q(btb_q0)
+	.wdata({bep, btb_wv, btb_wtag, btb_wkind, btb_wtgt}),
+	.raddr(fpc[BTB_AW+1:2]), .q({bep0, btb_q0})
 );
-ap68060_sdpr #(.AW(BTB_AW), .DW(BTB_DW)) btb1 (
+ap68060_sdpr #(.AW(BTB_AW), .DW(BTB_DW + 4)) btb1 (
 	.clk(clk), .we(btb_we && btb_wslot), .waddr(btb_wi),
-	.wdata({btb_wv, btb_wtag, btb_wkind, btb_wtgt}),
-	.raddr(fpc[BTB_AW+1:2]), .q(btb_q1)
+	.wdata({bep, btb_wv, btb_wtag, btb_wkind, btb_wtgt}),
+	.raddr(fpc[BTB_AW+1:2]), .q({bep1, btb_q1})
 );
 always_ff @(posedge clk) btb_cf <= btb_we && (btb_wi == fpc[BTB_AW+1:2]);
 always_ff @(posedge clk) begin
-	if (!nreset || bc_go) begin bv0 <= '0; bv1 <= '0; end
-	else if (btb_we) begin
-		if (!btb_wslot) bv0[btb_wi] <= btb_wv;
-		else            bv1[btb_wi] <= btb_wv;
-	end
-	bvq0 <= bv0[fpc[BTB_AW+1:2]] && !bc_go;
-	bvq1 <= bv1[fpc[BTB_AW+1:2]] && !bc_go;
+	if (!nreset || bc_go) bep <= bep + 4'd1;
+	bs_q <= bc_go || !nreset;
 end
+initial bep = 4'd0;
+wire bvq0 = btb_q0[BTB_DW-1] && bep0 == bep && !bs_q;
+wire bvq1 = btb_q1[BTB_DW-1] && bep1 == bep && !bs_q;
 // the first branch of the fetch: word 0's when the fetch starts there
 wire btb_on   = cacr[23];
 wire btb_hit0 = btb_on && !btb_cf && bvq0 && btb_q0[BTB_DW-2 -: BTB_TW] == f1_pc[31:BTB_AW+2] && !f1_pc[1];
@@ -291,18 +292,14 @@ ap68060_atc iatc (
 // cache arrays: tags and data in block RAM (read address registered in
 // F0), valid bits in flip-flops
 //--------------------------------------------------------------------------
-// line valid, per set and way: LUT RAMs written at the edge and read
-// without a clock -- one copy at F1's set, one at the fill's set or the
-// invalidation's (they never run at once).  Clearing every line (CINVA,
-// a snooped clear, reset) runs the invalidation over the 64 sets
-(* ramstyle = "MLAB, no_rw_check" *) logic ivf0 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ivf1 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ivf2 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ivf3 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ivo0 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ivo1 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ivo2 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ivo3 [128];
+// line valid, per set and way: a word of the four ways per set in LUT
+// RAMs written at the edge and read without a clock -- one copy at F1's
+// set, one at the fill's set or the invalidation's (they never run at
+// once).  The second is read at the set every write goes to, so it forms
+// the word written (the ways not written keep their bits).  Clearing every
+// line (CINVA, a snooped clear, reset) runs the invalidation over the sets
+(* ramstyle = "MLAB, no_rw_check" *) logic [3:0] ivf [128];
+(* ramstyle = "MLAB, no_rw_check" *) logic [3:0] ivo [128];
 wire   [3:0]   ivf_q, ivo_q;
 logic  [6:0]   ivo_ra;
 logic          inv_rst;         // the invalidation is reset's clear
@@ -998,12 +995,16 @@ always_ff @(posedge clk) begin
 	if (nreset && frw) fras[frwa] <= frwd;
 	// the valid RAMs' one write (both copies)
 	if (nreset) begin
-		if (iw_m[0]) begin ivf0[iw_set] <= iw_v; ivo0[iw_set] <= iw_v; end
-		if (iw_m[1]) begin ivf1[iw_set] <= iw_v; ivo1[iw_set] <= iw_v; end
-		if (iw_m[2]) begin ivf2[iw_set] <= iw_v; ivo2[iw_set] <= iw_v; end
-		if (iw_m[3]) begin ivf3[iw_set] <= iw_v; ivo3[iw_set] <= iw_v; end
+		if (iw_m != 4'd0) begin
+			ivf[iw_set] <= (ivo_q & ~iw_m) | (iw_m & {4{iw_v}});
+			ivo[iw_set] <= (ivo_q & ~iw_m) | (iw_m & {4{iw_v}});
+		end
 		// synthesis translate_off
 		for (int j = 0; j < 4; j++) if (iw_m[j]) iv[iw_set][j] <= iw_v;
+		if (iw_m != 4'd0 && iw_set != ivo_ra) begin
+			$display("FAIL: fetch: a valid write at set %0d, the second copy read at %0d", iw_set, ivo_ra);
+			$finish;
+		end
 		// synthesis translate_on
 	end
 end
@@ -1011,12 +1012,9 @@ end
 // the valid copies' reads: F1's set; the invalidation's, else the fill's
 wire [6:0] inv_s = (inv_scope == 2'd1) ? inv_pa[10:4] : 7'(inv_i - 8'd1);
 always_comb ivo_ra = inv_busy ? inv_s : m_pa[10:4];
-assign ivf_q = {ivf3[f1_pc[10:4]], ivf2[f1_pc[10:4]], ivf1[f1_pc[10:4]], ivf0[f1_pc[10:4]]};
-assign ivo_q = {ivo3[ivo_ra], ivo2[ivo_ra], ivo1[ivo_ra], ivo0[ivo_ra]};
-initial for (int i = 0; i < 128; i++) begin
-	ivf0[i] = 1'b0; ivf1[i] = 1'b0; ivf2[i] = 1'b0; ivf3[i] = 1'b0;
-	ivo0[i] = 1'b0; ivo1[i] = 1'b0; ivo2[i] = 1'b0; ivo3[i] = 1'b0;
-end
+assign ivf_q = ivf[f1_pc[10:4]];
+assign ivo_q = ivo[ivo_ra];
+initial for (int i = 0; i < 128; i++) begin ivf[i] = 4'd0; ivo[i] = 4'd0; end
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && !inv_rst && (ivf_q != iv[f1_pc[10:4]] || ivo_q != iv[ivo_ra])) begin

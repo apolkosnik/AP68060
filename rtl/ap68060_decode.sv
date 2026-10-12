@@ -266,7 +266,6 @@ ph_t         ph;
 dinst_t      part;          // record under construction (slow path)
 pd_t         part_pd;
 logic  [3:0] part_len;      // words consumed so far
-dinst_t      rq2;           // third record (internal)
 logic  [2:0] part_imml;     // EA0 immediate length (slow path)
 logic        hold_redir;    // a predicted branch is redirecting fetch
 
@@ -750,7 +749,9 @@ always_comb begin
 	ras_o    = ras_top[31:1];
 end
 
-wire room  = (rq_n != 2'd3);
+// (two records; a full FIFO has room in the clock the sequencer pops one,
+// or D1 would wait a clock behind every pop: 28% on Dhrystone)
+wire room  = (rq_n != 2'd2) || rq_pop;
 wire stall = flush || hold_redir || d_redir_v || !room;
 wire fire  = (go || go_part) && !stall;
 wire push  = fire && go;
@@ -833,7 +834,6 @@ always_ff @(posedge clk) begin
 		rq_n       <= 2'd0;
 		rq0        <= '0;
 		rq1        <= '0;
-		rq2        <= '0;
 		ph         <= PH_IDLE;
 		part       <= '0;
 		part_pd    <= '0;
@@ -895,25 +895,17 @@ always_ff @(posedge clk) begin
 			end
 		end
 
-		// three records, so that D1 (which sees only the registered count)
-		// and D2 can both move one a cycle: D2 chains into rq1 while D1
-		// fills behind it
+		// two records
 		case ({push, pop})
-			2'b01: begin rq0 <= rq1; rq1 <= rq2; rq_n <= rq_n - 2'd1; end
+			2'b01: begin rq0 <= rq1; rq_n <= rq_n - 2'd1; end
 			2'b10: begin
-				case (rq_n)
-					2'd0:    rq0 <= nrec_q;
-					2'd1:    rq1 <= nrec_q;
-					default: rq2 <= nrec_q;
-				endcase
+				if (rq_n == 2'd0) rq0 <= nrec_q;
+				else              rq1 <= nrec_q;
 				rq_n <= rq_n + 2'd1;
 			end
 			2'b11: begin
-				case (rq_n)
-					2'd1:    rq0 <= nrec_q;
-					2'd2:    begin rq0 <= rq1; rq1 <= nrec_q; end
-					default: begin rq0 <= rq1; rq1 <= rq2; rq2 <= nrec_q; end
-				endcase
+				if (rq_n == 2'd1) rq0 <= nrec_q;
+				else begin rq0 <= rq1; rq1 <= nrec_q; end
 			end
 			default: ;
 		endcase

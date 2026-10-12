@@ -24,6 +24,7 @@ module ap68060
 	parameter bit         FPU_PIPE     = 0,      // the FPU's arithmetic pipeline (0: the state machine alone)
 	parameter bit         LOOP_PRED    = 0,      // D1's loop exit predictor
 	parameter bit         EARLY_RES    = 0,      // AG's early results for younger uops' base and index
+	parameter bit         SKID         = 0,      // the skid register in front of AG (65 MHz timing: +400 ALMs)
 	parameter logic [7:0] PCR_REV      = 8'h06   // PCR revision number
 )(
 
@@ -270,7 +271,7 @@ logic  [1:0] uq_n;
 uop_t        uq0;
 logic        uo_rdy;
 
-ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES),
+ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
                   .PCR_REV(PCR_REV)) be (
 	.clk(clk), .nreset(nreset),
 	.in_v(uq_n != 2'd0), .in_u(uq0), .in_rdy(uo_rdy),

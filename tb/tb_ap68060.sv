@@ -199,7 +199,11 @@ wire  [31:0] d_pins   = !rsti_n ? {16'd0, md_cnt} : am_d_oe ? am_d : fr_doe ? fr
 `ifndef AP_EARLY_RES
 `define AP_EARLY_RES 0
 `endif
-ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EARLY_RES)) dut (
+`ifndef AP_SKID
+`define AP_SKID 0
+`endif
+ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EARLY_RES),
+          .SKID(`AP_SKID)) dut (
 	.clk(clk), .bclk_en(bclk_en), .rsti_n(rsti_n),
 	.a_o(a_o), .a_oe(a_oe),
 	.a_i(bus_a), .ts_n_i(am_drive ? am_ts_n : 1'b1), .tt_i(bus_tt),

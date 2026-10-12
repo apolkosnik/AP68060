@@ -27,6 +27,7 @@ module ap68060_backend
 #(
 	parameter bit         FPU_PIPE  = 1,
 	parameter bit         EARLY_RES = 1,
+	parameter bit         SKID      = 1,      // the skid register in front of AG
 	parameter logic [7:0] PCR_REV   = 8'h06       // PCR revision number (bits 15-8)
 )(
 	input  logic        clk,
@@ -311,7 +312,8 @@ uop_t        sk_u;
 wire         ain_v = sk_v || in_v;
 uop_t        ain_u;
 assign ain_u   = sk_v ? sk_u : in_u;
-assign in_rdy  = !sk_v && !flush && !stopped && !eredir_pend;
+// (without the skid the sequencer's pop waits for AG: the stall chain)
+assign in_rdy  = (SKID ? !sk_v : !stall_ag) && !flush && !stopped && !eredir_pend;
 wire         ag_take = !stall_ag && !stopped && !halted;   // AG loads ain_u
 
 //--------------------------------------------------------------------------
@@ -379,13 +381,18 @@ wire [31:0] dc2_capv = dc2_u.a_sxw ? {{16{dm_ldata_al[15]}}, dm_ldata_al[15:0]} 
 assign ag_hold = ag_interlock;
 
 ap68060_rf #(.NR(5)) rff (.clk(clk), .we(fwe), .wa(fwa), .wd(fwd), .ra(rra), .rd(frd));
-ap68060_rf #(.NR(5)) rfb (.clk(clk), .we(bwe), .wa(bwa), .wd(bwd), .ra(rra), .rd(brd));
+ap68060_rf #(.NR(5), .NW(2)) rfb (.clk(clk), .we(bwe), .wa(bwa), .wd(bwd), .ra(rra), .rd(brd));
 // AG's base and index are read as the uop enters AG (ports 0/1 address
 // the incoming uop) and kept in registers, so AG's address adders, and the
 // data cache's set index after them, start from flip-flops
 assign rra[0] = sk_vr ? sk_u.base : in_u.base;   // (= ain_u's)
 assign rra[1] = sk_vr ? sk_u.idx  : in_u.idx;
 // synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && wb_commit && wb_dwe && wb_u.upd2_v) begin
+		$display("FAIL: a uop with both a register result and upd2 (pc %h): the back file has two write ports", wb_u.pc);
+		$finish;
+	end
 always_ff @(posedge clk)
 	if (nreset && sk_vr != sk_v) begin
 		$display("FAIL: the skid's copy sk_vr %b differs from sk_v %b", sk_vr, sk_v);
@@ -1329,21 +1336,35 @@ always_comb begin
 	fwe[2] = exw_v;                 fwa[2] = exw_reg;       fwd[2] = exw_val;
 	wcom  = wb_commit;
 	wpost = adv_wb && wb_is_exc && (wb_post_trap || wb_xcommit);
-	bwe[0] = (wcom || wpost) && wb_u.upd2_v; bwa[0] = wb_u.upd2_reg; bwd[0] = wb_upd2_val;
-	bwe[1] = (wcom || wpost) && wb_u.upd_v;  bwa[1] = wb_u.upd_reg;  bwd[1] = wb_upd_val;
-	bwe[2] = wcom && wb_dwe;                 bwa[2] = wb_u.d_reg;    bwd[2] = wb_res;
+	// the back file: two write ports, the later winning on the same
+	// register.  Port 0 the address update; port 1 the result, else the
+	// second (deferred) update -- a uop with upd2 writes no register result
+	// (its destination is memory), and its upd2 yields to its upd on the
+	// same register.  So a result beats an update, and upd beats upd2.
+	bwe[0] = (wcom || wpost) && wb_u.upd_v;  bwa[0] = wb_u.upd_reg;  bwd[0] = wb_upd_val;
+	if (wcom && wb_dwe) begin
+		bwe[1] = 1'b1; bwa[1] = wb_u.d_reg; bwd[1] = wb_res;
+	end
+	else begin
+		bwe[1] = (wcom || wpost) && wb_u.upd2_v && !(wb_u.upd_v && wb_u.upd_reg == wb_u.upd2_reg);
+		bwa[1] = wb_u.upd2_reg; bwd[1] = wb_upd2_val;
+	end
+	bwe[2] = 1'b0; bwa[2] = '0; bwd[2] = '0;
 	case (xw_ph)
 		2'd1: begin
-			bwe = 3'b111;
+			bwe = 3'b011;
 			bwa[0] = R_T0 + 5'd8;  bwd[0] = xi_vaddr;
 			bwa[1] = R_T0 + 5'd9;  bwd[1] = xi_pc;
-			bwa[2] = R_T0 + 5'd10; bwd[2] = {16'd0, xi_sr};
 		end
 		2'd2: begin
-			bwe = 3'b111;
-			bwa[0] = R_T0 + 5'd11; bwd[0] = xi_addr;
-			bwa[1] = R_T0 + 5'd12; bwd[1] = {16'd0, xi_vecw};
-			bwa[2] = R_T0 + 5'd13; bwd[2] = xi_fslw;
+			bwe = 3'b011;
+			bwa[0] = R_T0 + 5'd10; bwd[0] = {16'd0, xi_sr};
+			bwa[1] = R_T0 + 5'd11; bwd[1] = xi_addr;
+		end
+		2'd3: begin
+			bwe = 3'b011;
+			bwa[0] = R_T0 + 5'd12; bwd[0] = {16'd0, xi_vecw};
+			bwa[1] = R_T0 + 5'd13; bwd[1] = xi_fslw;
 		end
 		default: ;
 	endcase
@@ -1951,10 +1972,10 @@ always_ff @(posedge clk) begin
 			xi_vaddr <= vbr_r + {22'd0, x_vec, 2'b00};
 		end
 
-		// exception entry, continued: two cycles of back-file writes
+		// exception entry, continued: three cycles of back-file writes
 		if (xw_ph != 2'd0) begin
 			xw_ph <= xw_ph + 2'd1;
-			if (xw_ph == 2'd2) begin
+			if (xw_ph == 2'd3) begin
 				xw_ph  <= 2'd0;
 				exc_go <= 1'b1;
 			end
@@ -2019,7 +2040,7 @@ always_ff @(posedge clk) begin
 			if (sk_v) begin
 				if (ag_take) begin sk_v <= 1'b0; sk_vr <= 1'b0; end
 			end
-			else if (in_v && in_rdy && !ag_take) begin
+			else if (SKID && in_v && in_rdy && !ag_take) begin
 				sk_v  <= 1'b1;
 				sk_vr <= 1'b1;
 				sk_u  <= in_u;

@@ -124,7 +124,8 @@ endmodule
 // register in one cycle: the higher port number wins.
 //--------------------------------------------------------------------------
 module ap68060_rf #(
-	parameter int NR = 5
+	parameter int NR = 5,
+	parameter int NW = 3              // write ports (2 or 3): the later wins
 )(
 	input  logic        clk,
 	input  logic  [2:0] we,
@@ -134,10 +135,10 @@ module ap68060_rf #(
 	output logic [31:0] rd [NR]
 );
 	logic [1:0]  lvt [32];
-	logic [31:0] q [3][NR];
+	logic [31:0] q [NW][NR];
 	genvar gw, gr;
 	generate
-		for (gw = 0; gw < 3; gw++) begin : g_w
+		for (gw = 0; gw < NW; gw++) begin : g_w
 			for (gr = 0; gr < NR; gr++) begin : g_r
 				ap68060_lutram #(.AW(5), .DW(32)) bank (
 					.clk(clk), .we(we[gw]), .waddr(wa[gw]), .wdata(wd[gw]),
@@ -148,7 +149,7 @@ module ap68060_rf #(
 	endgenerate
 	initial for (int i = 0; i < 32; i++) lvt[i] = 2'd0;
 	always_ff @(posedge clk)
-		for (int w = 0; w < 3; w++)
+		for (int w = 0; w < NW; w++)
 			if (we[w]) lvt[wa[w]] <= 2'(w);
 	always_comb
 		for (int r = 0; r < NR; r++)

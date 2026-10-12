@@ -326,18 +326,18 @@ endfunction
 //--------------------------------------------------------------------------
 // storage
 //--------------------------------------------------------------------------
-// line valid, per set and way: LUT RAMs, written as flip-flops were (at the
-// edge) and read without a clock -- one copy at DC1's set, one at the
-// engine's (or the snoop's: a snoop freezes the engine).  A clear of every
-// line (CINVA, reset) sweeps the 64 sets (E_M_CLR)
-(* ramstyle = "MLAB, no_rw_check" *) logic lvd0 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic lvd1 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic lvd2 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic lvd3 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic lve0 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic lve1 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic lve2 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic lve3 [128];
+// line valid and dirty, per set and way: one word per set, {dirty[3:0],
+// valid[3:0]}, in LUT RAMs written as flip-flops were (at the edge) and
+// read without a clock.  A LUT RAM is 32 deep whatever its width up to 20,
+// so the ways share a word: copies at DC1's set (valid and dirty), at the
+// engine's or the snoop's (valid; a snoop freezes the engine), at the
+// scan's (dirty), and at the write's set, which forms the word written
+// (the ways not written keep their bits).  A clear of every line (CINVA,
+// reset) sweeps the 64 sets (E_M_CLR)
+(* ramstyle = "MLAB, no_rw_check" *) logic [7:0] lsd [128];   // DC1's set
+(* ramstyle = "MLAB, no_rw_check" *) logic [7:0] lse [128];   // lv_ra
+(* ramstyle = "MLAB, no_rw_check" *) logic [7:0] lsm [128];   // ld_ra
+(* ramstyle = "MLAB, no_rw_check" *) logic [7:0] lsw [128];   // the write's set
 logic  [6:0] lv_ra;                // the engine copy's read: see below
 wire   [3:0] lvd_q;                // DC1's set (m1)
 wire   [3:0] lve_q;                // the engine's (or the snoop's) set
@@ -349,25 +349,15 @@ logic [3:0]  lv  [128];             // (simulation: the flip-flop model, checked
 initial for (int i = 0; i < 128; i++) lv[i] = 4'd0;
 // synthesis translate_on
 // synthesis translate_on
-// dirty [set][way] (the push writes the whole line): four 64x1 LUT RAMs,
-// one read address -- the scan's set, the snooped set, else the fill/push
-// set (they never read at once: a snoop freezes the engine).  No clear:
-// every read is of a valid line, and whatever makes a line valid writes
-// its dirty bit
-(* ramstyle = "MLAB, no_rw_check" *) logic ldm0 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ldm1 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ldm2 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ldm3 [128];
+// dirty [set][way] (the push writes the whole line): read at the scan's
+// set, the snooped set, else the fill/push set (they never read at once: a
+// snoop freezes the engine), and at DC1's (a write-through hit on a dirty
+// line leaves the fast path: the line is pushed first).  No clear: every
+// read is of a valid line, and whatever makes a line valid writes its
+// dirty bit
 logic  [6:0] ld_ra;
-wire   [3:0] ld_q = {ldm3[ld_ra], ldm2[ld_ra], ldm1[ld_ra], ldm0[ld_ra]};
-initial for (int i = 0; i < 128; i++) begin ldm0[i] = 1'b0; ldm1[i] = 1'b0; ldm2[i] = 1'b0; ldm3[i] = 1'b0; end
-// a copy at DC1's set: a write-through hit on a dirty line leaves the fast
-// path (the line is pushed first)
-(* ramstyle = "MLAB, no_rw_check" *) logic ldd0 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ldd1 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ldd2 [128];
-(* ramstyle = "MLAB, no_rw_check" *) logic ldd3 [128];
-initial for (int i = 0; i < 128; i++) begin ldd0[i] = 1'b0; ldd1[i] = 1'b0; ldd2[i] = 1'b0; ldd3[i] = 1'b0; end
+wire   [7:0] lsm_q = lsm[ld_ra];
+wire   [3:0] ld_q  = lsm_q[7:4];
 // the maintenance scan's set, its valid and dirty bits: a copy the write
 // port keeps current (the scan's decision reads 4 bits, not 256)
 logic  [6:0] sc_set;
@@ -674,7 +664,8 @@ always_comb begin
 end
 wire  [4:0] m1_end   = {1'b0, m1.a[3:0]} + {2'b00, nbytes(m1.msz)};
 wire        m1_split = (m1.msz != SZ_Q) && (m1_end > 5'd16);
-wire  [3:0] ldd_q    = {ldd3[m1.a[10:4]], ldd2[m1.a[10:4]], ldd1[m1.a[10:4]], ldd0[m1.a[10:4]]};
+wire  [7:0] lsd_q    = lsd[m1.a[10:4]];
+wire  [3:0] ldd_q    = lsd_q[7:4];
 // a write-through access to a dirty line goes to the engine (it is pushed)
 // (the dirty bits picked by the one-hot match, not the encoded way)
 wire        m1_wtd   = (x_dc1.cm == 2'b00) && |(ldd_q & d1_mj);
@@ -2514,14 +2505,16 @@ always_ff @(posedge clk) begin
 		// the valid/dirty write port
 		//--------------------------------------------------------------
 		begin
-			if (vp_dwe && vp_wm[0]) begin ldm0[vp_set] <= vp_dv; ldd0[vp_set] <= vp_dv; end
-			if (vp_dwe && vp_wm[1]) begin ldm1[vp_set] <= vp_dv; ldd1[vp_set] <= vp_dv; end
-			if (vp_dwe && vp_wm[2]) begin ldm2[vp_set] <= vp_dv; ldd2[vp_set] <= vp_dv; end
-			if (vp_dwe && vp_wm[3]) begin ldm3[vp_set] <= vp_dv; ldd3[vp_set] <= vp_dv; end
-			if (vp_lwe && vp_wm[0]) begin lvd0[vp_set] <= vp_lv; lve0[vp_set] <= vp_lv; end
-			if (vp_lwe && vp_wm[1]) begin lvd1[vp_set] <= vp_lv; lve1[vp_set] <= vp_lv; end
-			if (vp_lwe && vp_wm[2]) begin lvd2[vp_set] <= vp_lv; lve2[vp_set] <= vp_lv; end
-			if (vp_lwe && vp_wm[3]) begin lvd3[vp_set] <= vp_lv; lve3[vp_set] <= vp_lv; end
+			if ((vp_dwe || vp_lwe) && vp_wm != 4'd0) begin
+				logic [7:0] wo, wn;
+				wo = lsw[vp_set];
+				wn[7:4] = vp_dwe ? ((wo[7:4] & ~vp_wm) | (vp_wm & {4{vp_dv}})) : wo[7:4];
+				wn[3:0] = vp_lwe ? ((wo[3:0] & ~vp_wm) | (vp_wm & {4{vp_lv}})) : wo[3:0];
+				lsd[vp_set] <= wn;
+				lse[vp_set] <= wn;
+				lsm[vp_set] <= wn;
+				lsw[vp_set] <= wn;
+			end
 			for (int j = 0; j < 4; j++)
 				if (vp_wm[j]) begin
 					// synthesis translate_off
@@ -2589,16 +2582,16 @@ assign pq1_l  = bo_pa[31:4];
 
 // the valid copies' reads: DC1's lookup; the engine state's set (a
 // split's next line, the slow path's, the scan's, else the fill/push set), or the snooped set while the engine is frozen
-assign lvd_q = {lvd3[m1.a[10:4]], lvd2[m1.a[10:4]], lvd1[m1.a[10:4]], lvd0[m1.a[10:4]]};
-assign lve_q = {lve3[lv_ra], lve2[lv_ra], lve1[lv_ra], lve0[lv_ra]};
+assign lvd_q = lsd_q[3:0];
+wire  [7:0] lse_q = lse[lv_ra];
+assign lve_q = lse_q[3:0];
 always_comb
 	lv_ra = (sn_ph == SN_B)                            ? sn_pa[10:4] :
 	        (e_st == E_SP_2)                           ? m2.r.a[10:4] + 7'd1 :
 	        (e_st == E_S_XL2 || e_st == E_S_ACT)       ? e_va[10:4] :
 	        (e_st == E_M_SCANW || e_st == E_M_SCAN2)   ? sc_set : f_set;
 initial for (int i = 0; i < 128; i++) begin
-	lvd0[i] = 1'b0; lvd1[i] = 1'b0; lvd2[i] = 1'b0; lvd3[i] = 1'b0;
-	lve0[i] = 1'b0; lve1[i] = 1'b0; lve2[i] = 1'b0; lve3[i] = 1'b0;
+	lsd[i] = 8'd0; lse[i] = 8'd0; lsm[i] = 8'd0; lsw[i] = 8'd0;
 end
 // synthesis translate_off
 // the copies against the flip-flop model (after reset's sweep)
