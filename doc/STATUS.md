@@ -9,7 +9,10 @@ ALMs, validated with Verilator.
 - **Programming model** [3, 8]: SR (T1 only, M kept, cleared by an
   interrupt), single supervisor stack, VBR, SFC/DFC, CACR, TCR, URP/SRP,
   ITT/DTT, BUSCR, PCR.  Exception frames $0, $2, $3, $4; RTE format
-  check; the 060's trace and interrupt priorities.
+  check; the 060's trace and interrupt priorities.  A double bus fault
+  (an access or address error in the routine of an access error, an
+  address error or reset) halts the processor: PST $1C, BR negated, the
+  bus released until RSTI (7.9.3).
 - **Integer unit**: the 060 instruction set; MOVEP, CAS2, CHK2/CMP2,
   64-bit MULx/DIVx and CAS on misaligned data trap to vector 61 (format
   $0), as the 060 leaves them to software.  PLPAR/PLPAW, LPSTOP, HALT,
@@ -28,22 +31,37 @@ ALMs, validated with Verilator.
   write-through / noncachable precise and imprecise, NAD/NAI no-allocate,
   FOC/FIC half caches, DPI, push buffer, the four-entry **store buffer**
   (ESB) with SBE access errors, branch cache (EBC, CABC, CUBC).
-- **Bus** [7]: the 68060 bus -- BS3-BS0, SAS, TRA, CLA, BGR, BTT/BB
-  arbitration, TIP; the reset modes taken from IPL2-IPL0 and D15-D0
-  (acknowledge-termination ignore states, native TRA retries, extra write
-  hold); acknowledge cycles (IACK, breakpoint, LPSTOP); RSTO for 512
-  clocks.  Snooping invalidates only (SNOOP with TT1 = 0, both caches,
-  the push buffer included); a snoop has priority over the processor's
-  next transfer.
+- **Bus** [7]: the 68060 bus -- BS3-BS0, SAS, TRA, CLA, BGR, TIP; BB or
+  BTT arbitration, a BTT-only system (BB pulled up) included, BR the
+  registered internal request; the reset modes taken from IPL2-IPL0 and
+  D15-D0 (acknowledge-termination ignore states, native TRA retries,
+  extra write hold); acknowledge cycles (IACK, breakpoint, LPSTOP), no
+  bus cycle after the LPSTOP broadcast but the waking interrupt's
+  acknowledge; RSTO for 512 clocks once every bus cycle is done.
+  Snooping invalidates only (SNOOP with TT1 = 0, both caches, the push
+  buffer and a push waiting for a retry included) and keeps up with
+  snooped transfers on every bus clock: the snooper holds a copy of the
+  data cache's tags and valid bits, so a miss costs nothing and a hit is
+  one frozen DMU clock; a snoop has priority over the processor's next
+  transfer.
 
 ## Verification
 
-- `tb/run_tests.sh`: 23 self-checking programs (tb/asm) under ten bus
+- `tb/run_tests.sh`: 28 self-checking programs (tb/asm) under ten bus
   configurations -- wait states, burst inhibit, retries, BCLK at half the
   clock, and the 060 reset modes (ignore states with junk terminations in
   every ignored clock, native retries, write hold, CLA, BGR).  The
   bench's slave checks the bus protocol on every transfer (BS3-BS0, SAS
-  timing, the A3:A2/CLA rule, the write hold).  All 230 runs pass.
+  timing, the A3:A2/CLA rule, the write hold); the bench also fails a
+  run on: a 68060 transfer while the alternate master owns the bus, or
+  while RSTO is asserted, or after the LPSTOP broadcast; another
+  master's transfer inside a locked sequence with BGR negated; a halted
+  processor that is not quiet (PST $1C, no TS, BR negated); a snoop
+  invalidation dropped, or the snooper's tag copy disagreeing with the
+  cache on any snoop.  All 280 runs pass.
+- `tb/build_fpu_pipe.sh`: the pipelined FPU (FPU_PIPE=1) against the
+  sequential one on random command streams (100,000 commands over four
+  seeds match).
 - `tb/run_bench.sh`: Dhrystone and Whetstone, self-checking (see
   Performance).
 - WinUAE cputest corpus for the 68060 (`tb/run_cputest.py`, generated
@@ -124,6 +142,7 @@ Figures are recorded per commit below.
 |---------|------|-----------|-----------|-----|--------------|
 | c91d41c | 24,574 | 15,150 | 337,920 | 15 | -0.210 ns (Fmax 59.25 MHz; DMU steal -> D-ATC -> tag compare -> dq1) |
 | a4693f9 | not fitted: synthesis estimate 20,654 (c91d41c's was 22,575, so a fit near 22,500) | 13,231 | | | |
+| 040fd85 | not fitted: synthesis estimate 20,929 (52578b9: 20,930; the snooper's tag copy is in M10Ks) | 13,260 | | | |
 
 ### Area options (rtl/ap68060.sv parameters, default 0)
 
