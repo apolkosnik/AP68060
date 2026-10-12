@@ -852,7 +852,7 @@ always_ff @(posedge clk) begin
 				end
 				else st <= S_RUN;
 			end
-			else if (!busy && !b_req_r && !b_gnt && !redir_any &&
+			else if (!busy && !b_req_r && !b_gnt && !redir_any && !stop &&
 			         {1'b0, cnt} + {4'd0, f2_n} + {4'd0, f3_n} <= 6'(QN - 2))
 				b_req_r <= 1'b1;        // the next long word of the stream
 		end

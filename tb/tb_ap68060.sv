@@ -21,6 +21,10 @@
 //   $F150 word  IPL = bits 2:0, falls to bits 6:4 after bits 15:8 clocks  //
 //   $F154 word  arm a one-shot bus error on an instruction fetch at the   //
 //               written address (0 disarms)                               //
+//   $F158 word  the number of times the bench answers a halted processor  //
+//               (PST $1C) with a reset: it checks the halt for 64 clocks  //
+//               (PST $1C, no bus cycle, BR negated) then pulses RSTI;     //
+//               $F15A (read) counts those resets                          //
 //   $F160 word  (read) bench capability word, +cap=<n> (default 7); bit   //
 //               5 is set when BCLK runs at half PCLK (+bclk2)             //
 //   $F200 + 32k (k = 0..3): alternate-master transfer k: +0 address,     //
@@ -29,9 +33,14 @@
 //               or one long word as it is on D31-D0 at +8)                //
 //   $F280 word  run transfers 0..n-1 as an alternate bus master: bits 2:0 //
 //               n, bit 8 wait first for a 68060 line read of the line at //
-//               $F284 (it takes the bus right after it)                   //
+//               $F284 (it takes the bus right after it); bit 9 instead   //
+//               for a 68060 push of that line, which the slave answers    //
+//               with a retry once (the bus goes to this master first)     //
 //   $F288 word  bus clocks the alternate master holds the bus before its  //
 //               first transfer                                             //
+//   $F28A word  then runs the transfers this many times more, back to     //
+//               back in the same tenure, each time $F290 (long) bytes     //
+//               further, a single write's data plus the repetition number //
 //   $F28C word  (read) alternate master: 0 busy, 1 done, 2 bus error      //
 //   $F294 long  copied to $F2A8 when written (a read of $F2A8, another   //
 //               line, shows whether the write reached the bus first)      //
@@ -196,7 +205,7 @@ m68060_bus_slave #(.AW(20)) mem (
 	.m_ign(md_ign), .m_native(md_native), .m_hold(md_hold), .m_cnt(md_cnt),
 	.wait_mode(wait_mode), .tbi_mode(tbi_mode), .retry_pct(retry_pct),
 	.cla_mode(md_cla), .ign_junk(md_junk),
-	.tea_req(tea_req), .tci_req(1'b0), .hold(fetch_hold),
+	.tea_req(tea_req), .retry_req(push_retry), .tci_req(1'b0), .hold(fetch_hold),
 	.iack_vector(8'd0), .ext_rdata(32'd0), .ext_inmem(1'b0),
 	.xfer_v(xfer_v), .xfer_addr(xfer_addr), .xfer_rd(xfer_rd), .xfer_siz(xfer_siz),
 	.xfer_tt(xfer_tt), .xfer_tm(xfer_tm), .xfer_beat(xfer_beat),
@@ -209,6 +218,46 @@ always_ff @(posedge clk)
 		errors <= errors + 1;
 		$display("FAIL: bus protocol (cycle %0d, pc=%h)", cycles, dbg_pc);
 	end
+
+// the processor starts no bus cycle while it asserts RSTO, and after the
+// LPSTOP broadcast none but an acknowledge cycle (the interrupt that ends
+// the stop) (MC68060UM 2.8.4, 7.8.2.1)
+logic lps_quiet;
+always_ff @(posedge clk)
+	if (!rsti_n) lps_quiet <= 1'b0;
+	else if (bclk_en && !ts_n && a_oe) begin
+		if (!rsto_n) begin
+			errors <= errors + 1;
+			$display("FAIL: bus cycle with RSTO asserted (cycle %0d, a=%h)", cycles, a_o);
+		end
+		if (lps_quiet && tt != 2'd3) begin
+			errors <= errors + 1;
+			$display("FAIL: bus cycle after the LPSTOP broadcast (cycle %0d, a=%h)", cycles, a_o);
+		end
+		if (tt == 2'd3)
+			lps_quiet <= (tm == 3'd0) && !rw_n && a_o == 32'hFFFFFFFE;
+	end
+
+//--------------------------------------------------------------------------
+// a halted processor (double bus fault, MC68060UM 7.9.3): it shows PST $1C,
+// starts no bus cycle and does not ask for the bus until RSTI restarts it
+//--------------------------------------------------------------------------
+int halts, halt_bad;
+task automatic halt_reset();
+	int bad;
+	bad = 0;
+	repeat (2) @(posedge clk);          // (PST is registered)
+	for (int i = 0; i < 64; i++) begin
+		if (pst != 5'h1C || (!ts_n && a_oe) || !br_n) bad++;
+		@(posedge clk);
+	end
+	if (bad != 0) begin
+		halt_bad++;
+		$display("FAIL: halted processor: PST %h, bus not quiet (%0d clocks)", pst, bad);
+	end
+	rsti_n = 1'b0;
+	repeat (8) @(posedge clk);
+endtask
 
 //--------------------------------------------------------------------------
 // program load
@@ -445,6 +494,7 @@ task automatic prof_report();
 	end
 endtask
 logic        berr_armed, wberr_arm, fberr_armed;
+logic [15:0] halt_arm = 16'd0;   // (kept through the bench's resets)
 logic [15:0] fberr_addr;
 logic [15:0] ipl_delay;
 logic  [7:0] ipl_pulse, ipl_step;
@@ -456,8 +506,10 @@ assign fetch_hold = (fetch_stall != 0) && xfer_v && (xfer_tm == 3'd2 || xfer_tm 
 
 // alternate bus master (and arbiter)
 logic        am_go, am_trig_en, am_trig;
+logic        am_trig_push;      // ... on a push of the line, retried
 logic  [2:0] am_n;
-logic [15:0] am_delay;
+logic [15:0] am_delay, am_rep;
+logic [31:0] am_step;
 logic [31:0] am_trig_a;
 logic [31:0] am_x_addr [4];
 logic  [4:0] am_x_ctl  [4];
@@ -468,6 +520,7 @@ logic  [1:0] am_status, am_status_q;
 m68060_alt_master am (
 	.clk(clk), .nreset(rsti_n), .bclk_en(bclk_en),
 	.go(am_go), .n(am_n), .trig_en(am_trig_en), .trig(am_trig), .delay(am_delay),
+	.rep(am_rep), .step(am_step),
 	.x_addr(am_x_addr), .x_ctl(am_x_ctl), .x_wd(am_x_wd), .x_rd(am_x_rd), .status(am_status),
 	.bgr_mode(md_bgr), .cpu_bg_n(am_bg_n), .cpu_bgr_n(am_bgr_n), .cpu_bb_n(bb_oe ? bb_n_o : 1'b1),
 	.drive(am_drive), .a(am_a), .rw_n(am_rw_n), .siz(am_siz), .tt(am_tt), .tm(am_tm),
@@ -475,14 +528,27 @@ m68060_alt_master am (
 	.d_bus(bus_dr), .ta_n(ta_n), .tea_n(tea_n), .tbi_n(tbi_n)
 );
 
-// the trigger: the 68060 starts a line read of the armed line
-assign am_trig = bclk_en && !ts_n && a_oe && !am_drive && rw_n && siz == 2'b11 &&
-                 a_o[31:4] == am_trig_a[31:4];
+// the trigger: the 68060 starts a line read of the armed line (or a push
+// of it: then the slave retries that push until this master has the bus)
+assign am_trig = bclk_en && !ts_n && a_oe && !am_drive && siz == 2'b11 &&
+                 a_o[31:4] == am_trig_a[31:4] &&
+                 (am_trig_push ? (!rw_n && tm == 3'd0) : rw_n);
+logic pr_arm, push_retry;
+always_ff @(posedge clk)
+	if (!rsti_n || am_drive) pr_arm <= 1'b0;
+	else if (am_trig && am_trig_push && am.st == am.A_TRIG) pr_arm <= 1'b1;
+assign push_retry = pr_arm && xfer_v && !am_drive && !xfer_rd && xfer_siz == 2'b11 &&
+                    xfer_tm == 3'd0 && xfer_addr[31:4] == am_trig_a[31:4];
 
 // PST never shows an encoding MC68060UM table 2-7 leaves undefined ($03,
 // $05-$07, $0C, $13; $08/$0B are the emulator's), and shows "stopped"
 // ($17, LPSTOP $16) once STOP has held for a few clocks
 int stop_clks;
+logic stop_q, lpstop_q;
+always_ff @(posedge clk) begin
+	stop_q   <= dut.be.stopped;
+	lpstop_q <= dut.be.lpstopped;
+end
 always_ff @(posedge clk) begin
 	stop_clks <= (rsti_n && dut.be.stopped) ? stop_clks + 1 : 0;
 	if (rsti_n && (pst == 5'h03 || pst == 5'h05 || pst == 5'h06 || pst == 5'h07 ||
@@ -490,7 +556,8 @@ always_ff @(posedge clk) begin
 		$display("FAIL: PST shows the undefined encoding %h", pst);
 		errors <= errors + 1;
 	end
-	if (stop_clks > 8 && pst != (dut.be.lpstopped ? 5'h16 : 5'h17)) begin
+	// (pst is registered: it shows the previous clock's state)
+	if (stop_clks > 8 && stop_q && pst != (lpstop_q ? 5'h16 : 5'h17)) begin
 		$display("FAIL: PST is %h during STOP", pst);
 		errors <= errors + 1;
 	end
@@ -515,7 +582,7 @@ logic biutrace;
 initial biutrace = $test$plusargs("biutrace");
 always_ff @(posedge clk)
 	if (biutrace) begin
-		for (int c = 0; c < 3; c++) begin
+		for (int c = 0; c < 2; c++) begin       // (the BIU's two clients)
 			if (dut.biu.gnt[c])
 				$display("%8d BIU gnt c%0d %s a=%08x siz=%0d tm=%0d", cycles, c,
 				         dut.biu.breq[c].rd ? "RD" : "WR", dut.biu.breq[c].addr,
@@ -536,6 +603,29 @@ always_ff @(posedge clk)
 	if (rsti_n && dut.sn_ovf) begin
 		$display("FAIL: snoop invalidation queue overflowed");
 		errors <= errors + 1;
+	end
+// the snooper's copy of the data cache's tags and valid bits answers as the
+// cache itself would for every snooped line
+always_ff @(posedge clk)
+	if (rsti_n && dut.snoop.sp_v && !dut.dmu.clr_rst) begin
+		logic [6:0]  st;
+		logic [20:0] tg;
+		logic [3:0]  v;
+		logic        h;
+		logic [1:0]  w;
+		st = dut.snoop.sp_l[6:0];
+		tg = dut.snoop.sp_l[27:7];
+		v  = dut.dmu.lv[st];
+		h  = 1'b0; w = 2'd0;
+		if (v[0] && dut.dmu.g_way[0].tag.mem[st] == tg) begin h = 1'b1; w = 2'd0; end
+		if (v[1] && dut.dmu.g_way[1].tag.mem[st] == tg) begin h = 1'b1; w = 2'd1; end
+		if (v[2] && dut.dmu.g_way[2].tag.mem[st] == tg) begin h = 1'b1; w = 2'd2; end
+		if (v[3] && dut.dmu.g_way[3].tag.mem[st] == tg) begin h = 1'b1; w = 2'd3; end
+		if (h != dut.snoop.sp_hit || (h && w != dut.snoop.sp_way)) begin
+			$display("FAIL: snoop: the tag copy says hit=%b way=%0d, the cache hit=%b way=%0d (line %07x, cycle %0d)",
+			         dut.snoop.sp_hit, dut.snoop.sp_way, h, w, dut.snoop.sp_l, cycles);
+			errors <= errors + 1;
+		end
 	end
 
 // results back into the register block the program reads
@@ -601,7 +691,10 @@ always_ff @(posedge clk) begin
 		am_n        <= '0;
 		am_trig_en  <= 1'b0;
 		am_trig_a   <= '0;
+		am_trig_push <= 1'b0;
 		am_delay    <= '0;
+		am_rep      <= '0;
+		am_step     <= '0;
 		for (int k = 0; k < 4; k++) begin am_x_addr[k] <= '0; am_x_ctl[k] <= '0; am_x_wd[k] <= '0; end
 	end
 	else begin
@@ -619,6 +712,7 @@ always_ff @(posedge clk) begin
 				am_n   <= 3'd1;
 				am_trig_en <= 1'b0;
 				am_delay <= '0;
+				am_rep   <= '0;
 				if (rs_split) begin     // write $D014, snooped (t_cbsplit)
 					rs_op <= 3'd1;
 					am_x_addr[0] <= 32'h0000_D014;
@@ -772,6 +866,7 @@ always_ff @(posedge clk) begin
 				16'hF14C: begin ipl_lvl <= w[2:0]; ipl_pulse <= w[15:8]; end
 				16'hF150: begin ipl_lvl <= w[2:0]; ipl_next <= w[6:4]; ipl_step <= w[15:8]; end
 				16'hF154: begin fberr_armed <= (w != 16'd0); fberr_addr <= w; end
+				16'hF158: halt_arm <= w;
 				16'hF2C0: pins_r <= w[1:0];
 				16'hF2C4: begin
 					rs_en    <= w[15];
@@ -788,9 +883,12 @@ always_ff @(posedge clk) begin
 						                 mem.mem[(16'hF210 + 32 * k) >> 2], mem.mem[(16'hF214 + 32 * k) >> 2]};
 					end
 					am_n       <= w[2:0];
-					am_trig_en <= w[8];
+					am_trig_en <= w[8] || w[9];
+					am_trig_push <= w[9];
 					am_trig_a  <= mem.mem[16'hF284 >> 2];
 					am_delay   <= mem.mem[16'hF288 >> 2][31:16];
+					am_rep     <= mem.mem[16'hF288 >> 2][15:0];
+					am_step    <= mem.mem[16'hF290 >> 2];
 					am_go      <= 1'b1;
 				end
 				default: ;
@@ -853,6 +951,20 @@ always_ff @(posedge clk)
 			$display("%8d FS second half hit=%b", cycles, dut.dmu.m4.x1.hit);
 		if (dut.dmu.sn_req && dut.dmu.sn_ph == 0) $display("%8d SN req %08x", cycles, dut.dmu.sn_pa);
 		if (dut.dmu.sn_look) $display("%8d SN look hit=%b", cycles, dut.dmu.sn_hit);
+	end
+
+// +sntrace=<from>: the snooper's copy and the DMU's writes to it, 400 cycles
+int snt_from;
+initial if (!$value$plusargs("sntrace=%d", snt_from)) snt_from = -1;
+always_ff @(posedge clk)
+	if (snt_from >= 0 && cycles >= snt_from && cycles < snt_from + 400) begin
+		if (dut.snoop.snoop) $display("%8d SNP ts a=%08x", cycles, bus_a);
+		if (dut.snoop.sp_v) $display("%8d SNP check l=%07x hit=%b way=%0d slow=%b", cycles, dut.snoop.sp_l, dut.snoop.sp_hit, dut.snoop.sp_way, dut.snoop.sp_slow);
+		if (dut.snoop.dt_we) $display("%8d SNP tagw set=%0d way=%0d tag=%06x", cycles, dut.snoop.dt_set, dut.snoop.dt_way, dut.snoop.dt_tag);
+		if (dut.snoop.dv_we) $display("%8d SNP valw set=%0d wm=%b v=%b (landed last clock)", cycles, dut.snoop.dv_set, dut.snoop.dv_wm, dut.snoop.dv_lv);
+		if (dut.snoop.sf_ack) $display("%8d SNP fast inv set=%0d way=%0d", cycles, dut.snoop.sf_set, dut.snoop.sf_way);
+		if (!ts_n && a_oe && bclk_en) $display("%8d CPU ts a=%08x rw=%b tm=%0d", cycles, a_o, rw_n, tm);
+		if (dut.dmu.wfs_p1) $display("%8d DMU split second half x1.hit=%b frz=%b", cycles, dut.dmu.m4.x1.hit, dut.dmu.sn_frz);
 	end
 
 // +pintrace=<from>: the bus pins every clock for 60 cycles
@@ -1004,6 +1116,8 @@ initial begin
 	result = 0;
 	errors = 0;
 	cycles = 0;
+	halts = 0;
+	halt_bad = 0;
 	stamp_prev = 0;
 	insn_prev = 0;
 	load_prog();
@@ -1012,10 +1126,19 @@ initial begin
 	mem.mem[16'hF164 >> 2] = 32'd0;
 	repeat (8) @(posedge clk);
 	rsti_n = 1'b1;
-	while (result == 0 && cycles < timeout && !dbg_halted) @(posedge clk);
+	while (result == 0 && cycles < timeout) begin
+		if (dbg_halted) begin
+			if (halts >= int'(halt_arm)) break;
+			halt_reset();
+			halts++;
+			mem.mem[16'hF158 >> 2] = {mem.mem[16'hF158 >> 2][31:16], 16'(halts)};
+			rsti_n = 1'b1;
+		end
+		@(posedge clk);
+	end
 	if (prof) prof_report();
 	if (pcprof) pcprof_dump();
-	if (result == 1 && errors == 0)
+	if (result == 1 && errors == 0 && halt_bad == 0)
 		$display("PASS %s cycles=%0d", prog, cycles);
 	else if (result == 0)
 		$display("FAIL %s: %s at pc=%h, last test %0d", prog,

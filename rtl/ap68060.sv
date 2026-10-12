@@ -150,15 +150,18 @@ logic          b_ravec, b_rtci;
 logic  [1:0]   b_errbeat;
 logic          b_idle;
 logic          rsto_req, rsto_busy;
+logic          be_fstop;
+logic          b_drop;
 
 ap68060_biu #(.NC(NC)) biu (
 	.clk(clk), .nreset(nreset), .bclk_en(bclk_en),
 	.m_ign(m_ign), .m_native(m_native), .m_hold(m_hold), .m_cnt(m_cnt),
-	.req(b_req), .breq(b_breq), .wdata(b_wdata),
+	// (client 1, the fetch, is held while stopped, halted or resetting)
+	.req(b_req & ~{be_fstop || rsto_busy, 1'b0}), .breq(b_breq), .wdata(b_wdata),
 	.gnt(b_gnt), .done(b_done), .err(b_err),
 	.rvalid(b_rvalid), .rclient(b_rclient), .rdata(b_rdata), .rbeat(b_rbeat),
 	.ravec(b_ravec), .rtci(b_rtci), .errbeat(b_errbeat), .idle(b_idle), .own(b_own),
-	.unlock(kill_now), .sn_busy(sn_busy || sn_act),   // (the DMU engine sees no grant while frozen)
+	.unlock(kill_now), .sn_busy(sn_busy || sn_act), .halt(dbg_halted), .drop({1'b0, b_drop}),   // (the DMU engine sees no grant while frozen)
 	.rsto_req(rsto_req), .rsto_busy(rsto_busy),
 	.a_o(a_o), .a_oe(a_oe), .d_i(d_i), .d_o(d_o), .d_oe(d_oe),
 	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
@@ -181,6 +184,12 @@ logic [127:0] sn_line;
 logic [31:0] sn_wword;
 logic [15:0] sn_wbe;
 logic        sn_ic, sn_ic_all, sn_ic_done, sn_ihit;
+logic        sf_req, sf_more, sf_ack, dt_we, dv_we, dv_lv, pq0_v, pq1_v;
+logic  [6:0] sf_set, dt_set, dv_set;
+logic  [1:0] sf_way, dt_way;
+logic [20:0] dt_tag;
+logic  [3:0] dv_wm;
+logic [27:0] pq0_l, pq1_l;
 logic [31:0] sn_ic_pa;
 
 ap68060_snoop snoop (
@@ -188,6 +197,10 @@ ap68060_snoop snoop (
 	.a_i(a_i), .ts_n_i(ts_n_i), .tt_i(tt_i), .snoop_n(snoop_n),
 	.dc_req(sn_req), .dc_pa(sn_pa), .dc_look(sn_look), .dc_hit(sn_hit),
 	.dc_inv(sn_inv), .dc_ovf(sn_ovf), .busy(sn_busy),
+	.sf_req(sf_req), .sf_set(sf_set), .sf_way(sf_way), .sf_more(sf_more), .sf_ack(sf_ack),
+	.dt_we(dt_we), .dt_set(dt_set), .dt_way(dt_way), .dt_tag(dt_tag),
+	.dv_we(dv_we), .dv_set(dv_set), .dv_wm(dv_wm), .dv_lv(dv_lv),
+	.pq0_v(pq0_v), .pq0_l(pq0_l), .pq1_v(pq1_v), .pq1_l(pq1_l),
 	.ic_req(sn_ic), .ic_pa(sn_ic_pa), .ic_all(sn_ic_all), .ic_done(sn_ic_done)
 );
 assign sn_wr    = 1'b0;          // (the 68060 never takes snooped data)
@@ -267,7 +280,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES),
 	.ipl(ipl_s2), .iack_lvl(iack_lvl), .rsto_req(rsto_req), .rsto_busy(rsto_busy),
 	.kill_now(kill_now), .adv_ag(adv_ag),
 	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1), .tc(tc),
-	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .halted(dbg_halted)
+	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .halted(dbg_halted), .fetch_stop(be_fstop)
 );
 
 ap68060_dmu dmu (
@@ -297,13 +310,17 @@ ap68060_dmu dmu (
 	.iatc_flush_fc2(iatc_flush_fc2), .iatc_wr(iatc_wr), .iatc_wla(iatc_wla),
 	.iatc_wfc2(iatc_wfc2), .iatc_went(iatc_went),
 	.bi_req(b_req[0]), .bi_breq(b_breq[0]), .bi_wdata(b_wdata[0]),
-	.bi_gnt(b_gnt[0]), .bi_done(b_done[0]), .bi_err(b_err[0]),
+	.bi_gnt(b_gnt[0]), .bi_done(b_done[0]), .bi_err(b_err[0]), .bi_drop(b_drop),
 	.bi_rvalid(b_rvalid && b_rclient == 1'b0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
 	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
 	.b_ravec(b_ravec), .b_rtci(b_rtci),
 	.sn_req(sn_req), .sn_pa(sn_pa), .sn_look(sn_look), .sn_hit(sn_hit),
 	.sn_dirty(sn_dirty), .sn_line(sn_line), .sn_inv(sn_inv), .sn_act(sn_act), .sn_wr(sn_wr),
-	.sn_wbe(sn_wbe), .sn_wword(sn_wword)
+	.sn_wbe(sn_wbe), .sn_wword(sn_wword),
+	.sf_req(sf_req), .sf_set(sf_set), .sf_way(sf_way), .sf_more(sf_more), .sf_ack(sf_ack),
+	.dt_we(dt_we), .dt_set(dt_set), .dt_way(dt_way), .dt_tag(dt_tag),
+	.dv_we(dv_we), .dv_set(dv_set), .dv_wm(dv_wm), .dv_lv(dv_lv),
+	.pq0_v(pq0_v), .pq0_l(pq0_l), .pq1_v(pq1_v), .pq1_l(pq1_l)
 );
 
 // instruction side <-> DMU
@@ -349,7 +366,10 @@ ap68060_fetch fetch (
 	.clk(clk), .nreset(nreset),
 	.redir_v(redir_v), .redir_pc(redir_pc),
 	.d_redir_v(d_redir_v), .d_redir_pc(d_redir_pc),
-	.stop(1'b0), .smode(sr[13]),
+	// no fetches while stopped or halted, nor while RSTO is asserted
+	// (MC68060UM 7.8.2.1: no bus activity after the LPSTOP broadcast; 2.8.4:
+	// all bus cycles are suspended before RSTO is asserted)
+	.stop(be_fstop || rsto_busy), .smode(sr[13]),
 	.cacr(cacr), .tc(tc), .itt0(itt0), .itt1(itt1), .cdis(cdis), .mdis(mdis),
 	.win(win), .win_flt(win_flt), .win_fdem(win_fdem), .win_fatc(win_fatc),
 	.win_bt(win_bt), .bt_tgt(bt_tgt),

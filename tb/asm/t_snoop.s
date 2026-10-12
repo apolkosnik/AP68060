@@ -27,8 +27,10 @@ DONEREG	equ	$F102
 AMX	equ	$F200		; transfer k: AMX+32k: +0 addr, +4 ctl, +8 data
 AMGO	equ	$F280
 AMTRIG	equ	$F284
-AMDLY	equ	$F288
+AMDLY	equ	$F288		; +0 hold clocks, +2 repetitions
 AMST	equ	$F28C
+AMSTEP	equ	$F290		; the repetitions' address step
+WWATCH	equ	$F2D0		; watch window: +0 start, +4 end, +8 reads, +12 writes
 DUMMY	equ	$3800		; a harmless word for the warm-up "go"
 STUB	equ	$3FF0		; I-cache test routine (set $3F)
 
@@ -413,6 +415,123 @@ start:
 	cmp.w	#80,d4
 	bls.s	.sweep
 	move.w	#$2700,sr
+
+;---------------------------- snoops at the highest rate (MC68060UM 5.6, 7.12)
+; Nothing limits how closely snooped transfers follow each other, and a
+; snoop has priority over the processor: 128 dirty lines ($20000, one in
+; each set of way 0..3 as allocated), then the other master writes one
+; long word in each, back to back in one tenure.  Every line must go (the
+; bench also fails the run if an invalidation is ever dropped or the
+; snooper's tag copy disagrees with the cache): the cached reads then see
+; the new memory, and CPUSHA writes nothing over it.  Then the same with
+; snooped reads, which leave memory alone but take the lines all the same.
+SNB	equ	$20000
+	moveq	#0,d2			; memory: $5A000000 + i
+.f0:	move.l	d2,d0
+	or.l	#$5A000000,d0
+	move.l	d2,d1
+	lsl.l	#4,d1
+	add.l	#SNB,d1
+	movea.l	d1,a0
+	move.l	d0,(a0)			; (supervisor: noncachable)
+	or.l	#$C0000000,d0		; the cache: dirty, $DA000000 + i
+	moves.l	d0,(a0)
+	addq.l	#1,d2
+	cmp.l	#128,d2
+	bne.s	.f0
+	amx	0,SNB,SZL|SNP
+	amd	0,$A5000000		; the write of line i: $A5000000 + i
+	move.l	#16,(AMSTEP).l
+	move.l	#127,(AMDLY).l		; 127 more
+	amgo	1
+	clr.l	(AMDLY).l
+	moveq	#0,d2
+.f1:	move.l	d2,d1
+	lsl.l	#4,d1
+	add.l	#SNB,d1
+	movea.l	d1,a0
+	moves.l	(a0),d1			; a fill from memory: the other master's
+	move.l	d2,d0
+	or.l	#$A5000000,d0
+	cmp.l	d0,d1
+	beq.s	.f2
+	failt	57
+.f2:	addq.l	#1,d2
+	cmp.l	#128,d2
+	bne.s	.f1
+	cpusha	dc			; (clean lines: nothing to push)
+	moveq	#0,d2
+.f3:	move.l	d2,d1
+	lsl.l	#4,d1
+	add.l	#SNB,d1
+	movea.l	d1,a0
+	move.l	d2,d0
+	or.l	#$A5000000,d0
+	cmp.l	(a0),d0			; memory (noncachable)
+	beq.s	.f4
+	failt	58
+.f4:	addq.l	#1,d2
+	cmp.l	#128,d2
+	bne.s	.f3
+; snooped reads
+	moveq	#0,d2
+.f5:	move.l	d2,d1
+	lsl.l	#4,d1
+	add.l	#SNB,d1
+	movea.l	d1,a0
+	move.l	d2,d0
+	or.l	#$3C000000,d0		; dirty again: $3C000000 + i
+	moves.l	d0,(a0)
+	addq.l	#1,d2
+	cmp.l	#128,d2
+	bne.s	.f5
+	amx	0,SNB,RD|SZL|SNP
+	move.l	#127,(AMDLY).l
+	amgo	1
+	clr.l	(AMDLY).l
+	chkm	AMX+8,$A5000000+127,59	; the last line's read: memory's word
+	moveq	#0,d2
+.f6:	move.l	d2,d1
+	lsl.l	#4,d1
+	add.l	#SNB,d1
+	movea.l	d1,a0
+	moves.l	(a0),d1			; the dirty data went: memory's again
+	move.l	d2,d0
+	or.l	#$A5000000,d0
+	cmp.l	d0,d1
+	beq.s	.f7
+	failt	60
+.f7:	addq.l	#1,d2
+	cmp.l	#128,d2
+	bne.s	.f6
+	clr.l	(AMSTEP).l
+
+;----------------- a snoop takes a push that is waiting to be retried (7.9.2)
+; The push of a dirty line is answered with a retry while the other master
+; asks for the bus: the 68060 gives the bus up with the push pending, the
+; other master writes the line with SNOOP, and the push -- whose line the
+; snoop has taken -- must not be run again over that write.
+PRL	equ	$8400
+	mwr	PRL,$11110000
+	mwr	PRL+4,$11110004
+	cwr	PRL,$D1D1D1D1		; allocated and dirty
+	amx	0,PRL+4,SZL|SNP
+	amd	0,$A16A16A1
+	move.l	#PRL,(AMTRIG).l
+	clr.l	(WWATCH).l		; watch the line: count the CPU's writes
+	move.l	#PRL,(WWATCH).l
+	move.l	#PRL+16,(WWATCH+4).l
+	clr.l	(WWATCH+12).l
+	move.w	#$0201,(AMGO).l		; on the push of PRL: retry, then write
+	lea	(PRL).l,a0
+	cpushl	dc,(a0)			; the push
+	bsr	amwait
+	move.l	(WWATCH+12).l,d1
+	chkl	d1,0,61			; nothing of the push reached memory
+	move.l	(PRL+4).l,d1		; (noncachable)
+	chkl	d1,$A16A16A1,62		; the other master's write stands
+	move.l	(PRL).l,d1
+	chkl	d1,$11110000,63		; the rest of the line is memory's
 
 ;----------------------------------------------------------------- done
 	move.w	#$600D,(DONEREG).l

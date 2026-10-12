@@ -14,6 +14,9 @@
 //   x_wd[k]    write data: a line's four long words (A3:A2 = 0 first), or //
 //              in [127:96] the long word as it goes on D31-D0             //
 //   x_rd[k]    read data, the same layout (a single transfer in [127:96]) //
+//   rep, step  then rep more times, in the same tenure and without a gap:  //
+//              the transfers again, every address step bytes further, a   //
+//              single write's data plus the repetition's number           //
 //   status     0 idle or busy, 1 done, 2 ended in a bus error             //
 //                                                                          //
 // Arbitration: BG to the 68060 is negated (with BGR asserted when        //
@@ -36,6 +39,8 @@ module m68060_alt_master (
 	input  logic        trig_en,
 	input  logic        trig,
 	input  logic [15:0] delay,
+	input  logic [15:0] rep,
+	input  logic [31:0] step,
 	input  logic [31:0] x_addr [4],
 	input  logic  [4:0] x_ctl  [4],
 	input  logic [127:0] x_wd  [4],
@@ -75,12 +80,15 @@ logic  [1:0] k;               // the transfer running
 logic  [1:0] beat;
 logic        inh;             // a burst-inhibited line, as long words
 logic [15:0] dly;
+logic [15:0] rl, ri;          // repetitions left, this one's number
+logic [31:0] aoff;            // its address offset
 
 wire  [4:0] ctl    = x_ctl[k];
 wire        c_rd   = ctl[0];
 wire  [1:0] c_siz  = ctl[2:1];
 wire        c_line = (c_siz == 2'b11);
-wire  [1:0] a32    = x_addr[k][3:2] + beat;   // the long word of this beat
+wire [31:0] xa     = x_addr[k] + aoff;
+wire  [1:0] a32    = xa[3:2] + beat;          // the long word of this beat
 
 function automatic logic [31:0] lw(input logic [127:0] l, input logic [1:0] i);
 	lw = l[127 - 32 * i -: 32];
@@ -89,6 +97,7 @@ endfunction
 always_ff @(posedge clk) begin
 	if (!nreset) begin
 		st <= A_IDLE; nx <= '0; k <= '0; beat <= '0; inh <= 1'b0; dly <= '0;
+		rl <= '0; ri <= '0; aoff <= '0;
 		status <= 2'd0;
 		cpu_bg_n <= 1'b0; cpu_bgr_n <= 1'b1;
 		drive <= 1'b0; a <= '0; rw_n <= 1'b1; siz <= '0; tt <= '0; tm <= '0; snoop_n <= 1'b1;
@@ -99,6 +108,9 @@ always_ff @(posedge clk) begin
 		if (go && st == A_IDLE) begin
 			nx     <= n;
 			k      <= 2'd0;
+			rl     <= rep;
+			ri     <= '0;
+			aoff   <= '0;
 			status <= 2'd0;
 			st     <= trig_en ? A_TRIG : A_REQ;
 		end
@@ -127,13 +139,13 @@ always_ff @(posedge clk) begin
 			end
 			A_TS: begin
 				ts_n <= 1'b0;
-				a    <= inh ? {x_addr[k][31:4], a32, 2'b00} : x_addr[k];
+				a    <= inh ? {xa[31:4], a32, 2'b00} : xa;
 				rw_n <= c_rd;
 				siz  <= inh ? 2'b00 : c_siz;
 				tt   <= 2'd0;
 				tm   <= 3'd1;
 				snoop_n <= (ctl[4:3] == 2'b00);
-				d    <= c_line ? lw(x_wd[k], a32) : x_wd[k][127:96];
+				d    <= c_line ? lw(x_wd[k], a32) : x_wd[k][127:96] + {16'd0, ri};
 				d_oe <= !c_rd;
 				st   <= A_DATA;
 			end
@@ -165,6 +177,15 @@ always_ff @(posedge clk) begin
 					end
 					else if ({1'b0, k} + 3'd1 < nx) begin
 						k    <= k + 2'd1;
+						beat <= 2'd0;
+						inh  <= 1'b0;
+						st   <= A_TS;
+					end
+					else if (rl != 16'd0) begin
+						rl   <= rl - 16'd1;
+						ri   <= ri + 16'd1;
+						aoff <= aoff + step;
+						k    <= 2'd0;
 						beat <= 2'd0;
 						inh  <= 1'b0;
 						st   <= A_TS;

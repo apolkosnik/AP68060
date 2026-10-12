@@ -92,6 +92,9 @@ module ap68060_biu
 
 	input  logic              unlock,   // abandon an open locked sequence
 	input  logic              sn_busy,  // snoop invalidations still pending: no new transfer
+	input  logic              halt,     // the processor halted: end the tenure, BR negated
+	input  logic [NC-1:0]     drop,     // a retry waiting for the bus is not wanted any more
+	                                    // (a push whose line a snoop took): done, not rerun
 
 	// RESET instruction
 	input  logic              rsto_req,  // pulse
@@ -329,7 +332,7 @@ always_ff @(posedge clk) begin
 			start = 1'b0;
 
 			// bus request: an internal request the bus is not there for
-			br_n <= !((pick_v || st == S_RETRY) && !(ab == B_EXP && keep_bus));
+			br_n <= !((pick_v || st == S_RETRY) && !(ab == B_EXP && keep_bus)) || halt;
 
 			//--------------------------------------------------------------
 			// arbitration
@@ -373,7 +376,12 @@ always_ff @(posedge clk) begin
 				ts_n  <= 1'b1;
 				sas_n <= 1'b1;
 				d_oe  <= 1'b0;
-				if ((pick_v || st == S_RETRY) && !sn_busy &&
+				if (st == S_RETRY && drop[cur_c]) begin
+					st <= S_IDLE;
+					done[cur_c] <= 1'b1;
+					finish_cycle();
+				end
+				else if ((pick_v || st == S_RETRY) && !sn_busy &&
 				    (((ab == B_IMP) && !bg_n && !ts_oth) || (ab == B_EXP && keep_bus && !end_tenure))) begin
 					start = 1'b1;
 					if (st == S_IDLE) begin
@@ -390,7 +398,7 @@ always_ff @(posedge clk) begin
 						end
 					end
 				end
-				else if (ab == B_EXP && (!keep_bus || end_tenure)) begin
+				else if (ab == B_EXP && (!keep_bus || end_tenure || halt)) begin
 					// end of tenure: BTT one bus clock asserted, one negated;
 					// BB negated for one CLK
 					ab         <= B_END1;

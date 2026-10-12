@@ -144,7 +144,9 @@ module ap68060_backend
 	// debug
 	output logic [31:0] dbg_pc,
 	output logic        dbg_retire,
-	output logic        halted
+	output logic        halted,
+	output logic        fetch_stop      // no new instruction fetches: stopped
+                                        // (STOP/LPSTOP) or halted
 );
 
 // the SR bits the 68060 keeps: T1 S M I2-I0 X N Z V C (no T0)
@@ -1172,6 +1174,8 @@ logic        lpstopped;       // ... LPSTOP (PST $16)
 logic [31:0] stop_pc;         // the instruction after STOP
 logic        rst_issued;      // RESET instruction: RSTO requested
 logic        xstk;            // an exception routine runs (entry to its last uop)
+logic        xr_dbl;          // ... and it is an access error's, an address
+                              // error's or reset's (a fault in it: halt)
 logic        wb_cof;          // the uop's control transfer was taken
 
 wire wb_is_exc   = wb_v && (wb_exc != 8'd0);
@@ -1209,7 +1213,14 @@ wire wb_post_trap = (wb_exc >= 8'd32 && wb_exc < 8'd48) ||
 assign wb_refetch = adv_wb && wb_v && (wb_exc == EXC_IFS || wb_exc == EXC_IFSA);
 logic        rt_armed;
 logic [31:0] rt_pc;
-wire x_go        = (adv_wb && wb_is_exc && !wb_refetch) || take_trace || take_irq || take_sbe;
+// a double bus fault (MC68060UM 7.9.3, 8.2.1): an access or
+// address error while the routine of an access error, an address error or
+// reset runs (stacking, the vector fetch, an odd handler address): the
+// processor halts (PST $1C) instead of taking it
+wire dbl_fault   = xstk && xr_dbl && adv_wb && wb_is_exc && !wb_refetch &&
+                   (wb_exc == 8'd2 || wb_exc == 8'd3);
+wire x_go        = ((adv_wb && wb_is_exc && !wb_refetch) || take_trace || take_irq || take_sbe) &&
+                   !dbl_fault && !halted;
 
 // register file write ports.  Front: the AG address updates and the EX
 // result.  Back: the WB commit (a result beats an address update), the
@@ -1252,7 +1263,7 @@ logic mt_seen;                // the DMU finished this WB uop's maintenance
 // exception, a serializing uop, or an instruction's last uop when a trace
 // or an interrupt is due at its boundary
 wire sb_wait = !sb_empty && (wb_is_exc || wb_u.ser || (wb_u.last && (irq_pend || tr_now)));
-assign wb_hold = wb_v && ((!wb_is_exc &&
+assign wb_hold = wb_v && (halted || (!wb_is_exc &&
                  ((wb_st && !dm_st_rdy) || (wb_st && dm_st_fault) ||
                   (wb_reset && (!rst_issued || rsto_busy)) ||
                   (wb_mt && !mt_seen))) || sb_wait);
@@ -1866,7 +1877,9 @@ always_ff @(posedge clk) begin
 		if (adv_wb) mt_seen <= 1'b0;
 
 		// RESET instruction: RSTO for 512 bus clocks, WB waits
-		if (wb_v && wb_reset && !rst_issued && !wb_is_exc) rst_issued <= 1'b1;
+		// (RSTO only once every bus cycle is done: the store buffer empty)
+		if (wb_v && wb_reset && !rst_issued && !wb_is_exc && sb_empty) rst_issued <= 1'b1;
+		if (dbl_fault) halted <= 1'b1;
 		if (adv_wb) rst_issued <= 1'b0;
 
 		//------------------------------------------------------------------
@@ -1878,8 +1891,8 @@ always_ff @(posedge clk) begin
 		end
 		else begin
 			// D2 -> AG (exactly when in_rdy says the uop is taken)
-			if (!stall_ag) ag_v <= in_v && !stopped;
-			if (!stall_ag && in_v && !stopped) begin
+			if (!stall_ag) ag_v <= in_v && !stopped && !halted;
+			if (!stall_ag && in_v && !stopped && !halted) begin
 				ag_u      <= in_u;
 				ag_u.disp <= in_u.dmv ? in_u.disp + {{24{in_u.dma[7]}}, in_u.dma} : in_u.disp;
 			end
@@ -1892,7 +1905,7 @@ end
 
 assign dm_st_v    = wb_v && wb_st && !wb_is_exc;
 assign iack_lvl   = irq_lvl_r;
-assign rsto_req   = wb_v && wb_reset && !rst_issued && !wb_is_exc;
+assign rsto_req   = wb_v && wb_reset && !rst_issued && !wb_is_exc && sb_empty;
 assign dm_st_data = wb_st_data;
 assign dbg_pc     = wb_u.pc;
 assign ucond      = 1'b0;
@@ -1908,7 +1921,26 @@ always_ff @(posedge clk) begin
 	else if (x_go) xstk <= 1'b1;
 	else if (adv_wb && wb_u.last) xstk <= 1'b0;
 end
+always_ff @(posedge clk)
+	if (!nreset) xr_dbl <= 1'b1;             // (reset's routine)
+	else if (x_go) xr_dbl <= (x_vec == 8'd2 || x_vec == 8'd3);
 assign irq_pending = irq_pend;
+// (and from the moment STOP, LPSTOP or RESET is at WB: no fetch cycle may
+// follow the LPSTOP broadcast or run with RSTO asserted; the broadcast is
+// issued from AG, so its access holds the fetch from there until LPSTOP
+// reaches WB and the stop takes over)
+// The interrupt that ends LPSTOP brings the bus back with its acknowledge
+// cycle: the fetch stays held until that exception's sequence is done
+logic lps_out, lps_wake;
+always_ff @(posedge clk)
+	if (!nreset || flush || stopped) lps_out <= 1'b0;
+	else if (ag_v && ag_u.mfc == MFC_LPS) lps_out <= 1'b1;
+always_ff @(posedge clk)
+	if (!nreset) lps_wake <= 1'b0;
+	else if (x_go) lps_wake <= stopped && lpstopped;
+	else if (!xstk) lps_wake <= 1'b0;
+assign fetch_stop  = stopped || halted || lps_out || lps_wake || (ag_v && ag_u.mfc == MFC_LPS) ||
+                     (wb_v && (wb_is_stop || wb_reset));
 always_comb begin
 	logic s, br, tk;
 	s  = sr_r[13];

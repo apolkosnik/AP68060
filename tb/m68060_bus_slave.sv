@@ -86,6 +86,7 @@ module m68060_bus_slave #(
 	input  logic        cla_mode,
 	input  logic        ign_junk,
 	input  logic        tea_req,
+	input  logic        retry_req,     // retry this transfer's first beat
 	input  logic        tci_req,
 	input  logic        hold,          // insert wait states while high
 	input  logic  [7:0] iack_vector,   // 0 = answer with AVEC
@@ -344,8 +345,8 @@ always_ff @(posedge clk) begin
 				perr <= 1'b1;
 			end
 			// a burst-inhibited line's follow-up transfers may not be retried
-			retry = (retry_pct > 0) && (beat == 2'd0) && (inh_left == 2'd0) &&
-			        (($urandom % 100) < retry_pct) && (tt_q != 2'd3);
+			retry = (beat == 2'd0) && (inh_left == 2'd0) && (tt_q != 2'd3) &&
+			        (retry_req || ((retry_pct > 0) && (($urandom % 100) < retry_pct)));
 			be = lanes(siz_q, base[1:0]);
 			ack <= 1'b1;
 			if (tea_req || (!inmem && tt_q != 2'd3)) begin

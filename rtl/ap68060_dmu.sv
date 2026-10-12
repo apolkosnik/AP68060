@@ -148,6 +148,7 @@ module ap68060_dmu
 	output logic [127:0] bi_wdata,
 	input  logic        bi_gnt,
 	input  logic        bi_done,
+	output logic        bi_drop,        // the push the BIU holds for a retry: dropped
 	input  logic        bi_err,
 	input  logic        bi_rvalid,
 	input  logic [31:0] b_rdata,
@@ -172,7 +173,30 @@ module ap68060_dmu
 	output logic        sn_act,         // the snoop port holds the cache (the engine waits)
 	input  logic        sn_wr,          // pulse: write into what was found
 	input  logic [15:0] sn_wbe,         // the bytes, of...
-	input  logic [31:0] sn_wword        // ...this long word on every long word
+	input  logic [31:0] sn_wword,       // ...this long word on every long word
+	// ... its fast invalidations: a line its copy of the tags found, by set
+	// and way, invalidated in one frozen clock (sf_ack), one per clock while
+	// sf_more says another follows
+	input  logic        sf_req,
+	input  logic  [6:0] sf_set,
+	input  logic  [1:0] sf_way,
+	input  logic        sf_more,
+	output logic        sf_ack,
+	// ... and what it keeps that copy with: the tag writes (as the RAM
+	// takes them), the valid writes (a clock after they land), and the
+	// dirty lines waiting for a push, which only the full lookup handles
+	output logic        dt_we,
+	output logic  [6:0] dt_set,
+	output logic  [1:0] dt_way,
+	output logic [20:0] dt_tag,
+	output logic        dv_we,
+	output logic  [6:0] dv_set,
+	output logic  [3:0] dv_wm,
+	output logic        dv_lv,
+	output logic        pq0_v,
+	output logic [27:0] pq0_l,
+	output logic        pq1_v,
+	output logic [27:0] pq1_l
 );
 
 localparam logic [2:0] MT_CINV = 3'd1, MT_CPUSH = 3'd2, MT_PFLUSH = 3'd3, MT_PLPA = 3'd4;
@@ -346,15 +370,22 @@ logic        st_fc2;
 logic  [6:0] st_set;               // engine data/tag set
 
 // snoop port phases: A presents the snooped set, B compares, H holds the
-// cache for the snooper's action, R re-reads the owner's address
-typedef enum logic [2:0] { SN_IDLE, SN_A, SN_B, SN_H, SN_R } snph_t;
+// cache for the snooper's action, R re-reads the owner's address; F
+// invalidates a way the snooper's tag copy found (no RAM read: DC1's valid
+// bits are read asynchronously, so nothing needs reading again)
+typedef enum logic [2:0] { SN_IDLE, SN_A, SN_B, SN_H, SN_R, SN_F } snph_t;
 snph_t       sn_ph;
 wire         sn_frz  = (sn_ph != SN_IDLE);
 assign       sn_act  = sn_frz;
+assign       sf_ack  = (sn_ph == SN_F);
+assign       bi_drop = bo_cancel && bo_ingnt && (e_st == E_BUS_W);
 wire         sn_rset = (sn_ph == SN_A) || (sn_ph == SN_B);   // B: the line stays readable in H
 logic  [1:0] sn_src;               // found in: 0 a cache way, 1 push buffer, 2 queued push
+logic        sn_pvm, sn_bom;       // ... and (whatever sn_src says) the push buffer's
+                                   // line, the queued push's line: both go with it
 logic  [1:0] sn_way;
 logic        bo_cancel;            // the queued push was invalidated by a snoop
+logic        bo_ingnt;             // the engine's transfer is the BIU's (granted)
 logic  [3:0] bo_got;               // a line read: the long words that arrived
 logic        bo_later;             // a piece of this transfer has completed: a
                                   // bus error now is on a later access (FSLW.MA)
@@ -1014,6 +1045,7 @@ always_ff @(posedge clk) begin
 		e_job <= 1'b0;
 		m1_stale <= 1'b0;
 		sn_ph <= SN_IDLE; sn_src <= '0; sn_way <= '0; bo_cancel <= 1'b0; bo_later <= 1'b0; pbe_r <= 1'b0;
+		bo_ingnt <= 1'b0; sn_pvm <= 1'b0; sn_bom <= 1'b0;
 		sn_look <= 1'b0; sn_hit <= 1'b0; sn_dirty <= 1'b0;
 		// synthesis translate_off
 		for (int i = 0; i < 128; i++) lv[i] <= 4'd0;
@@ -1914,6 +1946,7 @@ always_ff @(posedge clk) begin
 			bo_tci <= 1'b0;
 			bo_avec <= 1'b0;
 			bo_rd  <= '0;
+			bo_ingnt <= 1'b0;
 			if (bo_cancel) begin
 				// a snoop invalidated the line this push carries
 				bo_cancel <= 1'b0;
@@ -1925,7 +1958,7 @@ always_ff @(posedge clk) begin
 			end
 		end
 		E_BUS_W: begin
-			if (bo_cancel && !b_gnt) begin
+			if (bo_cancel && !b_gnt && !bo_ingnt) begin
 				// not on the bus yet (the snooped master has it): dropped
 				bo_cancel <= 1'b0;
 				e_breq    <= 1'b0;
@@ -1934,6 +1967,13 @@ always_ff @(posedge clk) begin
 			else if (b_gnt) begin
 				e_breq <= 1'b0;
 				bo_pn  <= bo_np;
+				bo_ingnt <= 1'b1;
+			end
+			// (granted, then retried with the bus given up: the BIU drops
+			// it on bi_drop and reports it done)
+			if (b_err || b_done) begin
+				bo_ingnt  <= 1'b0;
+				bo_cancel <= 1'b0;
 			end
 			if (b_rvalid) begin
 				if (bo.line) begin
@@ -2233,6 +2273,8 @@ always_ff @(posedge clk) begin
 		sn_look <= 1'b0;
 		case (sn_ph)
 		SN_IDLE: if (sn_req) sn_ph <= SN_A;
+		         else if (sf_req) sn_ph <= SN_F;
+		SN_F:    if (!sf_more) sn_ph <= SN_IDLE;
 		// the RAMs register the snooped set; a data or tag write issued
 		// just before the freeze lands in this cycle, and a read of the
 		// same set would miss it: present the set once more
@@ -2246,6 +2288,11 @@ always_ff @(posedge clk) begin
 				if (lve_q[i] && tq_a[i] == sn_pa[31:11]) begin h = 1'b1; w = 2'(i); end
 			sn_way <= w;
 			sn_look <= 1'b1;
+			// (CACR.DPI keeps a pushed line valid: a way and a push can
+			// both hold it)
+			sn_pvm <= pv_v && pv_lpa == sn_pa[31:4];
+			sn_bom <= (e_st == E_BUS || e_st == E_BUS_W) && bo.line && !bo.rd &&
+			          bo.tm == TM_PUSH && !bo_cancel && bo_pa[31:4] == sn_pa[31:4];
 			if (h) begin
 				sn_src   <= 2'd0;
 				sn_hit   <= 1'b1;
@@ -2273,36 +2320,9 @@ always_ff @(posedge clk) begin
 		SN_H: begin
 			logic [6:0] s;
 			s = sn_pa[10:4];
-			if (sn_inv) begin
-				case (sn_src)
-				2'd0: begin
-					vp_set = s; vp_wm[sn_way] = 1'b1;
-					vp_lwe = 1'b1; vp_lv = 1'b0; vp_dwe = 1'b1; vp_dv = 1'b0;
-					// no record keeps a hit on the line that left
-					if (m2.x.hit && m2.x.pa[10:4] == s && m2.x.way == sn_way) m2.x.hit <= 1'b0;
-					if (m2.x1.hit && m2.x1.pa[10:4] == s && m2.x1.way == sn_way) m2.x1.hit <= 1'b0;
-					if (adv_dc2) begin
-						if (m2.x.hit && m2.x.pa[10:4] == s && m2.x.way == sn_way) m3.x.hit <= 1'b0;
-						if (m2.x1.hit && m2.x1.pa[10:4] == s && m2.x1.way == sn_way) m3.x1.hit <= 1'b0;
-					end
-					else begin
-						if (m3.x.hit && m3.x.pa[10:4] == s && m3.x.way == sn_way) m3.x.hit <= 1'b0;
-						if (m3.x1.hit && m3.x1.pa[10:4] == s && m3.x1.way == sn_way) m3.x1.hit <= 1'b0;
-					end
-					if (adv_ex) begin
-						if (m3.x.hit && m3.x.pa[10:4] == s && m3.x.way == sn_way) m4.x.hit <= 1'b0;
-						if (m3.x1.hit && m3.x1.pa[10:4] == s && m3.x1.way == sn_way) m4.x1.hit <= 1'b0;
-					end
-					else begin
-						if (m4.x.hit && m4.x.pa[10:4] == s && m4.x.way == sn_way) m4.x.hit <= 1'b0;
-						if (m4.x1.hit && m4.x1.pa[10:4] == s && m4.x1.way == sn_way) m4.x1.hit <= 1'b0;
-					end
-					if (e_x.hit && e_x.pa[10:4] == s && e_x.way == sn_way) e_x.hit <= 1'b0;
-				end
-				2'd1: pv_v <= 1'b0;
-				default: bo_cancel <= 1'b1;
-				endcase
-			end
+			// (a line found in a way is invalidated below)
+			if (sn_inv && sn_pvm) pv_v <= 1'b0;
+			if (sn_inv && sn_bom) bo_cancel <= 1'b1;
 			if (sn_wr) begin
 				case (sn_src)
 				2'd0: begin
@@ -2324,6 +2344,40 @@ always_ff @(posedge clk) begin
 		end
 		default: sn_ph <= SN_IDLE;   // SN_R: the owner's address is read again
 		endcase
+		// a snooped line leaves the cache: the full lookup's (H, found in a
+		// way) or a fast invalidation (F)
+		begin
+			logic       iv;
+			logic [6:0] iv_s;
+			logic [1:0] iv_w;
+			iv   = (sn_ph == SN_H && sn_inv && sn_src == 2'd0) || sn_ph == SN_F;
+			iv_s = (sn_ph == SN_F) ? sf_set : sn_pa[10:4];
+			iv_w = (sn_ph == SN_F) ? sf_way : sn_way;
+			if (iv) begin
+				vp_set = iv_s; vp_wm[iv_w] = 1'b1;
+				vp_lwe = 1'b1; vp_lv = 1'b0; vp_dwe = 1'b1; vp_dv = 1'b0;
+				// no record keeps a hit on the line that left
+				if (m2.x.hit && m2.x.pa[10:4] == iv_s && m2.x.way == iv_w) m2.x.hit <= 1'b0;
+				if (m2.x1.hit && m2.x1.pa[10:4] == iv_s && m2.x1.way == iv_w) m2.x1.hit <= 1'b0;
+				if (adv_dc2) begin
+					if (m2.x.hit && m2.x.pa[10:4] == iv_s && m2.x.way == iv_w) m3.x.hit <= 1'b0;
+					if (m2.x1.hit && m2.x1.pa[10:4] == iv_s && m2.x1.way == iv_w) m3.x1.hit <= 1'b0;
+				end
+				else begin
+					if (m3.x.hit && m3.x.pa[10:4] == iv_s && m3.x.way == iv_w) m3.x.hit <= 1'b0;
+					if (m3.x1.hit && m3.x1.pa[10:4] == iv_s && m3.x1.way == iv_w) m3.x1.hit <= 1'b0;
+				end
+				if (adv_ex) begin
+					if (m3.x.hit && m3.x.pa[10:4] == iv_s && m3.x.way == iv_w) m4.x.hit <= 1'b0;
+					if (m3.x1.hit && m3.x1.pa[10:4] == iv_s && m3.x1.way == iv_w) m4.x1.hit <= 1'b0;
+				end
+				else begin
+					if (m4.x.hit && m4.x.pa[10:4] == iv_s && m4.x.way == iv_w) m4.x.hit <= 1'b0;
+					if (m4.x1.hit && m4.x1.pa[10:4] == iv_s && m4.x1.way == iv_w) m4.x1.hit <= 1'b0;
+				end
+				if (e_x.hit && e_x.pa[10:4] == iv_s && e_x.way == iv_w) e_x.hit <= 1'b0;
+			end
+		end
 
 		//--------------------------------------------------------------
 		// the valid/dirty write port
@@ -2345,6 +2399,11 @@ always_ff @(posedge clk) begin
 					if (vp_lwe && vp_set == sc_set) sc_lv[j] <= vp_lv;
 					if (vp_dwe && vp_set == sc_set) sc_ld[j] <= vp_dv;
 				end
+			// (the snooper's copy follows a clock later)
+			dv_we  <= vp_lwe;
+			dv_set <= vp_set;
+			dv_wm  <= vp_wm;
+			dv_lv  <= vp_lv;
 		end
 	end
 end
@@ -2384,6 +2443,18 @@ assign fault   = e_dc2_done && e_flt;
 assign fvec    = 8'd2;
 assign faddr   = e_faddr;
 assign fslw    = e_fslw;
+
+// the snooper's tag copy: the tag RAM's writes; the lines a snoop must
+// find through the full lookup (a dirty line on its way out, 4.7.2)
+assign dt_we  = tw_b;
+assign dt_set = tset_b;
+assign dt_way = tway_b;
+assign dt_tag = twd_b;
+assign pq0_v  = pv_v;
+assign pq0_l  = pv_lpa;
+assign pq1_v  = (e_st == E_BUS || e_st == E_BUS_W) && bo.line && !bo.rd &&
+                bo.tm == TM_PUSH && !bo_cancel;
+assign pq1_l  = bo_pa[31:4];
 
 // the valid copies' reads: DC1's lookup; the engine state's set (a
 // split's next line, the slow path's, the scan's, else the fill/push set), or the snooped set while the engine is frozen
