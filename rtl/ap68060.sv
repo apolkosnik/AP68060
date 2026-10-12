@@ -151,7 +151,7 @@ logic  [1:0]   b_errbeat;
 logic          b_idle;
 logic          rsto_req, rsto_busy;
 logic          be_fstop;
-logic          b_drop;
+logic          b_drop, b_more;
 
 ap68060_biu #(.NC(NC)) biu (
 	.clk(clk), .nreset(nreset), .bclk_en(bclk_en),
@@ -161,7 +161,7 @@ ap68060_biu #(.NC(NC)) biu (
 	.gnt(b_gnt), .done(b_done), .err(b_err),
 	.rvalid(b_rvalid), .rclient(b_rclient), .rdata(b_rdata), .rbeat(b_rbeat),
 	.ravec(b_ravec), .rtci(b_rtci), .errbeat(b_errbeat), .idle(b_idle), .own(b_own),
-	.unlock(kill_now), .sn_busy(sn_busy || sn_act), .halt(dbg_halted), .drop({1'b0, b_drop}),   // (the DMU engine sees no grant while frozen)
+	.unlock(kill_now), .sn_busy(sn_busy || sn_act), .halt(dbg_halted), .drop({1'b0, b_drop}), .more({1'b0, b_more}),   // (the DMU engine sees no grant while frozen)
 	.rsto_req(rsto_req), .rsto_busy(rsto_busy),
 	.a_o(a_o), .a_oe(a_oe), .d_i(d_i), .d_o(d_o), .d_oe(d_oe),
 	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
@@ -310,7 +310,7 @@ ap68060_dmu dmu (
 	.iatc_flush_fc2(iatc_flush_fc2), .iatc_wr(iatc_wr), .iatc_wla(iatc_wla),
 	.iatc_wfc2(iatc_wfc2), .iatc_went(iatc_went),
 	.bi_req(b_req[0]), .bi_breq(b_breq[0]), .bi_wdata(b_wdata[0]),
-	.bi_gnt(b_gnt[0]), .bi_done(b_done[0]), .bi_err(b_err[0]), .bi_drop(b_drop),
+	.bi_gnt(b_gnt[0]), .bi_done(b_done[0]), .bi_err(b_err[0]), .bi_drop(b_drop), .bi_more(b_more),
 	.bi_rvalid(b_rvalid && b_rclient == 1'b0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
 	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
 	.b_ravec(b_ravec), .b_rtci(b_rtci),

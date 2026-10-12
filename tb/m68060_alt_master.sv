@@ -14,6 +14,10 @@
 //   x_wd[k]    write data: a line's four long words (A3:A2 = 0 first), or //
 //              in [127:96] the long word as it goes on D31-D0             //
 //   x_rd[k]    read data, the same layout (a single transfer in [127:96]) //
+//   btt_mode   the MC68060 arbitration protocol alone (7.11.2): BB is   //
+//              never driven (pulled up), and BG goes back to the 68060   //
+//              as the last transfer starts -- the 68060 must wait for    //
+//              this master's BTT before it starts a transfer             //
 //   rep, step  then rep more times, in the same tenure and without a gap:  //
 //              the transfers again, every address step bytes further, a   //
 //              single write's data plus the repetition's number           //
@@ -48,6 +52,7 @@ module m68060_alt_master (
 	output logic  [1:0] status,
 
 	input  logic        bgr_mode,
+	input  logic        btt_mode,
 	output logic        cpu_bg_n,
 	output logic        cpu_bgr_n,
 	input  logic        cpu_bb_n,
@@ -123,7 +128,7 @@ always_ff @(posedge clk) begin
 				cpu_bg_n  <= 1'b1;
 				cpu_bgr_n <= !bgr_mode;
 				if (cpu_bg_n && cpu_bb_n) begin
-					bb_n  <= 1'b0;
+					bb_n  <= btt_mode;
 					drive <= 1'b1;
 					dly   <= delay;
 					st    <= A_OWN;
@@ -139,6 +144,11 @@ always_ff @(posedge clk) begin
 			end
 			A_TS: begin
 				ts_n <= 1'b0;
+				// (BTT protocol: the bus is granted onwards with the last one)
+				if (btt_mode && {1'b0, k} + 3'd1 >= nx && rl == 16'd0) begin
+					cpu_bg_n  <= 1'b0;
+					cpu_bgr_n <= 1'b1;
+				end
 				a    <= inh ? {xa[31:4], a32, 2'b00} : xa;
 				rw_n <= c_rd;
 				siz  <= inh ? 2'b00 : c_siz;

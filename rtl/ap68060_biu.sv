@@ -93,6 +93,7 @@ module ap68060_biu
 	input  logic              unlock,   // abandon an open locked sequence
 	input  logic              sn_busy,  // snoop invalidations still pending: no new transfer
 	input  logic              halt,     // the processor halted: end the tenure, BR negated
+	input  logic [NC-1:0]     more,     // another transfer of the client waits behind this one
 	input  logic [NC-1:0]     drop,     // a retry waiting for the bus is not wanted any more
 	                                    // (a push whose line a snoop took): done, not rerun
 
@@ -173,6 +174,7 @@ logic        inhibited;   // line continued as long-word transfers
 logic        locked;      // a locked sequence is open
 logic [CW-1:0] lock_c;
 logic  [3:0] ign;         // ignore states left before sampling
+logic        bb_q;        // BB at the previous bus clock edge
 logic        h_last;      // S_HOLD follows the transfer's last beat
 
 //--------------------------------------------------------------------------
@@ -293,6 +295,7 @@ always_ff @(posedge clk) begin
 		tip_oe    <= 1'b0;
 		sas_n     <= 1'b1;
 		br_n      <= 1'b1;
+		bb_q      <= 1'b1;
 		bb_n_o    <= 1'b1;
 		bb_oe     <= 1'b0;
 		btt_n_o   <= 1'b1;
@@ -331,8 +334,7 @@ always_ff @(posedge clk) begin
 			logic start;
 			start = 1'b0;
 
-			// bus request: an internal request the bus is not there for
-			br_n <= !((pick_v || st == S_RETRY) && !(ab == B_EXP && keep_bus)) || halt;
+			bb_q <= bb_n_i;
 
 			//--------------------------------------------------------------
 			// arbitration
@@ -347,8 +349,10 @@ always_ff @(posedge clk) begin
 				else if (!bg_n)                   ab <= B_AME;   // BB still held
 			end
 			B_AME: begin
-				// the other master's tenure ends with BTT, or BB going negated
-				if (!ts_oth && (!btt_n_i || bb_n_i))
+				// the other master's tenure ends with BTT, or with BB going
+				// from asserted to negated (BB pulled up in a system using
+				// BTT alone: its level says nothing, 7.11.2)
+				if (!ts_oth && (!btt_n_i || (!bb_q && bb_n_i)))
 					ab <= !bg_n ? B_IMP : B_AMI;
 			end
 			B_IMP: begin
@@ -585,6 +589,16 @@ always_ff @(posedge clk) begin
 				tip_oe    <= 1'b1;
 				ign       <= icount(r.rd, 1'b0);
 				st        <= S_C1;
+			end
+
+			// BR: the internal request, registered (7.11.2): asserted while a
+			// transfer waits to start, whoever owns the bus, and negated with
+			// the TS of the last one needed; negated while halted
+			begin
+				logic [NC-1:0] pend;
+				pend = (req & ~gnt) | more;      // (a request lasts a clock past its grant)
+				if (start && st == S_IDLE) pend[pick_c] = 1'b0;
+				br_n <= halt || !((|pend) || (st == S_RETRY && !start && !drop[cur_c]));
 			end
 		end
 	end

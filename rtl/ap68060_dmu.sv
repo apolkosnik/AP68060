@@ -149,6 +149,7 @@ module ap68060_dmu
 	input  logic        bi_gnt,
 	input  logic        bi_done,
 	output logic        bi_drop,        // the push the BIU holds for a retry: dropped
+	output logic        bi_more,        // another transfer waits behind the one on the bus
 	input  logic        bi_err,
 	input  logic        bi_rvalid,
 	input  logic [31:0] b_rdata,
@@ -881,6 +882,8 @@ wire         sb_push = (e_st == E_SB) && sb_room;
 // again in the clock its done comes); the engine's request waits while the
 // buffer holds anything, so no bus cycle of the engine passes a write
 wire         sb_sel  = (sb_n != 3'd0) && !sb_fly;
+// (a buffered write on the bus: more writes behind it, or the engine's)
+assign       bi_more = sb_fly && (sb_n > 3'd1 || b_req);
 wire         sb_pop  = own_sb && (bi_done || bi_err);
 assign       sb_empty = (sb_n == 3'd0);
 // a TEA on a buffered write (SBE) or on a push (PBE): recorded, reported

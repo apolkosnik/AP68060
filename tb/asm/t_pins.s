@@ -13,6 +13,11 @@
 ;        a bus error -- while the TTRs still map the program; the handler
 ;        drops MDIS and the instruction, restarted, translates again
 ;   8    STOP, woken by a level 2 interrupt (the bench checks PST = D)
+;   9    BR is the internal bus request (MC68060UM 7.11.2): while the 68060
+;        owns the bus with more transfers waiting -- a MOVEM of fifteen
+;        registers to memory through the store buffer (CACR.ESB) -- BR
+;        stays asserted ($F2F0 counts the bus clocks with BR asserted while
+;        the 68060 drives BB); it is negated with the last one
 
 FAILREG	equ	$F100
 DONEREG	equ	$F102
@@ -116,6 +121,22 @@ start:
 	stop	#$2000
 	chkl	d5,1,8
 	move.w	#$2700,sr
+
+;---------------------------------------------- BR during the bus tenure
+	movec	cacr,d6
+	move.l	d6,d0
+	or.l	#$20000000,d0		; ESB
+	movec	d0,cacr
+	clr.l	($F2F0).l
+	lea	($8000).l,a0
+	movem.l	d0-d7/a0-a6,(a0)
+	nop
+	movec	d6,cacr
+	move.l	($F2F0).l,d0
+	tst.l	d0
+	bne.s	.br
+	failt	9
+.br:
 
 ;----------------------------------------------------------------- done
 	move.w	#$600D,(DONEREG).l

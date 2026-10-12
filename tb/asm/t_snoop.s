@@ -533,6 +533,23 @@ PRL	equ	$8400
 	move.l	(PRL).l,d1
 	chkl	d1,$11110000,63		; the rest of the line is memory's
 
+;---------------------- arbitration with BTT alone, BB pulled up (7.11.2)
+; The other master never drives BB and the arbiter hands BG back to the
+; 68060 as that master's last transfer starts; the 68060, reading the
+; status register all along, must wait for that master's BTT before its
+; own TS (the bench fails a transfer started while the other master owns
+; the bus).  Four line reads, so the last one is long.
+	mwr	$8500,$55AA0000
+	mwr	$851C,$55AA001C
+	mwr	$853C,$55AA003C
+	amx	0,$8500,RD|SZLN|NSN
+	amx	1,$8510,RD|SZLN|NSN
+	amx	2,$8520,RD|SZLN|NSN
+	amx	3,$8530,RD|SZLN|NSN
+	amgo	$0404			; BTT protocol, four transfers
+	chkm	AMX+8,$55AA0000,64
+	chkm	AMX+96+20,$55AA003C,65
+
 ;----------------------------------------------------------------- done
 	move.w	#$600D,(DONEREG).l
 	bra.s	*

@@ -35,7 +35,9 @@
 //               n, bit 8 wait first for a 68060 line read of the line at //
 //               $F284 (it takes the bus right after it); bit 9 instead   //
 //               for a 68060 push of that line, which the slave answers    //
-//               with a retry once (the bus goes to this master first)     //
+//               with a retry once (the bus goes to this master first);   //
+//               bit 10: the MC68060 arbitration protocol alone (BB not   //
+//               driven, BG back to the 68060 with the last transfer)     //
 //   $F288 word  bus clocks the alternate master holds the bus before its  //
 //               first transfer                                             //
 //   $F28A word  then runs the transfers this many times more, back to     //
@@ -55,6 +57,8 @@
 //   $F2E0 long  (read) split copyback stores whose second line a snoop    //
 //               took between the two parts (the DMU's fallback)          //
 //   $F2E4 long  (read) Bcc/DBcc mispredicted in EX (write 0 clears)      //
+//   $F2F0 long  (read) bus clocks with BR asserted while the 68060 drives  //
+//               BB asserted (write 0 clears)                               //
 //   $F2E8 long  (read) the core's options: bit 0 the loop exit predictor  //
 //   $F2EC long  (read) retired branches the branch cache predicted        //
 //               (write 0 clears)                                           //
@@ -217,6 +221,14 @@ always_ff @(posedge clk)
 	if (perr) begin
 		errors <= errors + 1;
 		$display("FAIL: bus protocol (cycle %0d, pc=%h)", cycles, dbg_pc);
+	end
+
+// the processor starts no transfer while another master owns the bus
+always_ff @(posedge clk)
+	if (rsti_n && bclk_en && !ts_n && a_oe && am_drive) begin
+		errors <= errors + 1;
+		$display("FAIL: the 68060 started a transfer while the alternate master owns the bus (cycle %0d, a=%h)",
+		         cycles, a_o);
 	end
 
 // the processor starts no bus cycle while it asserts RSTO, and after the
@@ -507,6 +519,7 @@ assign fetch_hold = (fetch_stall != 0) && xfer_v && (xfer_tm == 3'd2 || xfer_tm 
 // alternate bus master (and arbiter)
 logic        am_go, am_trig_en, am_trig;
 logic        am_trig_push;      // ... on a push of the line, retried
+logic        am_btt;            // BTT protocol
 logic  [2:0] am_n;
 logic [15:0] am_delay, am_rep;
 logic [31:0] am_step;
@@ -522,7 +535,7 @@ m68060_alt_master am (
 	.go(am_go), .n(am_n), .trig_en(am_trig_en), .trig(am_trig), .delay(am_delay),
 	.rep(am_rep), .step(am_step),
 	.x_addr(am_x_addr), .x_ctl(am_x_ctl), .x_wd(am_x_wd), .x_rd(am_x_rd), .status(am_status),
-	.bgr_mode(md_bgr), .cpu_bg_n(am_bg_n), .cpu_bgr_n(am_bgr_n), .cpu_bb_n(bb_oe ? bb_n_o : 1'b1),
+	.bgr_mode(md_bgr), .btt_mode(am_btt), .cpu_bg_n(am_bg_n), .cpu_bgr_n(am_bgr_n), .cpu_bb_n(bb_oe ? bb_n_o : 1'b1),
 	.drive(am_drive), .a(am_a), .rw_n(am_rw_n), .siz(am_siz), .tt(am_tt), .tm(am_tm),
 	.snoop_n(am_snoop_n), .ts_n(am_ts_n), .bb_n(am_bb_n), .btt_n(am_btt_n), .d(am_d), .d_oe(am_d_oe),
 	.d_bus(bus_dr), .ta_n(ta_n), .tea_n(tea_n), .tbi_n(tbi_n)
@@ -641,6 +654,9 @@ always_ff @(posedge clk) begin
 	// the DMU's fallback for a split WB store whose second line went
 	if (rsti_n && dut.dmu.wfs_p1 && !dut.dmu.sn_frz && !dut.dmu.m4.x1.hit)
 		mem.mem[16'hF2E0 >> 2] <= mem.mem[16'hF2E0 >> 2] + 32'd1;
+	// BR asserted during the 68060's own tenure (t_pins)
+	if (rsti_n && bclk_en && !br_n && bb_oe && !bb_n_o)
+		mem.mem[16'hF2F0 >> 2] <= mem.mem[16'hF2F0 >> 2] + 32'd1;
 	// Bcc/DBcc mispredictions (t_loops)
 	if (rsti_n && dut.be.adv_ex && dut.be.ex_mispred && dut.be.ex_bdb && !dut.be.flush)
 		mem.mem[16'hF2E4 >> 2] <= mem.mem[16'hF2E4 >> 2] + 32'd1;
@@ -692,6 +708,7 @@ always_ff @(posedge clk) begin
 		am_trig_en  <= 1'b0;
 		am_trig_a   <= '0;
 		am_trig_push <= 1'b0;
+		am_btt       <= 1'b0;
 		am_delay    <= '0;
 		am_rep      <= '0;
 		am_step     <= '0;
@@ -713,6 +730,7 @@ always_ff @(posedge clk) begin
 				am_trig_en <= 1'b0;
 				am_delay <= '0;
 				am_rep   <= '0;
+				am_btt   <= 1'b0;
 				if (rs_split) begin     // write $D014, snooped (t_cbsplit)
 					rs_op <= 3'd1;
 					am_x_addr[0] <= 32'h0000_D014;
@@ -885,6 +903,7 @@ always_ff @(posedge clk) begin
 					am_n       <= w[2:0];
 					am_trig_en <= w[8] || w[9];
 					am_trig_push <= w[9];
+					am_btt       <= w[10];
 					am_trig_a  <= mem.mem[16'hF284 >> 2];
 					am_delay   <= mem.mem[16'hF288 >> 2][31:16];
 					am_rep     <= mem.mem[16'hF288 >> 2][15:0];
