@@ -102,7 +102,7 @@ m68060_bus_slave #(.AW(24), .SEED(7), .EXT(1)) mem (
 	.cla_n(cla_n), .avec_n(avec_n),
 	.m_ign(1'b0), .m_native(1'b0), .m_hold(1'b0), .m_cnt(16'd0),
 	.wait_mode(wait_mode), .tbi_mode(2'd0), .retry_pct(0), .cla_mode(1'b0), .ign_junk(1'b0),
-	.tea_req(1'b0), .tci_req(1'b0),
+	.tea_req(1'b0), .retry_req(1'b0), .tci_req(1'b0),
 	.hold(1'b0), .iack_vector(8'd0), .ext_rdata(ext_rdata), .ext_inmem(1'b1),
 	.xfer_v(xfer_v), .xfer_addr(xfer_addr), .xfer_rd(xfer_rd), .xfer_siz(xfer_siz),
 	.xfer_tt(xfer_tt), .xfer_tm(xfer_tm), .xfer_beat(xfer_beat),
