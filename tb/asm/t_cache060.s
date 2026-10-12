@@ -31,6 +31,16 @@
 ;   21-22 a TCI instruction fill (bench $F16A) serves only the stream it was
 ;        fetched for: after the code there changes, a new call fetches it
 ;        again (5.7.1) -- the line is neither cached nor kept for later
+;   23-24 the line an inhibited write invalidates leaves no hit behind in
+;        the accesses behind it: a cached load right after gets the new
+;        data, a cached store right after allocates the line again and is
+;        not lost (user data copyback through DTT0, MOVES; supervisor
+;        inhibited through DTT1; no MOVEC between)
+;   25-26 MOVE16 onto a dirty line with the data cache disabled (CACR.EDC
+;        clear, then CDIS) leaves the line alone (5.3)
+;   27   a TCI instruction line is not kept for the next sequential fetch
+;        (5.7.1): the bench rewrites the line's second long word after it
+;        is fetched ($F16C); the instruction there must be the new one
 ;   10-11 RTE's stack reads are exception-stack accesses: a miss does not
 ;        allocate (5.4.3, 7.7.1).  A cold format $0 frame in copyback
 ;        memory, RTE, then an ordinary load of the frame's line: the load
@@ -52,6 +62,7 @@ ae_fslw	equ	$3608
 ae_fa	equ	$360C
 DTEA	equ	$F15E		; one-shot TEA on a data read of this long word
 ITCI	equ	$F16A		; TCI on every instruction fetch of this line
+ITCIMOD	equ	$F16C		; ... and the rewrite of its second long word
 PINS	equ	$F2C0		; bit 0: CDIS
 
 failt	macro
@@ -305,6 +316,89 @@ rte_back:
 	chkl	d2,1,21
 	chkl	d3,2,22		; fetched again, not from the old line
 
+;------------------------------------------------ 23-24 hits behind an invalidation
+	dc.w	$F4D8		; cinva bc
+	moveq	#1,d0		; MOVES: user data
+	movec	d0,sfc
+	movec	d0,dfc
+	move.l	#$00008020,d0	; DTT0: user data copyback (DTT1: supervisor
+	movec	d0,dtt0		; inhibited)
+	move.l	#$11112222,($A300).l
+	move.l	#$80008000,d0
+	movec	d0,cacr
+	lea	($A300).l,a0
+	move.l	#$AAAABBBB,d2
+	moves.l	d2,(a0)		; dirty in the cache
+	move.l	#$CCCCDDDD,($A300).l	; inhibited: pushed, invalidated, written
+	moves.l	(a0),d1		; cached, right behind it
+	chkl	d1,$CCCCDDDD,23
+	move.l	#$AAAABBBB,d2
+	moves.l	d2,(a0)
+	move.l	#$CCCCDDDD,($A300).l
+	move.l	#$EEEEFFFF,d3
+	moves.l	d3,(a0)		; cached store right behind it
+	dc.w	$F478		; cpusha dc
+	moveq	#0,d0
+	movec	d0,cacr
+	movec	d0,dtt0
+	move.l	($A300).l,d1
+	chkl	d1,$EEEEFFFF,24
+
+;------------------------------------------------ 25-26 MOVE16, cache disabled
+	dc.w	$F4D8		; cinva bc
+	move.l	#$00008020,d0
+	movec	d0,dtt0
+	move.l	#$CCCCDDDD,($A500).l	; the source line
+	move.l	#$11112222,($A400).l	; memory under the dirty line
+	move.l	#$80008000,d0
+	movec	d0,cacr
+	lea	($A400).l,a0
+	move.l	#$AAAABBBB,d2
+	moves.l	d2,(a0)		; dirty
+	moveq	#0,d0
+	movec	d0,cacr		; EDC clear
+	lea	($A500).l,a2
+	lea	($A400).l,a3
+	move16	(a2)+,(a3)+
+	move.l	#$80008000,d0
+	movec	d0,cacr
+	moves.l	(a0),d1		; the dirty line is still there
+	chkl	d1,$AAAABBBB,25
+	move.w	#1,(PINS).l	; CDIS
+	nop
+	nop
+	nop
+	lea	($A500).l,a2
+	lea	($A400).l,a3
+	move16	(a2)+,(a3)+
+	clr.w	(PINS).l
+	nop
+	nop
+	nop
+	moves.l	(a0),d1
+	chkl	d1,$AAAABBBB,26
+	dc.w	$F478		; cpusha dc
+	moveq	#0,d0
+	movec	d0,cacr
+	movec	d0,dtt0
+
+;------------------------------------------------ 27 a TCI line, sequentially
+	dc.w	$F4D8		; cinva bc
+	move.l	#$00008000,d0	; instruction cache on
+	movec	d0,cacr
+	move.w	#$2140,(ITCI).l	; the line of tci_seq: TCI
+	move.w	#1,(ITCIMOD).l	; its second long word rewritten when fetched
+	moveq	#-1,d0
+	jsr	(tci_seq).l
+	clr.w	(ITCIMOD).l
+	clr.w	(ITCI).l
+	moveq	#0,d1
+	movec	d1,cacr
+	tst.l	d0
+	bgt.s	.t27		; MOVEQ #n with n > 0: fetched anew
+	failt	27
+.t27:
+
 ;------------------------------------------------ 12-14 MA within a line fill
 	dc.w	$F4D8		; cinva bc
 	clr.l	(cnt_ae).l
@@ -379,5 +473,21 @@ ifill_far:
 tci_rt:	moveq	#1,d0
 	rts
 	rept	14
+	nop
+	endr
+
+; the sequential TCI test: entered on the line before ($2130, cached), so
+; the TCI line ($2140) is reached sequentially, without a redirect; its
+; second long word ($2144) is MOVEQ #0,D0 / RTS until the bench rewrites it
+	org	$2130
+tci_seq:
+	rept	8
+	nop
+	endr
+	nop			; $2140: the TCI line
+	nop
+	moveq	#0,d0
+	rts
+	rept	12
 	nop
 	endr

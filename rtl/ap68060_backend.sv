@@ -296,7 +296,18 @@ assign adv_dc2 = dc2_v && !stall_dc2;
 assign adv_dc1 = dc1_v && !stall_dc1;
 assign adv_ag  = ag_v  && !stall_ag;
 
-assign in_rdy  = !stall_ag && !flush && !stopped && !eredir_pend;
+// AG's input: a skid register in front of it, so the sequencer's pop does
+// not wait for the stall chain.  The sequencer may pop whenever the skid is
+// empty; a uop it pops that AG cannot take waits in the skid, and AG takes
+// the skid's first.  The register file is read, and the forwarding formed,
+// for the uop entering AG (ain_u), wherever it comes from.
+logic        sk_v;
+uop_t        sk_u;
+wire         ain_v = sk_v || in_v;
+uop_t        ain_u;
+assign ain_u   = sk_v ? sk_u : in_u;
+assign in_rdy  = !sk_v && !flush && !stopped && !eredir_pend;
+wire         ag_take = !stall_ag && !stopped && !halted;   // AG loads ain_u
 
 //--------------------------------------------------------------------------
 // AG
@@ -367,8 +378,8 @@ ap68060_rf #(.NR(5)) rfb (.clk(clk), .we(bwe), .wa(bwa), .wd(bwd), .ra(rra), .rd
 // AG's base and index are read as the uop enters AG (ports 0/1 address
 // the incoming uop) and kept in registers, so AG's address adders, and the
 // data cache's set index after them, start from flip-flops
-assign rra[0] = in_u.base;
-assign rra[1] = in_u.idx;
+assign rra[0] = ain_u.base;
+assign rra[1] = ain_u.idx;
 assign rra[2] = ag_u.upd2_reg;
 assign rra[3] = ag_u.a_reg;
 assign rra[4] = ag_u.b_reg;
@@ -809,6 +820,15 @@ end
 logic [31:0] ex_res;
 logic  [4:0] ex_flags;
 logic        ex_dkill;        // suppress the register write
+logic  [3:0] ex_kc;           // EX's uop is FPU, DIV, MDRES, DBcc (the ones that can)
+logic        ex_dkill_chk;    // (simulation: the case form)
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && ex_v && ex_u.d_v && ex_dkill != ex_dkill_chk) begin
+		$display("FAIL: ex_dkill %b, the case form %b (op %0d, pc %h)", ex_dkill, ex_dkill_chk, ex_u.op, ex_u.pc);
+		$finish;
+	end
+// synthesis translate_on
 logic        ex_taken;        // control transfer taken
 logic [31:0] ex_target;
 logic  [7:0] ex_xvec;         // exception raised in EX
@@ -1058,7 +1078,15 @@ always_comb begin
 	end
 	ex_res    = x.res;
 	ex_flags  = x.flags;
-	ex_dkill  = x.dkill;
+	// (the uops that can suppress their write, by flags registered as they
+	// enter EX, so the kill is an AND-OR of its sources: no op decode on
+	// the way to the forwarding enable; the others never kill, slow ones
+	// included)
+	ex_dkill  = (ex_kc[0] && fp_dkill) || (ex_kc[1] && md_dkill) ||
+	            (ex_kc[2] && md_ovfl) || (ex_kc[3] && alu_cc);
+	// synthesis translate_off
+	ex_dkill_chk = x.dkill;
+	// synthesis translate_on
 	ex_taken  = x.taken;
 	ex_target = x.target;
 	ex_xvec   = x.xvec;
@@ -1420,6 +1448,7 @@ always_ff @(posedge clk) begin
 
 	if (!nreset) begin
 		ag_v  <= 1'b0; dc1_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; wb_v <= 1'b0;
+		sk_v  <= 1'b0;
 		eredir_pend <= 1'b0;
 		wb_eredir   <= 1'b0;
 		fv <= 32'd0;
@@ -1567,6 +1596,8 @@ always_ff @(posedge clk) begin
 		//------------------------------------------------------------------
 		if (adv_dc2) begin
 			ex_u     <= dc2_u;
+			ex_kc    <= {dc2_u.op == OP_DBCC, dc2_u.op == OP_MDRES, dc2_u.op == OP_DIV,
+			             dc2_u.op == OP_FPU};
 			ex_ee    <= dc2_ee;
 			ex_er    <= dc2_er;
 			ex_a     <= (exw_v && dc2_u.a_src == OS_REG && dc2_u.a_reg == exw_reg) ? exw_val : dc2_a;
@@ -1939,13 +1970,23 @@ always_ff @(posedge clk) begin
 			eredir_pend <= 1'b0;
 		end
 		else begin
-			// D2 -> AG (exactly when in_rdy says the uop is taken)
-			if (!stall_ag) ag_v <= in_v && !stopped && !halted;
-			if (!stall_ag && in_v && !stopped && !halted) begin
-				ag_u      <= in_u;
-				ag_u.disp <= in_u.dmv ? in_u.disp + {{24{in_u.dma[7]}}, in_u.dma} : in_u.disp;
+			// D2 (or the skid) -> AG
+			if (!stall_ag) ag_v <= ain_v && !stopped && !halted;
+			if (ag_take && ain_v) begin
+				ag_u      <= ain_u;
+				ag_u.disp <= ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp;
+			end
+			// the skid: emptied when AG takes it; filled by a popped uop AG
+			// did not take
+			if (sk_v) begin
+				if (ag_take) sk_v <= 1'b0;
+			end
+			else if (in_v && in_rdy && !ag_take) begin
+				sk_v <= 1'b1;
+				sk_u <= in_u;
 			end
 		end
+		if (flush || kill_now) sk_v <= 1'b0;
 		if (kill_now) begin
 			ag_v <= 1'b0; dc1_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; wb_v <= 1'b0;
 		end
@@ -2022,7 +2063,7 @@ end
 always_ff @(posedge clk) begin
 	// a captured EX writer stays captured while it is in EX
 	if (adv_ex) begin cap_b <= 1'b0; cap_x <= 1'b0; end
-	if (!flush && !stall_ag && in_v && !stopped) begin
+	if (!flush && !stall_ag && ain_v && !stopped) begin
 		logic [31:0] b, x;
 		logic        cb, cx, eb, ex;
 		logic  [3:0] wb, wx;
@@ -2036,32 +2077,32 @@ always_ff @(posedge clk) begin
 		// it holds one -- adv_ag, the end of the stall chain, stays off the
 		// data select)
 		for (int i = 0; i < 2; i++) begin
-			if (fwe_ag[i] && fwa[i] == in_u.base) b = fwd[i];
-			if (fwe_ag[i] && fwa[i] == in_u.idx)  x = fwd[i];
+			if (fwe_ag[i] && fwa[i] == ain_u.base) b = fwd[i];
+			if (fwe_ag[i] && fwa[i] == ain_u.idx)  x = fwd[i];
 		end
 		// the load entering EX, unless a younger writer is in AG or DC1
 		// (it will be waited for in any case)
-		if (dc2_capd && dc2_u.d_reg == in_u.base) begin b = dc2_capv; cb = adv_dc2; end
-		if (dc2_capd && dc2_u.d_reg == in_u.idx)  begin x = dc2_capv; cx = adv_dc2; end
+		if (dc2_capd && dc2_u.d_reg == ain_u.base) begin b = dc2_capv; cb = adv_dc2; end
+		if (dc2_capd && dc2_u.d_reg == ain_u.idx)  begin x = dc2_capv; cx = adv_dc2; end
 		// the youngest writer's early result (not the uop leaving AG:
 		// its result is loaded next cycle)
-		wb = yw(in_u.base);
-		wx = yw(in_u.idx);
-		if (!(ag_v && ag_u.d_v && ag_u.d_reg == in_u.base) && wb[2]) begin
+		wb = yw(ain_u.base);
+		wx = yw(ain_u.idx);
+		if (!(ag_v && ag_u.d_v && ag_u.d_reg == ain_u.base) && wb[2]) begin
 			b = ywv(wb[1:0]); eb = 1'b1; cb = 1'b0;
 		end
-		if (!(ag_v && ag_u.d_v && ag_u.d_reg == in_u.idx) && wx[2]) begin
+		if (!(ag_v && ag_u.d_v && ag_u.d_reg == ain_u.idx) && wx[2]) begin
 			ex = 1'b1; cx = 1'b0;
 		end
-		agb_q <= in_u.base_v ? b : 32'd0;
+		agb_q <= ain_u.base_v ? b : 32'd0;
 		// EX writing it this cycle: the register file read is a cycle
 		// early (unless a younger load or early result supplied it)
-		stale_b <= exw_ag && in_u.base_v && exw_reg == in_u.base && !cb && !eb;
-		stale_x <= exw_ag && in_u.idx_v  && exw_reg == in_u.idx  && !cx && !ex;
+		stale_b <= exw_ag && ain_u.base_v && exw_reg == ain_u.base && !cb && !eb;
+		stale_x <= exw_ag && ain_u.idx_v  && exw_reg == ain_u.idx  && !cx && !ex;
 		// (the early results are scaled beside the writer search)
-		agx_q <= !ex ? ixf(x, in_u) :
-		         (wx[1:0] == 2'd1) ? ixf(dc1_er, in_u) :
-		         (wx[1:0] == 2'd2) ? ixf(dc2_er, in_u) : ixf(ex_er, in_u);
+		agx_q <= !ex ? ixf(x, ain_u) :
+		         (wx[1:0] == 2'd1) ? ixf(dc1_er, ain_u) :
+		         (wx[1:0] == 2'd2) ? ixf(dc2_er, ain_u) : ixf(ex_er, ain_u);
 		cap_b <= cb;
 		cap_x <= cx;
 		erb   <= eb;

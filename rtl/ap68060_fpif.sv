@@ -278,6 +278,8 @@ ap040_fpu #(.PIPE(FPU_PIPE)) fpu (
 //--------------------------------------------------------------------------
 logic [15:0] opw_q, ext_q;     // the instruction's words (latched by CHK)
 logic        fsr_q;            // ... it is FSAVE or FRESTORE (for END's hold)
+logic [31:0] lst_q;            // ... FMOVEM's LIST result for a static list: its
+                               // bytes, negated for -(An)
 logic        bg;               // a released operation is running
 logic        pend;             // the EXCP state: its exception, taken by every FPU
 logic  [7:0] pend_vec;         // instruction but FSAVE and FRESTORE
@@ -440,6 +442,32 @@ function automatic logic [1:0] crsel_of(input logic [1:0] k);   // the FPU's cr_
 	crsel_of = (k == 2'd0) ? 2'd2 : (k == 2'd1) ? 2'd1 : 2'd0;
 endfunction
 
+// LIST's result from the instruction's words as CHK latches them
+function automatic logic [31:0] lst_of(input logic [15:0] ow, input logic [15:0] xw);
+	logic [3:0] n;
+	logic [6:0] b;
+	n = 4'd0;
+	for (int i = 0; i < 8; i++) n = n + {3'd0, xw[i]};
+	b = 7'(n) * 7'd12;
+	lst_of = (ow[5:3] == 3'd4) ? -{25'd0, b} : {25'd0, b};
+endfunction
+// ... and for a dynamic list (Dn): from the operand, the words latched
+function automatic logic [31:0] lst_dyn(input logic [15:0] ow, input logic [7:0] l);
+	logic [3:0] n;
+	logic [6:0] b;
+	n = 4'd0;
+	for (int i = 0; i < 8; i++) n = n + {3'd0, l[i]};
+	b = 7'(n) * 7'd12;
+	lst_dyn = (ow[5:3] == 3'd4) ? -{25'd0, b} : {25'd0, b};
+endfunction
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && ex_v && sub == FC_LIST && res != ((ea_pd) ? -{25'd0, l_bytes} : {25'd0, l_bytes})) begin
+		$display("FAIL: fpif: the LIST result %h, the list's %h", res,
+		         (ea_pd) ? -{25'd0, l_bytes} : {25'd0, l_bytes});
+		$finish;
+	end
+// synthesis translate_on
 // FMOVEM list and adjustment (LIST, combinational for its result)
 logic [7:0] l_now;
 logic [6:0] l_bytes;
@@ -686,7 +714,7 @@ always_comb begin
 		end
 		FC_GET:  res = (imm[1:0] == 2'd1) ? get_q[63:32] : get_q[31:0];
 		FC_CRR:  res = f_crrd;
-		FC_LIST: res = (ea_pd) ? -{25'd0, l_bytes} : {25'd0, l_bytes};
+		FC_LIST: res = ext_q[11] ? lst_dyn(opw_q, av[7:0]) : lst_q;
 		FC_MVR:  res = mv_rev ? f_fmrd[31:0] : f_fmrd[95:64];
 		FC_SV0:  res = ea_pd ? -32'd12 : 32'd12;
 		FC_SVW:  case (imm[3:2])
@@ -750,7 +778,7 @@ end
 
 always_ff @(posedge clk) begin
 	if (!nreset) begin
-		opw_q <= '0; ext_q <= '0; fsr_q <= 1'b0;
+		opw_q <= '0; ext_q <= '0; fsr_q <= 1'b0; lst_q <= '0;
 		bg <= 1'b0; pend <= 1'b0; pend_vec <= '0; fresh <= 1'b0;
 		go <= 1'b0; done_q <= 1'b0; eaa <= '0; eav <= 1'b0;
 		sx_v <= 1'b0; sx_vec <= '0; sx_fmt <= '0; sx_addr <= '0; sx_kill <= 1'b0;
@@ -793,6 +821,7 @@ always_ff @(posedge clk) begin
 				// FPm to FPn: CHK's latching and DISP's request at once
 				opw_q   <= opw;
 				fsr_q   <= is_fsave || is_frest;
+				lst_q   <= lst_of(opw, ext);
 				ext_q   <= ext;
 				eav     <= 1'b0;
 				sx_v    <= 1'b0;
@@ -820,6 +849,7 @@ always_ff @(posedge clk) begin
 			else if (adv) begin
 				opw_q <= opw;
 				fsr_q <= is_fsave || is_frest;
+				lst_q <= lst_of(opw, ext);
 				ext_q <= ext;
 				// (an immediate operand has no address: its frames, EA 0)
 				eav   <= eal && !ea_imm;

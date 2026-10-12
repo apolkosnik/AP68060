@@ -477,19 +477,24 @@ endgenerate
 // fast path
 // (Both are captured every clock and the registered advance picks: the
 // stall chain behind adv_dc1 is too late for a 128-bit enable.)
-// (the line by the one-hot match, AND-OR, and the merges by it too: no
-// encoded way on the path; without a match the line is not used)
+// (the line by the one-hot match, AND-OR; the merges that apply to it are
+// registered beside it -- their bytes, data, and whether they hit it -- and
+// laid over it in DC2, off the hit path: without a match the line is not
+// used)
+logic [15:0] mc_be [3];
+logic [31:0] mc_w  [3];
+logic  [2:0] mc_v;
 always_ff @(posedge clk) begin
 	logic [127:0] l, h;
 	l = '0;
 	for (int j = 0; j < 4; j++) if (d1_mj[j]) l = l | dq_rn[j];
-	if (dwq && dwq_src == 2'd0 && dwq_set == m1.a[10:4] && d1_mj[dwq_way])
-		l = mrg(l, dwq_be, dwq_word);
-	if (dw && dw_src == 2'd0 && dw_set == m1.a[10:4] && d1_mj[dw_way])
-		l = mrg(l, dw_be, dw_word);
-	if (wfm && wfm_set == m1.a[10:4] && d1_mj[wfm_way])
-		l = mrg(l, wfm_be, wfm_word);
 	dqc <= l;
+	mc_v[0] <= dwq && dwq_src == 2'd0 && dwq_set == m1.a[10:4] && d1_mj[dwq_way];
+	mc_v[1] <= dw && dw_src == 2'd0 && dw_set == m1.a[10:4] && d1_mj[dw_way];
+	mc_v[2] <= wfm && wfm_set == m1.a[10:4] && d1_mj[wfm_way];
+	mc_be[0] <= dwq_be; mc_w[0] <= dwq_word;
+	mc_be[1] <= dw_be;  mc_w[1] <= dw_word;
+	mc_be[2] <= wfm_be; mc_w[2] <= wfm_word;
 	h = dq1;
 	if (dw && dw_src == 2'd0 && dw_set == m2.r.a[10:4] && dw_way == m2.x.way)
 		h = mrg(h, dw_be, dw_word);
@@ -498,7 +503,13 @@ always_ff @(posedge clk) begin
 	dqh <= h;
 	dq_new <= adv_dc1;
 end
-assign dq1 = dq_new ? dqc : dqh;
+// DC2: the captured line with its merges (in the order they were made)
+logic [127:0] dqc_m;
+always_comb begin
+	dqc_m = dqc;
+	for (int k = 0; k < 3; k++) if (mc_v[k]) dqc_m = mrg(dqc_m, mc_be[k], mc_w[k]);
+end
+assign dq1 = dq_new ? dqc_m : dqh;
 
 //--------------------------------------------------------------------------
 // D-ATC
@@ -1443,8 +1454,10 @@ always_ff @(posedge clk) begin
 				e_st <= E_S_RD;
 			end
 			else if (move16 && m2.r.mem == M_ST) begin
-				// MOVE16 destination: a write hit invalidates the line
-				if (e_x.hit) begin
+				// MOVE16 destination: a write hit invalidates the line (the
+				// write replaces all of it) -- unless the data cache is
+				// disabled, which leaves its contents alone (5.3)
+				if (e_x.hit && dc_en) begin
 					vp_set = e_va[10:4]; vp_wm[e_x.way] = 1'b1;
 					vp_lwe = 1'b1; vp_lv = 1'b0; vp_dwe = 1'b1; vp_dv = 1'b0;
 					e_x.hit <= 1'b0;
@@ -2445,26 +2458,43 @@ always_ff @(posedge clk) begin
 			if (iv) begin
 				vp_set = iv_s; vp_wm[iv_w] = 1'b1;
 				vp_lwe = 1'b1; vp_lv = 1'b0; vp_dwe = 1'b1; vp_dv = 1'b0;
-				// no record keeps a hit on the line that left
-				if (m2.x.hit && m2.x.pa[10:4] == iv_s && m2.x.way == iv_w) m2.x.hit <= 1'b0;
-				if (m2.x1.hit && m2.x1.pa[10:4] == iv_s && m2.x1.way == iv_w) m2.x1.hit <= 1'b0;
-				if (adv_dc2) begin
-					if (m2.x.hit && m2.x.pa[10:4] == iv_s && m2.x.way == iv_w) m3.x.hit <= 1'b0;
-					if (m2.x1.hit && m2.x1.pa[10:4] == iv_s && m2.x1.way == iv_w) m3.x1.hit <= 1'b0;
+				// (the records' hits on it: at the valid/dirty write port)
+			end
+		end
+
+		//--------------------------------------------------------------
+		// a line leaving the cache -- whoever invalidates it: a snoop, an
+		// inhibited or locked access's push, CINV/CPUSH -- leaves no record
+		// with a hit on it: the stage records, those loaded this clock from
+		// the stage before (DC1's lookup read the valid bits before this
+		// write lands), both parts of a split, and the engine's own
+		//--------------------------------------------------------------
+		if (vp_lwe && !vp_lv) begin
+			for (int j = 0; j < 4; j++) if (vp_wm[j]) begin
+				if (adv_dc1) begin
+					if (x_dc1.hit && x_dc1.pa[10:4] == vp_set && x_dc1.way == 2'(j)) m2.x.hit <= 1'b0;
 				end
 				else begin
-					if (m3.x.hit && m3.x.pa[10:4] == iv_s && m3.x.way == iv_w) m3.x.hit <= 1'b0;
-					if (m3.x1.hit && m3.x1.pa[10:4] == iv_s && m3.x1.way == iv_w) m3.x1.hit <= 1'b0;
+					if (m2.x.hit && m2.x.pa[10:4] == vp_set && m2.x.way == 2'(j)) m2.x.hit <= 1'b0;
+					if (m2.x1.hit && m2.x1.pa[10:4] == vp_set && m2.x1.way == 2'(j)) m2.x1.hit <= 1'b0;
+				end
+				if (adv_dc2) begin
+					if (m2.x.hit && m2.x.pa[10:4] == vp_set && m2.x.way == 2'(j)) m3.x.hit <= 1'b0;
+					if (m2.x1.hit && m2.x1.pa[10:4] == vp_set && m2.x1.way == 2'(j)) m3.x1.hit <= 1'b0;
+				end
+				else begin
+					if (m3.x.hit && m3.x.pa[10:4] == vp_set && m3.x.way == 2'(j)) m3.x.hit <= 1'b0;
+					if (m3.x1.hit && m3.x1.pa[10:4] == vp_set && m3.x1.way == 2'(j)) m3.x1.hit <= 1'b0;
 				end
 				if (adv_ex) begin
-					if (m3.x.hit && m3.x.pa[10:4] == iv_s && m3.x.way == iv_w) m4.x.hit <= 1'b0;
-					if (m3.x1.hit && m3.x1.pa[10:4] == iv_s && m3.x1.way == iv_w) m4.x1.hit <= 1'b0;
+					if (m3.x.hit && m3.x.pa[10:4] == vp_set && m3.x.way == 2'(j)) m4.x.hit <= 1'b0;
+					if (m3.x1.hit && m3.x1.pa[10:4] == vp_set && m3.x1.way == 2'(j)) m4.x1.hit <= 1'b0;
 				end
 				else begin
-					if (m4.x.hit && m4.x.pa[10:4] == iv_s && m4.x.way == iv_w) m4.x.hit <= 1'b0;
-					if (m4.x1.hit && m4.x1.pa[10:4] == iv_s && m4.x1.way == iv_w) m4.x1.hit <= 1'b0;
+					if (m4.x.hit && m4.x.pa[10:4] == vp_set && m4.x.way == 2'(j)) m4.x.hit <= 1'b0;
+					if (m4.x1.hit && m4.x1.pa[10:4] == vp_set && m4.x1.way == 2'(j)) m4.x1.hit <= 1'b0;
 				end
-				if (e_x.hit && e_x.pa[10:4] == iv_s && e_x.way == iv_w) e_x.hit <= 1'b0;
+				if (e_x.hit && e_x.pa[10:4] == vp_set && e_x.way == 2'(j)) e_x.hit <= 1'b0;
 			end
 		end
 

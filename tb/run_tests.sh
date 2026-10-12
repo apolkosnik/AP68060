@@ -32,5 +32,9 @@ out=$(for p in $PROGS; do for c in "${CFGS[@]}"; do printf '%s|%s\n' "$p" "$c"; 
 		r=$('"$SIM"' +prog=build/$p.hex $c +timeout=4000000 2>&1 | grep -E "^(PASS|FAIL)" | tail -1)
 		printf "%-16s %-64s %s\n" "$p" "${c:-(zero wait)}" "${r:-FAIL (no result)}"' _ {})
 printf '%s\n' "$out" | sort
-if printf '%s\n' "$out" | grep -qv " PASS "; then echo "FAILURES"; exit 1; fi
+fails=0
+printf '%s\n' "$out" | grep -qv " PASS " && fails=1
+# the fetch unit alone: TCI instruction lines (tb_fetch_tci.sv)
+./run_fetch_tci.sh || fails=1
+if [ $fails != 0 ]; then echo "FAILURES"; exit 1; fi
 echo "ALL PASSED"

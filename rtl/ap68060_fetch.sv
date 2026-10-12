@@ -369,7 +369,6 @@ logic [31:0] wf_la;
 atce_t       wf_e;
 
 // line buffer: the last line filled (it also serves TCI lines)
-logic        lb_tci;           // ... a TCI line (dropped by the next redirect)
 logic        m_tci;            // the fill in progress was answered with TCI
 logic        lb_v;             // m_line holds the line at lb_pa (the last fill):
 logic [27:0] lb_pa;            // it is also the cache's write data
@@ -533,7 +532,7 @@ always_ff @(posedge clk) begin
 		for (int i = 0; i < 2; i++) f2_w[i] <= '0;
 		f3_n  <= '0; f3_f <= 1'b0; f3_d <= 1'b0; f3_a <= 1'b0;
 		for (int i = 0; i < 2; i++) begin f3_w[i] <= '0; f3_p[i] <= '0; end
-		lb_v  <= 1'b0; lb_pa <= '0; lb_tci <= 1'b0; m_tci <= 1'b0;
+		lb_v  <= 1'b0; lb_pa <= '0; m_tci <= 1'b0;
 		busy  <= 1'b0; stale <= 1'b0; b_req_r <= 1'b0;
 		m_la  <= '0; m_pa <= '0; m_upa <= '0; m_s <= 1'b0; m_dem <= 1'b0; m_ci <= 1'b0;
 		m_alloc <= 1'b0; m_way <= '0; m_line <= '0;
@@ -783,12 +782,36 @@ always_ff @(posedge clk) begin
 					iw_set = m_pa[10:4]; iw_m[m_way] = 1'b1; iw_v = 1'b1;
 					if (ivo_q == 4'hF) rr <= rr + 2'd1;     // (ivo_ra: m_pa's set)
 				end
-				// (a TCI line whose stream was redirected meanwhile is
-				// nobody's: not kept at all)
-				lb_v  <= !(stale && (m_tci || (b_rvalid && b_rtci)));
 				lb_pa <= m_pa[31:4];
-				lb_tci <= m_tci || (b_rvalid && b_rtci);
 				st    <= S_RUN;
+				if (m_tci || (b_rvalid && b_rtci)) begin
+					// a TCI line is not kept (5.7.1: sequential access only
+					// until the burst's last long word arrives): the long word
+					// being fetched goes straight to the decoder, the next one
+					// is fetched anew (unless a redirect takes the stream)
+					lb_v <= 1'b0;
+					if (!stale && !redir_any) begin
+						logic [31:0] lw, nla;
+						lw  = ln[127 - 32 * m_pa[3:2] -: 32];
+						nla = {m_la[31:2], 2'b00} + 32'd4;
+						if (m_la[1]) begin
+							f2_n    <= 2'd1;
+							f2_w[0] <= lw[15:0];
+						end
+						else begin
+							f2_n    <= 2'd2;
+							f2_w[0] <= lw[31:16];
+							f2_w[1] <= lw[15:0];
+						end
+						f2_f  <= 1'b0; f2_d <= 1'b0; f2_a <= 1'b0;
+						m_la  <= nla;
+						m_pa  <= {m_pa[31:2], 2'b00} + 32'd4;
+						m_dem <= 1'b0;
+						fpc   <= nla;
+						fnew  <= 1'b0;
+					end
+				end
+				else lb_v <= 1'b1;
 			end
 			if (busy && b_err) begin
 				busy  <= 1'b0;
@@ -897,9 +920,6 @@ always_ff @(posedge clk) begin
 			fras_n  <= d_ras_n;
 			fpc   <= {redir_npc[31:1], 1'b0};
 			qpc_r <= redir_npc;
-			// a TCI line serves only the stream it was fetched for: it is
-			// not to be retained, and no later request may take it (5.7.1)
-			if (lb_tci) lb_v <= 1'b0;
 			odd   <= redir_npc[0];
 			fnew  <= 1'b1;
 			if (st == S_FILL || st == S_CI) begin

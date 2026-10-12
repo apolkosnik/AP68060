@@ -24,6 +24,8 @@
 //   $F15C word  arm a one-shot TEA on the next LPSTOP broadcast            //
 //   $F16A word  answer every instruction fetch of this line with TCI (0:  //
 //               off)                                                       //
+//   $F16C word  nonzero: after each fetch beat of that line's long word at //
+//               +4, rewrite its upper word to MOVEQ #n,D0 (n counts them)  //
 //   $F168 word  reset the processor this many clocks later (RSTI for 12  //
 //               clocks), counted in $F15A with the halt resets           //
 //   $F15E word  arm a one-shot TEA on the next data read of the long word  //
@@ -819,12 +821,25 @@ always_ff @(posedge clk)
 	else if (ev && !ev_rd && !ev_err && ev_tt == 2'd0 && ev_addr[15:0] == 16'hF15C) lpstea_arm <= 1'b1;
 	else if (ev && ev_tt == 2'd3 && ev_tm == 3'd0 && !ev_rd) lpstea_arm <= 1'b0;
 // $F16A: every instruction fetch of the line at the written address is
-// answered with TCI (0 turns it off)
+// answered with TCI (0 turns it off); $F16C nonzero: after each fetch beat
+// of that line's long word at +4, the bench rewrites it -- its upper word
+// becomes MOVEQ #n,D0 with n counting the rewrites (the lower word is kept)
+logic        itci_mod;
+logic  [7:0] itci_n;
 always_ff @(posedge clk)
-	if (!rsti_n) begin itci_on <= 1'b0; itci_a <= '0; end
-	else if (ev && !ev_rd && !ev_err && ev_tt == 2'd0 && ev_addr[15:0] == 16'hF16A) begin
-		itci_a  <= ev_word(ev_addr, ev_data);
-		itci_on <= ev_word(ev_addr, ev_data) != 16'd0;
+	if (!rsti_n) begin itci_on <= 1'b0; itci_a <= '0; itci_mod <= 1'b0; itci_n <= '0; end
+	else begin
+		if (ev && !ev_rd && !ev_err && ev_tt == 2'd0 && ev_addr[15:0] == 16'hF16A) begin
+			itci_a  <= ev_word(ev_addr, ev_data);
+			itci_on <= ev_word(ev_addr, ev_data) != 16'd0;
+		end
+		if (ev && !ev_rd && !ev_err && ev_tt == 2'd0 && ev_addr[15:0] == 16'hF16C)
+			itci_mod <= ev_word(ev_addr, ev_data) != 16'd0;
+		if (itci_on && itci_mod && ev && ev_rd && !ev_err && (ev_tm == 3'd2 || ev_tm == 3'd6) &&
+		    ev_addr[15:4] == itci_a[15:4] && ev_addr[3:2] == 2'd1) begin
+			itci_n <= itci_n + 8'd1;
+			mem.mem[{itci_a[15:4], 2'd1}] <= {8'h70, itci_n + 8'd1, mem.mem[{itci_a[15:4], 2'd1}][15:0]};
+		end
 	end
 // $F168: reset the processor the written number of clocks later
 always_ff @(posedge clk)
