@@ -444,6 +444,13 @@ always_ff @(posedge clk) begin
 					done[cur_c] <= 1'b1;
 					finish_cycle();
 				end
+				else if (st == S_RETRY && halt) begin
+					// halted: no bus cycle is rerun (7.9.3)
+					st <= S_IDLE;
+					err[cur_c] <= 1'b1;
+					errbeat    <= 2'd0;
+					finish_cycle();
+				end
 				else if ((pick_v || st == S_RETRY) && !sn_busy &&
 				    (((ab == B_IMP) && !bg_n && !ts_oth) || (ab == B_EXP && keep_bus && !end_tenure))) begin
 					start = 1'b1;
@@ -544,9 +551,18 @@ always_ff @(posedge clk) begin
 				end
 				else if (t_retry) begin
 					// rerun the transfer from its start; with BG negated (and
-					// no locked sequence held without BGR) the bus goes first
+					// no locked sequence held without BGR) the bus goes first.
+					// A halted processor starts no bus cycle (7.9.3): the
+					// transfer ends in error instead (a prefetch nobody uses)
 					sas_n <= 1'b1;
-					if (!keep_bus) begin
+					if (halt) begin
+						err[cur_c] <= 1'b1;
+						errbeat    <= beat;
+						d_oe       <= 1'b0;
+						st         <= S_IDLE;
+						finish_cycle();
+					end
+					else if (!keep_bus) begin
 						d_oe <= 1'b0;
 						st   <= S_RETRY;
 					end
