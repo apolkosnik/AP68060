@@ -27,7 +27,8 @@ module ap68060_backend
 #(
 	parameter bit         FPU_PIPE  = 1,
 	parameter bit         EARLY_RES = 1,
-	parameter logic [7:0] PCR_REV   = 8'h06       // PCR revision number (bits 15-8)
+	parameter logic [7:0] PCR_REV   = 8'h06,      // PCR revision number (bits 15-8)
+	parameter bit         NO_FPU    = 0           // the MC68LC060: no FPU (PCR ID $0431, the FPU disabled)
 )(
 	input  logic        clk,
 	input  logic        nreset,
@@ -630,7 +631,7 @@ ap68060_muldiv md (
 
 // FPU: OP_FPU uops act once no older uop is in flight (WB empty)
 wire         ex_is_fp = (ex_u.op == OP_FPU);
-ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
+ap68060_fpif #(.FPU_PIPE(FPU_PIPE), .NO_FPU(NO_FPU)) fpif (
 	.clk(clk), .nreset(nreset),
 	.ex_v(ex_v && ex_is_fp && !ex_fault && ex_u.exc == 8'd0), .sub(ex_u.cond),
 	.fuse(ex_u.sz == SZ_W), .eal(ex_u.sz == SZ_B),
@@ -641,7 +642,7 @@ ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 	.safe(!wb_v || wb_fpchk), .adv(adv_ex), .kill(kill_now),
 	.hold(fp_hold), .res(fp_res), .dkill(fp_dkill), .taken(fp_taken),
 	.xvec(fp_xvec), .xfmt(fp_xfmt), .xnext(fp_xnext), .xaddr(fp_xaddr),
-	.xcommit(fp_xcommit), .st_kill(fp_stkill), .dfp(pcr_dfp),
+	.xcommit(fp_xcommit), .st_kill(fp_stkill), .dfp(pcr_dfp || NO_FPU),
 	.mv_slots(fp_mvslots), .cr_slots(fp_crslots)
 );
 
@@ -864,7 +865,7 @@ function automatic logic [31:0] spr_read(input logic [7:0] n);
 		8'h11: spr_read = vbr_r;
 		8'h16: spr_read = urp_r;
 		8'h17: spr_read = srp_r;
-		8'h18: spr_read = {16'h0430, PCR_REV, pcr_edebug, 5'd0, pcr_dfp, pcr_ess}; // PCR
+		8'h18: spr_read = {NO_FPU ? 16'h0431 : 16'h0430, PCR_REV, pcr_edebug, 5'd0, pcr_dfp, pcr_ess}; // PCR
 		8'h20: spr_read = {16'd0, sr_r[15:5], ccr_f};     // SR
 		8'h21: spr_read = {27'd0, ccr_f};                   // CCR
 		default: spr_read = 32'd0;

@@ -199,7 +199,11 @@ wire  [31:0] d_pins   = !rsti_n ? {16'd0, md_cnt} : am_d_oe ? am_d : fr_doe ? fr
 `ifndef AP_EARLY_RES
 `define AP_EARLY_RES 0
 `endif
-ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EARLY_RES)) dut (
+`ifndef AP_NO_FPU
+`define AP_NO_FPU 0
+`endif
+ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EARLY_RES),
+          .NO_FPU(`AP_NO_FPU)) dut (
 	.clk(clk), .bclk_en(bclk_en), .rsti_n(rsti_n),
 	.a_o(a_o), .a_oe(a_oe),
 	.a_i(bus_a), .ts_n_i(am_drive ? am_ts_n : 1'b1), .tt_i(bus_tt),
@@ -216,7 +220,7 @@ ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EAR
 	.bb_n_o(bb_n_o), .bb_oe(bb_oe),
 	.btt_n_i((btt_oe ? btt_n_o : 1'b1) & am_btt_n), .btt_n_o(btt_n_o), .btt_oe(btt_oe),
 	.rsto_n(rsto_n),
-	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .dbg_halted(dbg_halted)
+	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .dbg_halted(dbg_halted), .dbg_vbr(), .dbg_cacr()
 );
 
 // slave
@@ -1331,12 +1335,14 @@ always_ff @(posedge clk)
 // +fptrace=<from>: the FPU state each cycle for 300 cycles
 int fpt_from;
 initial if (!$value$plusargs("fptrace=%d", fpt_from)) fpt_from = -1;
+generate if (`AP_NO_FPU == 0) begin : g_fptrace     // (an MC68LC060 has no FPU)
 always_ff @(posedge clk)
 	if (fpt_from >= 0 && cycles >= fpt_from && cycles < fpt_from + 300)
 		$display("%8d FPU fst=%0d sh_cnt=%0d | EX %s op=%0d cond=%0d sz=%0d hold=%b",
-		         cycles, dut.be.fpif.fpu.fst, dut.be.fpif.fpu.sh_cnt,
+		         cycles, dut.be.fpif.g_fpu.fpu.fst, dut.be.fpif.g_fpu.fpu.sh_cnt,
 		         dut.be.ex_v ? $sformatf("%04x", dut.be.ex_u.pc[15:0]) : "----",
 		         dut.be.ex_u.op, dut.be.ex_u.cond, dut.be.ex_u.sz, dut.be.ex_hold);
+end endgenerate
 
 // exception entries
 always_ff @(posedge clk)
