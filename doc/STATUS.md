@@ -68,6 +68,16 @@ ALMs, validated with Verilator.
   This also covers the ODDEXC/ODDIRQ rounds (every vector odd) that trace
   an instruction followed by another before the terminating ILLEGAL.
 
+### Where the core follows the manual and WinUAE differs (not in the corpus)
+
+- MOVES to an alternate space (SFC/DFC 0, 3, 4, 7) uses the address as a
+  physical one, untranslated and noncachable (4.2.5, 7.7.1); WinUAE
+  translates it, FC bit 2 picking the root.
+- PLPA works on the data side (data TTRs and ATC) whatever the DFC (4.7.3,
+  appendix D); WinUAE uses the instruction side for DFC 2 and 6.
+- A write meeting a write-protected root or pointer descriptor ends the
+  table search with WP, its history untouched (4.2.6.3); WinUAE walks on.
+
 ### Known simplifications
 
 - Branch prediction errors (FSLW.BPE access errors) are never generated:

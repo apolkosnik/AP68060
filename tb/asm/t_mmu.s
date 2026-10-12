@@ -587,24 +587,32 @@ aerr_ttrw:
 	and.l	#$FFFF,d0
 	chkl	d0,2,280
 
-	; DFC program space selects ITT rather than DTT for PLPA (WinUAE:
-	; data = (dfc & 3) != 2): only ITT0 matches, page 5 is invalid, so
-	; with DFC 6 there is no search and no fault...
-	move.l	#$FFFFFFFF,(expect_fa).l
+	; PLPA works on the data side whatever the DFC (MC68060UM 4.7.3 and
+	; appendix D: the data TTRs and ATC; WinUAE would use the instruction
+	; side for DFC 2/6): with only ITT0 matching and page 5 invalid, a
+	; PLPAR with DFC 6 searches and faults (PF; TM 5: the program space
+	; taken as data space, as for MOVES); the handler repairs the
+	; descriptor and the retry gives the page...
 	moveq	#0,d0
 	movec	d0,dtt0
 	move.l	#$0000C000,d0
 	movec	d0,itt0
 	moveq	#6,d0
 	movec	d0,dfc
+	expf	$5000,F_R|F_TM5|F_PF,$4414,$5003
+	move.l	#~F_SZM,(fslw_mask).l
+	move.l	#aerr_plpai,(expect_pc).l
+aerr_plpai:
 	dc.w	PLPAR_A0
-	chkl	a0,$00005000,291	; ITT match: the address itself (was 39)
+	chkl	a0,$00005000,291	; the page, through the data side
 	move.w	(cnt_aerr).l,d0
 	sub.w	d5,d0
 	and.l	#$FFFF,d0
-	chkl	d0,2,281
-	; ...while with DFC 5 the ITT does not apply: the search meets the
-	; invalid page and the PLPAR faults (FA = An, TM = the DFC, PF)
+	chkl	d0,3,281
+	move.l	#0,($4414).l		; page 5 invalid again
+	pflusha
+	; ...and with DFC 5 likewise: the search meets the invalid page and
+	; the PLPAR faults (FA = An, TM = the DFC, PF)
 	moveq	#5,d0
 	movec	d0,dfc
 	expf	$5000,F_R|F_TM5|F_PF,$4414,$5003
@@ -616,7 +624,7 @@ aerr_plpapf:
 	move.w	(cnt_aerr).l,d0
 	sub.w	d5,d0
 	and.l	#$FFFF,d0
-	chkl	d0,3,283
+	chkl	d0,4,283
 	move.w	d5,(cnt_aerr).l
 	moveq	#0,d0
 	movec	d0,itt0
@@ -1086,24 +1094,38 @@ aerr_tas:
 	move.b	($8005).l,d0
 	chkl	d0,$91,54		; restart completed the set
 
-; MOVES to FC 0: MC68060UM table 4-2 -- TT = 10 (alternate), TM = 000;
-; the access error frame carries those (4.2.5: "the resulting access
-; error stack frame contains the converted function code in the TM field")
-	move.l	#$00008007,($4420).l
-	pflusha
-	expf	$8006,0,$4420,$8003
-	clr.l	(fslw_mask).l
-	move.l	#aerr_mvs0,(expect_pc).l
+; MOVES to an alternate space (FC 0): "immediately used as a physical
+; address without translation" (MC68060UM 4.2.5), implicitly noncachable
+; (7.7.1): no TTR, ATC, table search or protection applies, so no fault.
+; Logical $B000 is mapped to physical $C000 for this: the FC 0 write and
+; read of $B010 reach physical $B010, and the translated view ($C010) is
+; left as it was.  (WinUAE translates these accesses.)
+	movem.l	d1-d6,-(sp)		; (the program keeps state in data registers)
+	move.l	($442C).l,-(sp)		; page 11's descriptor, put back below
+	movec	sfc,d4
 	moveq	#0,d0
 	movec	d0,dfc
-	move.b	#$5C,d1
-aerr_mvs0:
-	moves.b	d1,($8006).l
-	move.l	(last_fslw).l,d0
-	chkl	d0,F_W|F_SZB|F_TTALT|F_TM0|F_WP,55
+	movec	d0,sfc
+	moves.l	($C010).l,d0		; physical $C010, restored below
+	move.l	d0,-(sp)
+	move.l	#$0000C003,($442C).l
+	pflusha
+	move.l	#$01020304,($B010).l	; translated: physical $C010
+	move.l	#$A5A55A5A,d1
+	moves.l	d1,($B010).l		; physical $B010
+	moves.l	($B010).l,d2		; physical $B010
+	chkl	d2,$A5A55A5A,55
+	move.l	($B010).l,d0		; translated: physical $C010
+	chkl	d0,$01020304,56
 	moveq	#0,d0
-	move.b	($8006).l,d0
-	chkl	d0,$5C,56
+	movec	d0,dfc
+	move.l	(sp)+,d0
+	moves.l	d0,($C010).l		; physical $C010 as it was
+	cpusha	dc			; (no cached copy of the changed line)
+	movec	d4,sfc
+	move.l	(sp)+,($442C).l
+	pflusha
+	movem.l	(sp)+,d1-d6
 
 ; MOVES to FC 2 is converted to user data space: TT = 00, TM = 001
 ; (MC68060UM table 4-2)
@@ -1446,26 +1468,13 @@ stale_rec_ok:
 	chkl	d0,1,256		; exactly one access error
 	move.l	#unexp,($18).l
 
-;----- MOVES alternate function codes select the ROOT by FC bit 2 (257-260)
-; An external audit read MC68040 UM 3.2.5 as requiring FC 0/3/4/7 MOVES to
-; BYPASS translation as physical accesses.  WinUAE -- the reference this
-; core is validated against, and the source of the cputest corpus -- does
-; not do that.  Its 68040 MOVES source read is:
-;     bool super = (regs.sfc & 4) != 0;
-;     res = mmu_get_user_byte(addr, super, false, sz_byte, false);
-; i.e. EVERY function code is translated, and only bit 2 picks the root.
-; The same code (sfc_get_*/dfc_put_* in cpummu.cpp) serves the 68060, and
-; MC68060UM 4.2.5 carries the same "alternate address space ... used as a
-; physical address" sentence next to table 4-2, so on the 68060 this stays
-; a manual-versus-reference disagreement, pinned to the reference.  (The
-; TT/TM the 68060 reports for these accesses is checked by tests 55/57.)  This core has lost that bet in
-; the manual's favour before (the T0 change-of-flow list), so pin the
-; behaviour with a test that can actually tell the roots apart: URP and
-; SRP address DIFFERENT tables here, so a bypass -- or a super bit taken
-; from anything but FC2 -- lands the store in the wrong page.
-;   user  VA $C000 -> PA $C000     (URP tables)
-;   super VA $C000 -> PA $E000     (SRP tables)
-;   super VA $E000 -> PA $C000     (so PA $C000 is readable from here)
+;----- MOVES function codes: data spaces translate, alternate spaces don't (257-260, 292)
+; FC 1 and 5 are translated through URP and SRP (FC2 picks the root); the
+; alternate spaces FC 0, 3, 4, 7 are "immediately used as a physical
+; address without translation" (MC68060UM 4.2.5, the same in MC68040UM
+; 3.2.5).  WinUAE translates every function code with FC bit 2 picking the
+; root (cpummu.cpp sfc_get_*/dfc_put_*); this core follows the manual.
+; URP and SRP address DIFFERENT tables here, so the cases are told apart:
 	move.l	#$4800,d0
 	movec	d0,urp			; user root, distinct from SRP ($4000)
 	move.l	#$0000C003,($4C18).l	; user   entry 6: VA $C000 -> PA $C000
@@ -1490,19 +1499,21 @@ stale_rec_ok:
 	move.l	($C000).l,d0		; super VA $C000 = PA $E000
 	chkl	d0,$55555555,258	; FC5 translated through SRP
 
-	moveq	#0,d0			; FC0: bit 2 clear -> USER, not a bypass
+	moveq	#0,d0			; FC0: alternate space, physical
 	movec	d0,dfc
 	move.l	#$00000000,d1
 	moves.l	d1,($C000).l
 	move.l	($E000).l,d0
-	chkl	d0,0,259		; FC0 landed in the USER page
+	chkl	d0,0,259		; PA $C000
 
-	moveq	#4,d0			; FC4: bit 2 set -> SUPERVISOR
-	movec	d0,dfc
+	moveq	#4,d0			; FC4: alternate space, physical too
+	movec	d0,dfc			; (WinUAE: the supervisor page, PA $E000)
 	move.l	#$44444444,d1
 	moves.l	d1,($C000).l
-	move.l	($C000).l,d0
-	chkl	d0,$44444444,260	; FC4 landed in the SUPERVISOR page
+	move.l	($E000).l,d0		; super VA $E000 = PA $C000
+	chkl	d0,$44444444,260	; FC4 landed at PA $C000
+	move.l	($C000).l,d0		; super VA $C000 = PA $E000
+	chkl	d0,$55555555,292	; the supervisor page untouched
 
 	moveq	#5,d0
 	movec	d0,dfc			; leave DFC as the block found it

@@ -476,6 +476,7 @@ ap68060_atc datc (
 // translation and cache tag compare of a lookup
 //--------------------------------------------------------------------------
 function automatic xres_t xlate(input logic [31:0] la, input logic s, input logic wr,
+                                input logic alt,
                                 input logic hitv, input atce_t e,
                                 input logic [20:0] t0, input logic [20:0] t1,
                                 input logic [20:0] t2, input logic [20:0] t3,
@@ -486,7 +487,16 @@ function automatic xres_t xlate(input logic [31:0] la, input logic s, input logi
 	x = '0;
 	tt0 = ttr_hit(dtt0, la, s);
 	tt1 = ttr_hit(dtt1, la, s);
-	if (tt0 || tt1) begin
+	if (alt) begin
+		// an alternate address space (MOVES with SFC/DFC 0, 3, 4, 7): the
+		// address is physical, untranslated (MC68060UM 4.2.5), and the
+		// access implicitly noncachable (7.7.1), UPA 0 (table 7-2)
+		x.ok  = 1'b1;
+		x.pa  = la;
+		x.cm  = 2'b10;
+		x.upa = 2'd0;
+	end
+	else if (tt0 || tt1) begin
 		x.ok  = 1'b1;
 		x.pa  = la;
 		x.cm  = tt0 ? dtt0[6:5] : dtt1[6:5];
@@ -533,7 +543,7 @@ wire        m1_wr  = (m1.mem == M_ST) || (m1.mem == M_RMW);
 // the FSLW RW field of the DC2 access: read, write, read-modify-write
 wire  [1:0] m2_rw  = (m2.r.mem == M_LD) ? 2'b10 : (m2.r.mem == M_ST) ? 2'b01 : 2'b11;
 always_comb begin
-	x_dc1 = xlate(m1.a, m1.smode, m1_wr, atc_hit, atc_e,
+	x_dc1 = xlate(m1.a, m1.smode, m1_wr, fc_tt(m1.fc) == TT_ALT, atc_hit, atc_e,
 	              tq_a[0], tq_a[1], tq_a[2], tq_a[3], lvd_q);
 	if (m1.ack != 2'd0) begin
 		// CPU space (interrupt acknowledge) is never translated nor cached
@@ -1197,7 +1207,8 @@ always_ff @(posedge clk) begin
 		end
 		E_SP_2: begin
 			xres_t x;
-			x  = xlate({m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode, (m2.r.mem != M_LD), atc_hit, atc_e,
+			x  = xlate({m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode, (m2.r.mem != M_LD),
+			           fc_tt(m2.r.fc) == TT_ALT, atc_hit, atc_e,
 			           tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_q);
 			// the second part's translation and lookup, registered (the
 			// decision and the data next cycle; the RAM keeps reading the
@@ -1219,7 +1230,8 @@ always_ff @(posedge clk) begin
 			xres_t x;
 			// after a search: its result, not the ATC's (a failed search
 			// leaves no entry, nor does one in the no-allocate mode)
-			x = xlate(e_va, m2.r.smode, (m2.r.mem != M_LD), atc_hit || tw_use,
+			x = xlate(e_va, m2.r.smode, (m2.r.mem != M_LD), fc_tt(m2.r.fc) == TT_ALT,
+			          atc_hit || tw_use,
 			          tw_use ? tw_e : atc_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_q);
 			if (tw_use && tw_fail) begin
 				x.ok  = 1'b1;
@@ -1629,8 +1641,12 @@ always_ff @(posedge clk) begin
 			// loads the ATC (program space: the I-ATC) and gives the page.
 			// The faults are the access's: TTR/default write protection,
 			// supervisor or write protection, invalid descriptors.
+			// PLPA works on the data side whatever the DFC (4.7.3, appendix
+			// D: "Data TTR hit ... Data ATC hit ... update Data ATC"); the
+			// DFC gives the space's S bit.  (WinUAE uses the instruction
+			// TTRs and ATC for DFC 2 and 6.)
 			logic t0, t1, it0, it1, hitt, wpt, isp;
-			isp = (mt_fc[1:0] == 2'b10);
+			isp = 1'b0;
 			t0  = ttr_hit(dtt0, mt_addr, mt_fc[2]);
 			t1  = ttr_hit(dtt1, mt_addr, mt_fc[2]);
 			it0 = ttr_hit(itt0, mt_addr, mt_fc[2]);
@@ -1964,6 +1980,15 @@ always_ff @(posedge clk) begin
 					if (!tw_d[1]) begin
 						tw_fail  <= 1'b1;          // invalid table descriptor
 						tw_cause <= (tw_lvl == TW_ROOT) ? FSLW_PTA : FSLW_PTB;
+						e_st     <= E_TW_DONE;
+					end
+					else if (tw_wr && tw_d[2]) begin
+						// a write (or read-modify-write) meets a write-
+						// protected table descriptor: the search ends here,
+						// WP, the descriptor's history untouched (4.2.6.3).
+						// (WinUAE walks on and reports what it finds below.)
+						tw_fail  <= 1'b1;
+						tw_cause <= FSLW_WP;
 						e_st     <= E_TW_DONE;
 					end
 					else begin

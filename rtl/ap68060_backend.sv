@@ -1160,9 +1160,11 @@ logic  [2:0] irq_lvl_r;       // level being acknowledged
 logic        ipend_r;
 logic  [2:0] ipend_lvl;
 wire  [2:0]  irq_mask = (wb_v && wb_sr_we && wb_exc == 8'd0) ? wb_sr_new[10:8] : sr_r[10:8];
-wire         irq_pend = nmi_edge ||
-                        (ipl_q != 3'd7 && (ipl_q > irq_mask ||
-                                           (ipend_r && ipl_q >= ipend_lvl)));
+// level 7 is also recognised by level comparison whenever the mask is
+// below 7 (MC68060UM 8.2.9, figure 8-3: RTE or MOVE to SR lowering the
+// mask with IPL still at 7 takes it again); at mask 7 only its edge
+wire         irq_pend = nmi_edge || (ipl_q > irq_mask) ||
+                        (ipl_q != 3'd7 && ipend_r && ipl_q >= ipend_lvl);
 wire  [2:0]  irq_lvl  = nmi_edge ? 3'd7 : ipl_q;
 
 logic        stopped;         // STOP / LPSTOP: waiting for an interrupt
