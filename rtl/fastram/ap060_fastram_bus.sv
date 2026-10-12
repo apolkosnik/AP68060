@@ -143,6 +143,13 @@ always_ff @(posedge clk) begin
 				// after the hold clock)
 				dv_wait <= (!rd && m_hold) ? 2'd1 : 2'd0;
 				posted  <= 1'b0;
+				// a read's next long word already here and no ignored clock
+				// before its sample: TA again for the very next edge (a line
+				// at one beat a clock, 7.7.2), not a clock later
+				if (rd && icount(rd, 1'b1) == 4'd0 && n != 3'd0) begin
+					ta_q <= 1'b1;
+					take = 1'b1;
+				end
 			end
 		end
 		else if (act) begin

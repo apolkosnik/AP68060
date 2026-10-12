@@ -751,6 +751,7 @@ logic [31:0] e_va;                // logical address of the current part
 logic  [2:0] e_n;                 // bytes in the current part
 logic [31:0] e_acc;               // load: assembled operand; store: left aligned data
 logic        e_fromline;          // the operand comes from bo_line (inhibited fill)
+logic        e_fillhit;           // ... from the line a load's own fill just installed
 logic        e_kill;              // the DC2 job's uop was discarded
 logic        sp_job;              // the DC2 job is a fast split read
 logic        sp_dw;               // a write to the next set while its
@@ -1070,7 +1071,11 @@ always_comb begin
 	                       (bo_np == 3'd2) ? {2{bo_wd[31:16]}} : bo_wd};
 end
 
-assign dm_hold1 = sn_frz || steal || steal_q ||
+// (a stale lookup waits the clock its set is read again, rather than
+// sending its uop to the engine's general path: after a miss the loads
+// behind it would otherwise each take that path, every one keeping the
+// engine busy for the next)
+assign dm_hold1 = sn_frz || steal || steal_q || (m1.v && m1_stale) ||
                   (e_st != E_IDLE && e_st != E_W_START &&
                    e_st != E_W_PART && e_st != E_W_DONE && e_st != E_SB);
 
@@ -1102,7 +1107,7 @@ always_ff @(posedge clk) begin
 		e_st <= E_IDLE; e_ret <= E_IDLE; e_sret <= E_IDLE; e_wret <= E_IDLE;
 		e_dc2_done <= 1'b0; e_wst_done <= 1'b0;
 		e_ldata <= '0; e_flt <= 1'b0; e_faddr <= '0; e_fslw <= '0;
-		e_part <= 1'b0; e_x <= '0; e_va <= '0; e_n <= '0; e_acc <= '0; e_fromline <= 1'b0;
+		e_part <= 1'b0; e_x <= '0; e_va <= '0; e_n <= '0; e_acc <= '0; e_fromline <= 1'b0; e_fillhit <= 1'b0;
 		e_breq <= 1'b0;
 		bo <= '0; bo_wd <= '0; bo_line <= '0; bo_err <= 1'b0; bo_rd <= '0;
 		bo_avec <= 1'b0; bo_tci <= 1'b0; bo_left <= '0; bo_pn <= '0; bo_pa <= '0;
@@ -1174,6 +1179,10 @@ always_ff @(posedge clk) begin
 			m1_tp <= transp_of(m1.a, m1.smode, m1.fc, m1.ack);
 			m1_aset <= tc_p ? m1.a[16:13] : m1.a[15:12];
 			if ((dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet) m1_stale <= 1'b1;
+			// held, the RAMs and the ATC read DC1's own set again every
+			// clock (la_alt): a clock with the engine quiet and no write to
+			// that set makes the lookup good again from the next one
+			else if (!steal && !sn_rset) m1_stale <= 1'b0;
 		end
 
 		if (adv_dc1) begin
@@ -1295,6 +1304,7 @@ always_ff @(posedge clk) begin
 			e_acc  <= '0;
 			e_flt  <= 1'b0;
 			e_fromline <= 1'b0;
+			e_fillhit  <= 1'b0;
 			e_n    <= m2.split ? 3'(5'd16 - {1'b0, m2.r.a[3:0]}) : nbytes(m2.r.msz);
 			sp_dw  <= 1'b0;
 			sp_job <= m2.sfast;
@@ -1427,6 +1437,15 @@ always_ff @(posedge clk) begin
 				e_fslw  <= mk_fslw(e_x.why, m2.r.lock, m2_rw, m2.r.msz, m2.r.fc) |
 				           (e_part ? FSLW_MA : 32'd0);
 				e_st    <= E_S_DONE;
+			end
+			else if (e_fillhit) begin
+				// the fill installed the line (f_way) and it is in bo_line:
+				// the operand from it, the part now a hit in that way
+				e_acc     <= (e_acc << (8 * e_n)) | take(bo_line, e_va[3:0], e_n);
+				e_fillhit <= 1'b0;
+				e_x.hit   <= 1'b1;
+				e_x.way   <= f_way;
+				e_st      <= E_S_NEXT;
 			end
 			else if (e_fromline) begin
 				// an inhibited fill delivered the line: the operand from it
@@ -1997,6 +2016,12 @@ always_ff @(posedge clk) begin
 				e_st       <= (m2.r.mem != M_ST) ? E_S_ACT : E_S_NEXT;
 			end
 			else if (pv_v) e_st <= E_PUSHV_B;
+			else if (m2.r.mem == M_LD && e_sret == E_S_XL) begin
+				// a load's own fill: its operand from the line just read
+				// (still in bo_line), not a second lookup of that line
+				e_fillhit <= 1'b1;
+				e_st      <= E_S_ACT;
+			end
 			else e_st <= e_sret;
 		end
 
