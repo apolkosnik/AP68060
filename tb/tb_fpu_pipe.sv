@@ -67,7 +67,7 @@ cmd_t cmds [$];
 
 // the current FPU's selection ports: unused here (the FPU selects its own
 // register-ready flags; the core selects them outside, checked in the FPU)
-`define XPORTS .okv_next(), .sel_x(1'b0), .aok_x(1'b0), .bok_x(1'b0), .opmode_n(7'd0), .op_class_n(3'd0), .src_fmt_n(3'd0), .frestore_we(1'b0), .frestore_wf(4'd0), .frestore_wd(32'd0),
+`define XPORTS .okv_next(), .sel_x(1'b0), .aok_x(1'b0), .bok_x(1'b0), .opmode_n(7'd0), .op_class_n(3'd0), .src_fmt_n(3'd0), .frestore_we(1'b0), .frestore_wf(2'd0), .frestore_wd(32'd0),
 `define FPU_INST(P, PIPEV, MOD, X) \
 	MOD #(.PIPE(PIPEV)) P``_fpu ( \
 		.clk(clk), .nreset(nreset), .ce(1'b1), \
@@ -82,22 +82,13 @@ cmd_t cmds [$];
 		.ia_we(1'b0), .ia_wdata(32'd0), \
 		.fm_sel(P``_fmsel), .fm_we(P``_fmwe), .fm_wdata(P``_fmwd), .fm_rdata(P``_fmrd), \
 		.fpu_used(), .pbusy(P``_pbusy), .pdone(P``_pdone), X \
-		.fstate_unimp(), .fstate_cmd1(), .fstate_cmd3(), \
-		.fstate_stag(), .fstate_dtag(), .fstate_flags(), \
-		.fstate_fpt(), .fstate_et(), \
-		.fsave_ack(1'b0), .frestore_idle(1'b0), .frestore_unimp(1'b0), \
-		.pend_capture(P``_pcap), .cur_vec(), \
-		.frestore_e1_pend(), .frestore_resume(), \
-		.frestore_cusavepc(8'd0), .frestore_et15(1'b0), .frestore_fpt15(1'b0), \
-		.fstate_grs(), .fstate_wbte15(), \
-		.fstate_busy(), .fstate_wbt(), .fstate_fpiar_c(), \
-		.frestore_busy(1'b0), \
+		.fstate_et(), .frestore_idle(1'b0), \
+		.unimp_ack(1'b0), .fs_clr(1'b0), \
 		.fp_reset(1'b0) \
 	);
 
-// an exception's pending frame is consumed as the core does (FSAVE or the
-// next instruction's CHK delivers it): pend_capture right after it
-logic r_pcap = 0, d_pcap = 0;
+// (an exception's pending state lives in the core's FPU interface, not in
+// the FPU: nothing to consume here)
 // completions (done, pdone, or an exception outcome), counted at the clock
 // so a one-cycle pdone is not missed; lastx: the last one was an exception
 int   r_nend = 0, d_nend = 0;
@@ -288,9 +279,6 @@ task automatic P``_run(int from, int to); \
 			@(posedge clk); \
 			P``_req <= 1'b0; \
 			while (P``_nend == n0) @(posedge clk); end \
-			if (P``_lastx) begin \
-				P``_pcap <= 1'b1; @(posedge clk); P``_pcap <= 1'b0; \
-			end \
 		end \
 		else begin \
 			P``_drain(); \

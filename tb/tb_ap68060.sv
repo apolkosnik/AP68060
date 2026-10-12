@@ -59,6 +59,10 @@
 //   $F2E4 long  (read) Bcc/DBcc mispredicted in EX (write 0 clears)      //
 //   $F2F0 long  (read) bus clocks with BR asserted while the 68060 drives  //
 //               BB asserted (write 0 clears)                               //
+//   $F2F4 long  (read) the 68060's completed transfers in the watch window //
+//               ($F2D0/$F2D4), any TM: reads without LOCK; $F2F8 reads   //
+//               with LOCK; $F2FC writes with LOCK and LOCKE (the end of a //
+//               locked sequence) (write 0 clears)                          //
 //   $F2E8 long  (read) the core's options: bit 0 the loop exit predictor  //
 //   $F2EC long  (read) retired branches the branch cache predicted        //
 //               (write 0 clears)                                           //
@@ -541,17 +545,39 @@ m68060_alt_master am (
 	.d_bus(bus_dr), .ta_n(ta_n), .tea_n(tea_n), .tbi_n(tbi_n)
 );
 
-// the trigger: the 68060 starts a line read of the armed line (or a push
-// of it: then the slave retries that push until this master has the bus)
-assign am_trig = bclk_en && !ts_n && a_oe && !am_drive && siz == 2'b11 &&
-                 a_o[31:4] == am_trig_a[31:4] &&
-                 (am_trig_push ? (!rw_n && tm == 3'd0) : rw_n);
+// the trigger: the 68060 starts a line read of the armed line (or a write
+// to it: then the slave answers that write with one retry, and this master
+// asks for the bus at the same time)
+assign am_trig = bclk_en && !ts_n && a_oe && !am_drive && a_o[31:4] == am_trig_a[31:4] &&
+                 (am_trig_push ? !rw_n : (rw_n && siz == 2'b11));
 logic pr_arm, push_retry;
 always_ff @(posedge clk)
 	if (!rsti_n || am_drive) pr_arm <= 1'b0;
 	else if (am_trig && am_trig_push && am.st == am.A_TRIG) pr_arm <= 1'b1;
-assign push_retry = pr_arm && xfer_v && !am_drive && !xfer_rd && xfer_siz == 2'b11 &&
-                    xfer_tm == 3'd0 && xfer_addr[31:4] == am_trig_a[31:4];
+	else if (mem.ack && ((!ta_n && !tea_n) || !tra_n)) pr_arm <= 1'b0;   // (once: the real retry)
+assign push_retry = pr_arm && xfer_v && !am_drive && !xfer_rd &&
+                    xfer_addr[31:4] == am_trig_a[31:4];
+
+// the lock attributes of the 68060's transfer, from its TS; a locked
+// sequence is open from its first transfer to the end of its LOCKE one,
+// and with BGR negated the 68060 keeps the bus that long, BG or not
+// (7.11.2): no other master's transfer may fall inside it
+logic ts_lock, ts_locke, lk_open;
+always_ff @(posedge clk)
+	if (!rsti_n) begin
+		ts_lock <= 1'b0; ts_locke <= 1'b0; lk_open <= 1'b0;
+	end
+	else begin
+		if (bclk_en && !ts_n && a_oe) begin
+			ts_lock  <= !lock_n;
+			ts_locke <= !locke_n;
+		end
+		if (ev && !am_drive && ts_lock) lk_open <= !(ts_locke || ev_err);
+		if (bclk_en && am_drive && !am_ts_n && lk_open && am_bgr_n) begin
+			errors <= errors + 1;
+			$display("FAIL: another master's transfer inside a locked sequence, BGR negated (cycle %0d)", cycles);
+		end
+	end
 
 // PST never shows an encoding MC68060UM table 2-7 leaves undefined ($03,
 // $05-$07, $0C, $13; $08/$0B are the emulator's), and shows "stopped"
@@ -843,6 +869,12 @@ always_ff @(posedge clk) begin
 		if (ev && ev_rd && !ev_err && ev_tt == 2'd0 && !am_drive &&
 		    ev_addr[15:0] == 16'hF2B0)
 			mem.mem[16'hF2B4 >> 2] <= mem.mem[16'hF2B4 >> 2] + 32'd1;
+		if (ev && !ev_err && ev_tt == 2'd0 && !am_drive &&
+		    ev_addr >= mem.mem[16'hF2D0 >> 2] && ev_addr < mem.mem[16'hF2D4 >> 2]) begin
+			if (ev_rd && !ts_lock) mem.mem[16'hF2F4 >> 2] <= mem.mem[16'hF2F4 >> 2] + 32'd1;
+			if (ev_rd && ts_lock)  mem.mem[16'hF2F8 >> 2] <= mem.mem[16'hF2F8 >> 2] + 32'd1;
+			if (!ev_rd && ts_lock && ts_locke) mem.mem[16'hF2FC >> 2] <= mem.mem[16'hF2FC >> 2] + 32'd1;
+		end
 		if (ev && !ev_err && ev_tt == 2'd0 && !am_drive && (ev_tm == 3'd0 || ev_tm == 3'd1 || ev_tm == 3'd5) &&
 		    ev_addr >= mem.mem[16'hF2D0 >> 2] && ev_addr < mem.mem[16'hF2D4 >> 2]) begin
 			if (ev_rd) mem.mem[16'hF2D8 >> 2] <= mem.mem[16'hF2D8 >> 2] + 32'd1;

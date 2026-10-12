@@ -13,6 +13,10 @@
 ;        ATC, the page descriptor is changed without PFLUSH, and PLPAR with
 ;        DFC 6 still gives the cached translation -- PLPA works on the data
 ;        side whatever the DFC (appendix D)
+;   5-7  setting U is a locked read-modify-write (4.2.5, table 4-1): for
+;        each of the three descriptors (U clear) the search reads it, then
+;        reads it again with LOCK and writes it with LOCK and LOCKE (the
+;        bench counts the transfers in a watch window over the tables)
 ;
 ;   98   an unexpected exception
 
@@ -21,6 +25,11 @@ DONEREG	equ	$F102
 cnt_ae	equ	$3600
 ae_fslw	equ	$3604
 resume	equ	$3608
+WLO	equ	$F2D0		; watch window start, end
+WHI	equ	$F2D4
+LKPLAIN	equ	$F2F4		; reads in it without LOCK
+LKREAD	equ	$F2F8		; ... with LOCK
+LKWRITE	equ	$F2FC		; writes with LOCK and LOCKE
 
 failt	macro
 	move.w	#\1,d7
@@ -89,6 +98,29 @@ wp_back:
 	moveq	#0,d0
 	movec	d0,tc
 	chkl	a0,$00008000,4		; the cached translation
+
+;------------------------------------------------ 5-7 U set by locked RMW
+	move.l	#$00004202,($4000).l	; root 0 -> $4200, U clear
+	move.l	#$00004402,($4300).l	; pointer 64 -> $4400, U clear
+	move.l	#$00008001,($4400).l	; page 0 -> $8000, U clear
+	pflusha
+	move.l	#$4000,(WLO).l		; watch the tables
+	move.l	#$4500,(WHI).l
+	clr.l	(LKPLAIN).l
+	clr.l	(LKREAD).l
+	clr.l	(LKWRITE).l
+	move.l	#$8000,d0
+	movec	d0,tc
+	move.l	($01000000).l,d1	; the search
+	moveq	#0,d0
+	movec	d0,tc
+	move.l	(LKPLAIN).l,d1
+	chkl	d1,3,5			; each descriptor read
+	move.l	(LKREAD).l,d1
+	chkl	d1,3,6			; ... again with LOCK
+	move.l	(LKWRITE).l,d1
+	chkl	d1,3,7			; ... and written with LOCK and LOCKE
+	clr.l	(WHI).l
 
 	move.w	#$600D,(DONEREG).l
 	bra.s	*

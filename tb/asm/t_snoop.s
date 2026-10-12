@@ -550,6 +550,26 @@ PRL	equ	$8400
 	chkm	AMX+8,$55AA0000,64
 	chkm	AMX+96+20,$55AA003C,65
 
+;------------- a locked sequence keeps the bus through a retry (7.11.2)
+; TAS on noncachable memory: a locked read, then the write with LOCKE.  The
+; write is answered with a retry while the other master asks for the bus
+; (BG negated); with BGR negated the 68060 must keep the bus and run the
+; write again, and only then let the other master in (the bench fails a
+; transfer of another master inside a locked sequence with BGR negated).
+	move.b	#$00,($8600).l
+	amx	0,$8610,SZL|NSN
+	amd	0,$7A57A570
+	move.l	#$8600,(AMTRIG).l
+	move.w	#$0201,(AMGO).l		; on the 68060's write of $8600: retry
+	tas	($8600).l
+	bsr	amwait
+	move.b	($8600).l,d1
+	cmp.b	#$80,d1
+	beq.s	.tas
+	failt	66
+.tas:	move.l	($8610).l,d1
+	chkl	d1,$7A57A570,67
+
 ;----------------------------------------------------------------- done
 	move.w	#$600D,(DONEREG).l
 	bra.s	*
