@@ -46,7 +46,12 @@
 //--------------------------------------------------------------------------//
 
 module ap060_tg68k_compat #(
-	parameter NO_FPU = 1               // the MC68LC060
+	parameter NO_FPU = 1,              // the MC68LC060
+	// on-board debug capture, read over JTAG (In-System Sources and Probes,
+	// instance "A060"; tests/ap060/ap060_dbgread.tcl): a live view of the
+	// processor and of both halves of the bus crossing, and the last 64
+	// transfers.  A few hundred ALMs and one M10K.
+	parameter DEBUG_CAPTURE = 0
 )(
 	input             clk,
 	input             clk_cpu,         // the processor's clock, unrelated to clk
@@ -71,7 +76,20 @@ module ap060_tg68k_compat #(
 	input       [4:0] z3ram_base0,
 	input             z3ram_ena0,
 	input       [3:0] z3ram_base1,
-	input             z3ram_ena1
+	input             z3ram_ena1,
+
+	// Fast RAM: the processor's own port into DDR3 (ap030_fastram_fe/_be,
+	// as the AP68030's Minimig integration): an Avalon-MM master on clk_mem
+	input             clk_mem,
+	output     [28:0] fr_address,
+	output      [7:0] fr_burstcount,
+	output            fr_read,
+	output            fr_write,
+	output     [63:0] fr_writedata,
+	output      [7:0] fr_byteenable,
+	input             fr_waitrequest,
+	input      [63:0] fr_readdata,
+	input             fr_readdatavalid
 );
 
 localparam BS_FETCH = 2'b00, BS_IDLE = 2'b01, BS_READ = 2'b10, BS_WRITE = 2'b11;
@@ -113,8 +131,9 @@ end
 //--------------------------------------------------------------------------
 // the processor
 //--------------------------------------------------------------------------
-wire [31:0] a_o, d_o, cacr, vbr;
-wire        d_oe, rw_n, ts_n, rsto_n;
+wire [31:0] a_o, d_o, cacr, vbr, dbg_pc;
+wire        dbg_retire, dbg_halted;
+wire        d_oe, rw_n, ts_n, rsto_n, ciout_n;
 wire  [1:0] siz, tt;
 wire  [2:0] tm;
 wire  [3:0] bs_n;
@@ -125,17 +144,17 @@ reg         ta_n, tbi_n, tci_n, avec_n;
 ap68060 #(.NO_FPU(NO_FPU)) cpu (
 	.clk(clk_cpu), .bclk_en(1'b1), .rsti_n(nrst_c),
 	.a_o(a_o), .a_oe(), .a_i(a_o), .ts_n_i(1'b1), .tt_i(tt), .snoop_n(1'b1),
-	.d_i(nrst_c ? d_i : 32'd0), .d_o(d_o), .d_oe(d_oe),
+	.d_i(nrst_c ? (f_doe ? f_d : d_i) : 32'd0), .d_o(d_o), .d_oe(d_oe),
 	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(), .upa(),
-	.ciout_n(), .lock_n(), .locke_n(), .lock_oe(),
+	.ciout_n(ciout_n), .lock_n(), .locke_n(), .lock_oe(),
 	.ts_n(ts_n), .tip_n(), .tip_oe(), .sas_n(), .sas_oe(),
-	.ta_n(ta_n), .tea_n(1'b1), .tra_n(1'b1), .tci_n(tci_n), .tbi_n(tbi_n), .cla_n(1'b1),
+	.ta_n(ta_n & f_ta_n), .tea_n(1'b1), .tra_n(1'b1), .tci_n(tci_n), .tbi_n(tbi_n), .cla_n(1'b1),
 	.ipl_n(nrst_c ? ipl_in : 3'b111), .avec_n(avec_n),
 	.br_n(), .bg_n(1'b0), .bgr_n(1'b1),
 	.bb_n_i(bb_oe ? bb_n_o : 1'b1), .bb_n_o(bb_n_o), .bb_oe(bb_oe),
 	.btt_n_i(btt_oe ? btt_n_o : 1'b1), .btt_n_o(btt_n_o), .btt_oe(btt_oe),
 	.rsto_n(rsto_n), .cdis_n(1'b1), .mdis_n(1'b1), .ipend_n(), .pst(),
-	.dbg_pc(), .dbg_retire(), .dbg_halted(), .dbg_vbr(vbr), .dbg_cacr(cacr)
+	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .dbg_halted(dbg_halted), .dbg_vbr(vbr), .dbg_cacr(cacr)
 );
 
 // RSTO and VBR into clk (VBR: MOVEC only; nmi_addr in cpu_wrapper)
@@ -160,22 +179,43 @@ assign cacr_out    = 4'b0001;
 assign d_cache_out = 1'b1;
 
 //--------------------------------------------------------------------------
+// the crossing: two request slots, used in turn.  The clk_cpu half fills a
+// slot (address, size, direction, write data: a whole line for a push) and
+// flips its request toggle; the clk half runs the slots' 16-bit accesses
+// in the same order and flips the slot's answer toggle when it is done.
+// A slot's fields stay put from its request until its answer, so only the
+// toggles cross (two-stage synchronisers).  A write is acknowledged once
+// its data is in the slot (posted): the processor goes on while the clk
+// half writes it, and a second transfer can be queued behind it.  A read
+// waits for its own answer, which comes after every write queued before it.
+//--------------------------------------------------------------------------
+reg  [31:0] sa   [0:1];            // address as driven with TS
+reg   [1:0] ssiz [0:1];
+reg         srd  [0:1];
+reg         scode[0:1];            // TM: user / supervisor code
+reg         siack[0:1];            // an interrupt acknowledge
+reg [127:0] swd  [0:1];            // write data, by long word address A3-A2
+reg   [1:0] p_tgl = 2'b00;         // request toggles (clk_cpu)
+reg   [1:0] k_tgl = 2'b00;         // answer toggles (clk)
+reg [127:0] k_rd;                  // read data, by long word address (clk)
+
+//--------------------------------------------------------------------------
 // clk_cpu: the 68060 bus
 //--------------------------------------------------------------------------
-localparam C_IDLE = 2'd0, C_DATA = 2'd1, C_WAIT = 2'd2, C_ACK = 2'd3;
-reg   [1:0] cst;
-reg  [31:0] xa;                    // address as driven with TS     } held from the
-reg   [1:0] xsiz;                  //                                } request toggle
-reg         xrd;                   //                                } until its
-reg         xcode;                 // TM: user / supervisor code     } answer
-reg         xiack;                 // an interrupt acknowledge       }
-reg  [31:0] wd;                    // write data                     }
-reg         p_tgl = 1'b0;          // request toggle
-reg         k_tgl = 1'b0;          // answer toggle (clk side)
-reg  [31:0] k_rd;                  // read data (clk side, held from its toggle)
-reg   [2:0] k_tgl_c = 3'b000;      // the answer toggle, synchronised
-always @(posedge clk_cpu) k_tgl_c <= {k_tgl_c[1:0], k_tgl};
-wire        answered = (k_tgl_c[2] == p_tgl);
+localparam C_IDLE = 4'd0, C_ALLOC = 4'd1, C_WBEAT = 4'd2, C_WAIT = 4'd3,
+           C_RBEAT = 4'd4, C_ACK = 4'd5;
+reg   [3:0] cst;
+reg         xfast;                 // the transfer is ap060_fastram's (debug capture)
+reg  [31:0] xa;                    // the transfer on the bus (TS to its last TA)
+reg   [1:0] xsiz;
+reg         xrd, xcode, xiack;
+reg         ws = 1'b0;             // the slot the next transfer takes
+reg         rs;                    // the slot a read waits for
+reg   [1:0] beat;                  // line beats done
+reg  [31:0] wd;                    // (debug capture: the write beat's data)
+reg   [1:0] k_tgl_c1 = 2'b00, k_tgl_c = 2'b00;
+always @(posedge clk_cpu) begin k_tgl_c1 <= k_tgl; k_tgl_c <= k_tgl_c1; end
+wire  [1:0] busy = p_tgl ^ k_tgl_c;
 
 // cachable: Fast RAM (Zorro II $200000-$9FFFFF, the Zorro III windows) and
 // Kickstart ROM ($F80000-$FFFFFF, $E00000-$E7FFFF)
@@ -185,6 +225,43 @@ wire c_z31  = z3e1_c[1] && (xa[31:28] == z3b1_c);
 wire c_rom  = (xa[31:19] == 13'h001F) || (xa[31:19] == 13'h001C);
 wire x_cach = c_z2 | c_z30 | c_z31 | c_rom;
 
+// a line's beats go A3-A2 first, then on modulo four (MC68060UM 7.7.2)
+wire  [1:0] lw   = xa[3:2] + beat;
+wire [31:0] rd_l = k_rd[127 - 32 * lw -: 32];
+
+//--------------------------------------------------------------------------
+// Fast RAM: the processor's own port (ap030_fastram_fe's native port, on
+// clk_cpu), never through cpu_wrapper.  Not CPU space (TT = 3), and not
+// the NMI vector read (VBR + $7C, a data read): that stays on the Minimig
+// bus, where the cartridge (HRTmon) overlays it, as for every other CPU.
+//--------------------------------------------------------------------------
+wire [31:0] nmi_vec = vbr + 32'h7C;
+wire ts_z30  = (a_o[31:27] == z3b0_c) && z3e0_c[1];
+wire ts_z31  = (a_o[31:28] == z3b1_c) && z3e1_c[1];
+wire ts_z2   = (a_o[31:24] == 8'h00) && (a_o[23] ^ |a_o[22:21]) && z2e_c[1];
+wire ts_nmi  = rw_n && (tm == 3'd1 || tm == 3'd5) && (a_o[31:2] == nmi_vec[31:2]);
+wire ts_fast = (tt != 2'd3) && !ts_nmi && (ts_z30 || ts_z31 || ts_z2);
+
+// the processor's DDR3 word address, as memory_router maps Zorro RAM for
+// ddram_ctrl (ramaddr; ddram_ctrl's 64-bit word is {3'b001, ramaddr[28:3]})
+wire [28:1] ts_ramaddr = {ts_z2 | ts_z31, ts_z30 | (ts_z31 & a_o[27]),
+                          (ts_z30 | ts_z31) ? a_o[26:23] : 4'd0, a_o[22:1]};
+wire        f_ta_n, f_doe, f_busy;
+wire [31:0] f_d;
+
+ap060_fastram fastram (
+	.clk(clk_cpu), .clk_mem(clk_mem), .rst(!nrst_c), .bclk_en(1'b1),
+	// (reset modes: no ignore states, no extra write hold -- as the core
+	// is reset here, IPL and D15-D0 all negated / zero)
+	.m_ign(1'b0), .m_cnt(16'd0), .m_hold(1'b0),
+	.a(a_o), .rw_n(rw_n), .siz(siz), .tt(tt), .tm(tm), .bs_n(bs_n), .ts_n(ts_n), .ciout_n(ciout_n),
+	.d_cpu(d_o), .sel(ts_fast), .ddr_addr({3'b001, ts_ramaddr[28:3]}),
+	.ta_n(f_ta_n), .d_o(f_d), .d_oe(f_doe), .busy(f_busy),
+	.avm_address(fr_address), .avm_burstcount(fr_burstcount), .avm_read(fr_read), .avm_write(fr_write),
+	.avm_writedata(fr_writedata), .avm_byteenable(fr_byteenable), .avm_waitrequest(fr_waitrequest),
+	.avm_readdata(fr_readdata), .avm_readdatavalid(fr_readdatavalid)
+);
+
 // a transfer driven with TS this clock
 task take_ts;
 	begin
@@ -193,6 +270,8 @@ task take_ts;
 		xrd   <= rw_n;
 		xcode <= (tm == 3'd2) || (tm == 3'd6);
 		xiack <= 1'b0;
+		xfast <= ts_fast;
+		beat  <= 2'd0;
 		if (tt == 2'd3 && rw_n && tm != 3'd0) begin
 			// interrupt acknowledge: TG68K's acknowledge read, a word at
 			// $FFFFFFF0 + level * 2, then TA with AVEC
@@ -200,7 +279,7 @@ task take_ts;
 			xsiz  <= SIZ_W;
 			xcode <= 1'b0;
 			xiack <= 1'b1;
-			cst   <= C_DATA;
+			cst   <= C_ALLOC;
 		end
 		else if (tt == 2'd3) begin
 			// breakpoint acknowledge, LPSTOP: answered here
@@ -209,7 +288,7 @@ task take_ts;
 			d_i    <= 32'd0;
 			cst    <= C_ACK;
 		end
-		else cst <= C_DATA;
+		else cst <= ts_fast ? C_IDLE : C_ALLOC;      // Fast RAM: ap060_fastram answers
 	end
 endtask
 
@@ -221,35 +300,77 @@ always @(posedge clk_cpu or negedge nrst_c) begin
 		tci_n  <= 1'b1;
 		avec_n <= 1'b1;
 		d_i    <= 32'd0;
-		p_tgl  <= 1'b0;            // (and k_tgl is 0 in reset: nothing owed)
+		p_tgl  <= 2'b00;           // (and k_tgl is 0 in reset: nothing owed)
+		ws     <= 1'b0;
 	end
 	else begin
 		ta_n   <= 1'b1;
 		tbi_n  <= 1'b1;
 		tci_n  <= 1'b1;
 		avec_n <= 1'b1;
+		// a Fast RAM line's beats (ap060_fastram's TA): lw follows them too
+		if (!f_ta_n) beat <= beat + 2'd1;
 		case (cst)
 			C_IDLE:
 				if (!ts_n) take_ts;
-			C_DATA: begin
-				// the processor drives the write data from this clock
-				wd    <= d_o;
-				p_tgl <= ~p_tgl;
-				cst   <= C_WAIT;
+			C_ALLOC:
+				// the address, attributes and write data stay driven until
+				// TA (MC68060UM 7.6): wait here for the slot as long as needed
+				if (!busy[ws]) begin
+					sa[ws]    <= xa;
+					ssiz[ws]  <= xsiz;
+					srd[ws]   <= xrd;
+					scode[ws] <= xcode;
+					siack[ws] <= xiack;
+					if (xrd) begin
+						p_tgl[ws] <= ~p_tgl[ws];
+						rs  <= ws;
+						ws  <= ~ws;
+						cst <= C_WAIT;
+					end
+					else begin
+						ta_n <= 1'b0;      // the first beat is taken next clock
+						cst  <= C_WBEAT;
+					end
+				end
+			C_WBEAT: begin
+				// TA is out this clock: the beat's data is on D31-D0 now (the
+				// processor drives the next beat's after it samples TA)
+				swd[ws][127 - 32 * lw -: 32] <= d_o;
+				wd <= d_o;
+				if (xsiz == SIZ_LINE && beat != 2'd3) begin
+					beat <= beat + 2'd1;
+					ta_n <= 1'b0;
+				end
+				else begin
+					p_tgl[ws] <= ~p_tgl[ws];   // posted: the clk half writes it
+					ws <= ~ws;
+					if (!ts_n) take_ts;
+					else cst <= C_IDLE;
+				end
 			end
 			C_WAIT:
-				if (answered) begin
-					d_i    <= xiack ? 32'd0 : k_rd;
+				if (!busy[rs]) begin
+					d_i    <= xiack ? 32'd0 : rd_l;
 					ta_n   <= 1'b0;
 					avec_n <= !xiack;
-					tbi_n  <= !(xsiz == SIZ_LINE);
 					tci_n  <= !(xrd && !x_cach);
-					cst    <= C_ACK;
+					beat   <= beat + 2'd1;
+					cst    <= (xsiz == SIZ_LINE) ? C_RBEAT : C_ACK;
 				end
+			C_RBEAT: begin
+				// the line's next beat (one a clock: no TBI)
+				d_i   <= rd_l;
+				ta_n  <= 1'b0;
+				tci_n <= x_cach;
+				beat  <= beat + 2'd1;
+				if (beat == 2'd3) cst <= C_ACK;
+			end
 			C_ACK:
 				// TA is out this clock; a transfer may start with it
 				if (!ts_n) take_ts;
 				else cst <= C_IDLE;
+			default: cst <= C_IDLE;
 		endcase
 	end
 end
@@ -257,29 +378,46 @@ end
 //--------------------------------------------------------------------------
 // clk: cpu_wrapper's 16-bit accesses
 //--------------------------------------------------------------------------
-reg   [2:0] p_tgl_k = 3'b000;      // the request toggle, synchronised
-always @(posedge clk) p_tgl_k <= {p_tgl_k[1:0], p_tgl};
-wire        req = (p_tgl_k[2] != k_tgl);
+reg   [1:0] p_tgl_k1 = 2'b00, p_tgl_k = 2'b00;
+always @(posedge clk) begin p_tgl_k1 <= p_tgl; p_tgl_k <= p_tgl_k1; end
+wire  [1:0] req = p_tgl_k ^ k_tgl;
 
-localparam K_IDLE = 2'd0, K_ACC = 2'd1, K_DONE = 2'd2;
+localparam K_IDLE = 2'd0, K_ACC = 2'd1, K_GAP = 2'd2;
 reg   [1:0] kst;
-reg         word1;                 // the second word of a long word
-wire        x_long = (xsiz == SIZ_L) || (xsiz == SIZ_LINE);
+reg         rp = 1'b0;             // the slot being served (in turn)
+reg   [2:0] kw;                    // its word being accessed
+reg         word1;                 // (debug capture: a long word's second word)
 
-// the 16-bit access for word w of the transfer
+function [2:0] nwords;             // the slot's last word
+	input [1:0] s;
+	nwords = (s == SIZ_LINE) ? 3'd7 : (s == SIZ_L) ? 3'd1 : 3'd0;
+endfunction
+
+// the 16-bit access for word w of slot s: a line's long words in the
+// processor's order, each high half first; longword high on the first
+// word of a long word, as TG68K does (Gayle's 32-bit IDE data port)
 task present;
-	input w;
+	input       s;
+	input [2:0] w;
+	reg   [1:0] li;
+	reg         hi;
 	begin
-		addr_out   <= (xsiz == SIZ_B) ? xa : {xa[31:2], (x_long ? w : xa[1]), 1'b0};
-		busstate   <= !xrd ? BS_WRITE : xcode ? BS_FETCH : BS_READ;
-		nwr        <= xrd;
-		nuds       <= (xsiz == SIZ_B) && xa[0];
-		nlds       <= (xsiz == SIZ_B) && !xa[0];
-		longword   <= x_long && !w;
-		data_write <= x_long ? (w ? wd[15:0] : wd[31:16]) : (xa[1] ? wd[15:0] : wd[31:16]);
-		word1      <= w;
+		li = (ssiz[s] == SIZ_LINE) ? sa[s][3:2] + w[2:1] : sa[s][3:2];
+		hi = (ssiz[s] == SIZ_LINE || ssiz[s] == SIZ_L) ? !w[0] : !sa[s][1];
+		addr_out   <= (ssiz[s] == SIZ_B) ? sa[s] : {sa[s][31:4], li, !hi, 1'b0};
+		busstate   <= !srd[s] ? BS_WRITE : scode[s] ? BS_FETCH : BS_READ;
+		nwr        <= srd[s];
+		nuds       <= (ssiz[s] == SIZ_B) && sa[s][0];
+		nlds       <= (ssiz[s] == SIZ_B) && !sa[s][0];
+		longword   <= (ssiz[s] == SIZ_LINE || ssiz[s] == SIZ_L) && !w[0];
+		data_write <= hi ? swd[s][127 - 32 * li -: 16] : swd[s][111 - 32 * li -: 16];
+		word1      <= w[0];
 	end
 endtask
+
+// where the word just read goes
+wire  [1:0] k_li = addr_out[3:2];
+wire        k_hi = !addr_out[1];
 
 always @(posedge clk or negedge nreset) begin
 	if (!nreset) begin
@@ -292,39 +430,116 @@ always @(posedge clk or negedge nreset) begin
 		addr_out   <= 32'd0;
 		data_write <= 16'd0;
 		word1      <= 1'b0;
-		k_tgl      <= 1'b0;
+		k_tgl      <= 2'b00;
+		rp         <= 1'b0;
+		kw         <= 3'd0;
 	end
 	else case (kst)
 		K_IDLE:
-			if (req) begin
-				present(1'b0);
+			if (req[rp]) begin
+				present(rp, 3'd0);
+				kw  <= 3'd0;
 				kst <= K_ACC;
 			end
 		K_ACC:
 			if (clkena_in) begin
-				if (x_long && !word1) begin
-					// the first word: high half, then the low one
-					k_rd[31:16] <= data_in;
-					present(1'b1);
-				end
+				if (ssiz[rp] == SIZ_W || ssiz[rp] == SIZ_B)
+					k_rd[127 - 32 * k_li -: 32] <= {data_in, data_in};
+				else if (k_hi) k_rd[127 - 32 * k_li -: 16] <= data_in;
+				else           k_rd[111 - 32 * k_li -: 16] <= data_in;
+				if (kw != nwords(ssiz[rp]) && !kw[0])
+					// a long word's second word follows at once
+					present(rp, kw + 3'd1);
 				else begin
-					k_rd[15:0] <= data_in;
-					if (!x_long) k_rd[31:16] <= data_in;
+					// cpu_wrapper wants a sampled idle clock between its
+					// requests: between a line's long words, and before the
+					// next transfer
 					busstate <= BS_IDLE;
 					nwr      <= 1'b1;
 					nuds     <= 1'b1;
 					nlds     <= 1'b1;
 					longword <= 1'b0;
-					kst      <= K_DONE;
+					if (kw == nwords(ssiz[rp])) begin
+						// done: answer (the read data is registered on this
+						// edge too, and the answer takes two clk_cpu clocks
+						// to arrive)
+						k_tgl[rp] <= ~k_tgl[rp];
+						rp  <= ~rp;
+						kst <= K_IDLE;
+					end
+					else kst <= K_GAP;
 				end
+				kw <= kw + 3'd1;
 			end
-		K_DONE: begin
-			// the read data is in k_rd: answer
-			k_tgl <= ~k_tgl;
-			kst   <= K_IDLE;
+		K_GAP: begin
+			present(rp, kw);           // the line's next long word
+			kst <= K_ACC;
 		end
 		default: kst <= K_IDLE;
 	endcase
 end
+
+//--------------------------------------------------------------------------
+// debug capture
+//--------------------------------------------------------------------------
+generate if (DEBUG_CAPTURE) begin : g_dbg
+	// clk_cpu: instructions retired, and the transfer ring (one entry at
+	// each TA, every beat of a line: tt=3 acknowledges included)
+	reg  [15:0] retired = 0;
+	reg  [15:0] transfers = 0;
+	reg   [5:0] wp = 0;
+	reg  [79:0] ring [0:63];
+	reg  [79:0] ring_q;
+	reg   [5:0] rd_addr = 0;
+	always @(posedge clk_cpu) begin
+		if (dbg_retire) retired <= retired + 16'd1;
+		if (!ta_n || !f_ta_n) begin
+			ring[wp] <= {7'd0, xfast, xiack, ~avec_n, ~tbi_n, ~tci_n, xrd, xcode, xsiz,
+			             {xa[31:4], xsiz == SIZ_LINE ? lw : xa[3:2], xa[1:0]},
+			             xrd ? (f_doe ? f_d : d_i) : d_o};
+			wp <= wp + 6'd1;
+			transfers <= transfers + 16'd1;
+		end
+		ring_q <= ring[rd_addr];
+	end
+	wire [15:0] src;
+	always @(posedge clk_cpu) rd_addr <= src[5:0];
+	// the live view: the processor, the clk_cpu half, the clk half
+	wire [255:0] probe = {
+		ring_q,                                          // 80  ring[src[5:0]]
+		dbg_pc,                                          // 32
+		retired, transfers,                              // 32
+		xa,                                              // 32  the transfer on the bus
+		addr_out,                                        // 32  the 16-bit access presented
+		wp,                                              // 6
+		dbg_halted, nrst_c, ts_n, ta_n & f_ta_n,         // 4   [42:39]
+		cst, kst,                                        // 6   [38:33]
+		p_tgl, k_tgl_c, p_tgl_k, k_tgl,                  // 8   [32:25]
+		ws, rp, kw,                                      // 5   [24:20]
+		xsiz, xrd, xiack, clkena_in,                     // 5   [19:15]
+		busstate, ipl_in,                                // 5   [14:10]
+		7'd0, nresetout, 1'b0                            // 9   (pad to 256)
+	};
+`ifndef VERILATOR
+	altsource_probe #(
+		.sld_auto_instance_index("YES"),
+		.sld_instance_index(0),
+		.instance_id("A060"),
+		.probe_width(256),
+		.source_width(16),
+		.source_initial_value("0"),
+		.enable_metastability("NO"),
+		.lpm_type("altsource_probe"),
+		.lpm_hint("UNUSED")
+	) issp (
+		.probe(probe),
+		.source(src),
+		.source_ena(1'b1),
+		.source_clk(clk_cpu)
+	);
+`else
+	assign src = 16'd0;
+`endif
+end endgenerate
 
 endmodule
