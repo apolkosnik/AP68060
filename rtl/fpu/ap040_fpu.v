@@ -229,13 +229,22 @@ function is_snan_x;
 endfunction
 
 // count leading zeros of a 64-bit value (fixed encoder, no shifters)
+// leading zeros of a 64-bit value (64 when zero): a tree, pairs merged
+// level by level (the upper half's count, or the lower's with the upper
+// half's size added when the upper half is empty)
 function [6:0] clz64;
 	input [63:0] v;
-	integer i;
+	reg        val [0:63];
+	reg  [5:0] cnt [0:63];
+	integer    k, i;
 	begin
-		clz64 = 7'd64;
-		for (i = 0; i < 64; i = i + 1)
-			if (v[i]) clz64 = 7'd63 - i[6:0];
+		for (i = 0; i < 64; i = i + 1) begin val[i] = v[i]; cnt[i] = 6'd0; end
+		for (k = 1; k <= 6; k = k + 1)
+			for (i = 0; i < (64 >> k); i = i + 1) begin
+				cnt[i] = val[2*i+1] ? cnt[2*i+1] : (cnt[2*i] | (6'd1 << (k - 1)));
+				val[i] = val[2*i+1] | val[2*i];
+			end
+		clz64 = val[0] ? {1'b0, cnt[0]} : 7'd64;
 	end
 endfunction
 
@@ -372,14 +381,22 @@ reg signed [17:0] e_w;        // working exponent (wrap safe)
 // from flip-flops rather than from a decode of fst.
 reg  [1:0] nsel;
 
-// v >> n with every bit shifted out ORed into bit 0 (n up to 67: all out)
+// v >> n with every bit shifted out ORed into bit 0 (n >= 67: all out):
+// seven stages, each ORing what it shifts out into the sticky bit
 function [66:0] shr_sticky;
 	input [66:0] v;
 	input [6:0]  n;
-	reg   [66:0] m;
+	reg   [66:0] x;
+	reg          s;
+	integer      k;
 	begin
-		m = (n >= 7'd67) ? {67{1'b1}} : ((67'd1 << n) - 67'd1);
-		shr_sticky = ((n >= 7'd67) ? 67'd0 : (v >> n)) | {66'd0, |(v & m)};
+		x = v; s = 1'b0;
+		for (k = 0; k < 7; k = k + 1)
+			if (n[k]) begin
+				s = s | |(x & ((67'd1 << (1 << k)) - 67'd1));
+				x = x >> (1 << k);
+			end
+		shr_sticky = x | {66'd0, s};
 	end
 endfunction
 // synthesis translate_off
@@ -589,6 +606,12 @@ wire [66:0] norm_shifted =
 // (P2 holds an operation only while the state machine is idle)
 wire        shr_fsm = (fst == F_SHR);
 wire [66:0] shr_out = shr_sticky(shr_fsm ? sh_v : {p2_sm, 3'd0}, shr_fsm ? sh_cnt : p2_sh);
+// one incrementer for the roundings of the shifted value (sh_v[66:3]):
+// FINT's and the integer store's at bit 0, a denormal single's or double's
+// store (F_PACKS) at its last kept bit -- in states of their own
+wire [64:0] shk    = {1'b0, sh_v[66:3]};
+wire [64:0] shk_i  = shk + ((fst != F_PACKS) ? 65'd1 :
+                            (r_fmt == 3'd1) ? 65'h100_0000_0000 : 65'h800);
 
 // one 64x64 multiplier for both: the state machine multiplies only in
 // F_MULT, which it reaches with the pipeline empty
@@ -2478,27 +2501,7 @@ always @(posedge clk) begin
 							// a register faults as an unsupported data
 							// type on its next use, which is exactly how a
 							// 68040 hands it to the FPSP.
-							if ((rnd_mode == 2'b11 && !a_s) ||
-							    (rnd_mode == 2'b10 && a_s)) begin
-								a_t <= T_NUM;
-								if (pr != 2'd0 && !op_sgl(r_op)) begin
-									a_e <= emin[16:0];
-									a_m <= (pr == 2'd1)
-									       ? 64'h0000_0100_0000_0000
-									       : 64'h0000_0000_0000_0800;
-								end
-								else begin
-									// smallest representable magnitude:
-									// exponent 0, one ulp of this
-									// operation's significand granularity
-									// (FSGL keeps single's 24-bit step)
-									a_e <= 17'd0;
-									a_m <= op_sgl(r_op)
-									       ? 64'h0000_0100_0000_0000
-									       : 64'h0000_0000_0000_0001;
-								end
-							end
-							else a_t <= T_ZERO;
+							// (no result: the destination is kept, x_kill)
 							begin fst <= F_WB; acc_r <= 1'b0; end
 						end
 						else begin
@@ -2619,7 +2622,7 @@ always @(posedge clk) begin
 				reg        up;
 				up = (r_op == 7'h03) ? 1'b0 :
 				     round_up(sh_v[3], sh_v[2], (sh_v[1:0] != 0), a_s);
-				iv = {1'b0, sh_v[66:3]} + {64'd0, up};
+				iv = up ? shk_i : shk;
 				if (sh_v[2:0] != 0) begin
 					fpsr[9] <= 1;                        // INEX2
 					fpsr[3] <= 1;                        // accrued INEX
@@ -2654,9 +2657,9 @@ always @(posedge clk) begin
 
 			F_PACKI: begin : f_packi
 				// round and range check the integer store
-				reg  [64:0] iv;
-				reg signed [64:0] sv;
-				reg         ovf;
+				reg  [64:0] mg;
+				reg  [31:0] lo;
+				reg         ovf, hi32, hi16, hi8;
 				if (sh_cnt == 7'd127) begin
 					// infinity / far out of range: OPERR, saturating to the
 					// SIGN-DEPENDENT extreme (roundAndPackInt32/16/8)
@@ -2667,17 +2670,16 @@ always @(posedge clk) begin
 					                            (pk_neg ? {8'h80, 24'd0} : {8'h7F, 24'd0}), 64'd0};
 				end
 				else begin
-					iv = {1'b0, sh_v[66:3]} +
-					     {64'd0, round_up(sh_v[3], sh_v[2],
-					                      (sh_v[1:0] != 0), pk_neg)};
-					if (pk_neg) iv = 65'd0 - iv;
-					sv = $signed(iv);
-					case (pk_isz)
-						2'd2: ovf = (sv > 65'sd2147483647) ||
-						            (sv < -65'sd2147483648);
-						2'd1: ovf = (sv > 65'sd32767) || (sv < -65'sd32768);
-						default: ovf = (sv > 65'sd127) || (sv < -65'sd128);
-					endcase
+					// the rounded magnitude; its range checked as it is (an
+					// n-bit signed result holds below 2^(n-1), or exactly
+					// 2^(n-1) when negative), and only the low long word
+					// negated for the store
+					mg = round_up(sh_v[3], sh_v[2], (sh_v[1:0] != 0), pk_neg) ? shk_i : shk;
+					lo = pk_neg ? (32'd0 - mg[31:0]) : mg[31:0];
+					hi32 = (mg[64:32] != 0) || (mg[31] && !(pk_neg && mg[30:0] == 0));
+					hi16 = (mg[64:16] != 0) || (mg[15] && !(pk_neg && mg[14:0] == 0));
+					hi8  = (mg[64:8]  != 0) || (mg[7]  && !(pk_neg && mg[6:0]  == 0));
+					ovf = (pk_isz == 2'd2) ? hi32 : (pk_isz == 2'd1) ? hi16 : hi8;
 					if (ovf) begin
 						fpsr[13] <= 1;                   // OPERR
 						fpsr[7]  <= 1;
@@ -2686,9 +2688,9 @@ always @(posedge clk) begin
 						                            (pk_neg ? {8'h80, 24'd0} : {8'h7F, 24'd0}), 64'd0};
 					end
 					else begin
-						dout <= {(pk_isz == 2'd2) ? iv[31:0] :
-						         (pk_isz == 2'd1) ? {iv[15:0], 16'd0} :
-						                            {iv[7:0], 24'd0}, 64'd0};
+						dout <= {(pk_isz == 2'd2) ? lo :
+						         (pk_isz == 2'd1) ? {lo[15:0], 16'd0} :
+						                            {lo[7:0], 24'd0}, 64'd0};
 						if (sh_v[2:0] != 0) begin
 							fpsr[9] <= 1;                // INEX2
 							fpsr[3] <= 1;                // accrued INEX
@@ -2700,65 +2702,21 @@ always @(posedge clk) begin
 			end
 
 			F_UNFL: begin : f_unfl
-				// Round the shifted significand at the boundary of the
-				// rounding precision.  e_w holds that precision's minimum
-				// exponent, which the shift in F_SHR has already scaled the
-				// significand to.
-				reg [64:0] mr, mk, mi;
-				reg        up, inx2;
-				if (r_pr == 2'd0) begin
-					up = round_up(sh_v[3], sh_v[2],
-					              (sh_v[1:0] != 0), a_s);
-					inx2 = (sh_v[2:0] != 0);
-					mk = {1'b0, sh_v[66:3]};
-					mi = mk + 65'd1;
-				end
-				else if (r_pr == 2'd1) begin
-					up = round_up(sh_v[43], sh_v[42],
-					              (sh_v[41:0] != 0), a_s);
-					inx2 = (sh_v[42:0] != 0);
-					mk = {1'b0, sh_v[66:3] & 64'hFFFF_FF00_0000_0000};
-					mi = mk + 65'h100_0000_0000;
-				end
-				else begin
-					up = round_up(sh_v[14], sh_v[13],
-					              (sh_v[12:0] != 0), a_s);
-					inx2 = (sh_v[13:0] != 0);
-					mk = {1'b0, sh_v[66:3] & 64'hFFFF_FFFF_FFFF_F800};
-					mi = mk + 65'h800;
-				end
-				// the increment is formed beside the rounding decision,
-				// which only selects it (a timing path)
-				mr = up ? mi : mk;
+				// A tiny result takes UNFL on the 68060 whatever the FPCR
+				// says (nonmaskable, 6.5.2, 6.6.5: the M68060SP forms the
+				// denormalized result), and the destination register is kept
+				// (x_kill): only the status is formed here.  INEX2 when the
+				// significand, shifted down to the rounding precision's
+				// minimum exponent (F_SHR), loses bits at that precision.
+				reg inx2;
+				inx2 = (r_pr == 2'd0) ? (sh_v[2:0] != 0) :
+				       (r_pr == 2'd1) ? (sh_v[42:0] != 0) : (sh_v[13:0] != 0);
 				if (inx2) begin
 					fpsr[9] <= 1;                   // INEX2
 					fpsr[3] <= 1;
 					fpsr[5] <= 1;                   // accrued UNFL (UNFL&&INEX2)
 				end
-				// At extended precision the result is subnormal for the
-				// destination format itself, so it takes the denormalized
-				// encoding: exponent field zero with the integer bit clear.
-				// At single or double precision the result is subnormal only
-				// with respect to that precision and keeps that precision's
-				// minimum exponent, matching softfloat's packFloatx80 of
-				// (expOffset + 1).  Rounding that carries into the integer
-				// bit has reached the next exponent up either way.
-				// (the class and exponent decided beside the rounding: an
-				// incremented significand that does not carry out is never
-				// zero, so the result is zero only unrounded with mk zero)
-				if (up && mi[64]) begin
-					a_m <= 64'h8000_0000_0000_0000;
-					a_e <= e_w[16:0] + 17'd1;
-					begin fst <= F_WB; acc_r <= 1'b0; end
-				end
-				else begin
-					// (a zero takes a_m = 0 as well: the zero test only
-					// decides the class and exponent)
-					a_m <= mr[63:0];
-					if (!up && mk[63:0] == 64'd0) a_t <= T_ZERO;
-					else a_e <= ((up ? mi[63] : mk[63]) || e_w != 18'sd1) ? e_w[16:0] : 17'd0;
-					begin fst <= F_WB; acc_r <= 1'b0; end
-				end
+				begin fst <= F_WB; acc_r <= 1'b0; end
 			end
 
 			F_PACKS: begin : f_packs
@@ -2769,17 +2727,15 @@ always @(posedge clk) begin
 				reg inx, tiny;
 				if (r_fmt == 3'd1) begin
 					inx = sh_v[42:0] != 0;
-					ms = {1'b0, sh_v[66:43]} +
-					     {24'd0, round_up(sh_v[43], sh_v[42],
-					                      sh_v[41:0] != 0, a_s)};
+					ms = round_up(sh_v[43], sh_v[42], sh_v[41:0] != 0, a_s) ?
+					     shk_i[64:40] : {1'b0, shk[63:40]};
 					tiny = !ms[23];
 					dout <= {a_s, 7'd0, ms[23], ms[22:0], 64'd0};
 				end
 				else begin
 					inx = sh_v[13:0] != 0;
-					md = {1'b0, sh_v[66:14]} +
-					     {53'd0, round_up(sh_v[14], sh_v[13],
-					                      sh_v[12:0] != 0, a_s)};
+					md = round_up(sh_v[14], sh_v[13], sh_v[12:0] != 0, a_s) ?
+					     shk_i[64:11] : {1'b0, shk[63:11]};
 					tiny = !md[52];
 					dout <= {a_s, 10'd0, md[52], md[51:0], 32'd0};
 				end

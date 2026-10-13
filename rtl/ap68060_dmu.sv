@@ -54,6 +54,11 @@
 
 module ap68060_dmu
 	import ap68060_pkg::*;
+#(
+	// DC1's own ATC read port and tag compare beside xlate (65 MHz timing;
+	// 0: DC1's hit and way are xlate's, the port is not built)
+	parameter bit DC1_ATC = 1
+)
 (
 	input  logic        clk,
 	input  logic        nreset,
@@ -336,7 +341,6 @@ endfunction
 // reset) sweeps the 64 sets (E_M_CLR)
 (* ramstyle = "MLAB, no_rw_check" *) logic [7:0] lsd [128];   // DC1's set
 (* ramstyle = "MLAB, no_rw_check" *) logic [7:0] lse [128];   // lv_ra
-(* ramstyle = "MLAB, no_rw_check" *) logic [7:0] lsm [128];   // ld_ra
 (* ramstyle = "MLAB, no_rw_check" *) logic [7:0] lsw [128];   // the write's set
 logic  [6:0] lv_ra;                // the engine copy's read: see below
 wire   [3:0] lvd_q;                // DC1's set (m1)
@@ -356,7 +360,7 @@ initial for (int i = 0; i < 128; i++) lv[i] = 4'd0;
 // read is of a valid line, and whatever makes a line valid writes its
 // dirty bit
 logic  [6:0] ld_ra;
-wire   [7:0] lsm_q = lsm[ld_ra];
+wire   [7:0] lsm_q = lse[lv_ra];
 wire   [3:0] ld_q  = lsm_q[7:4];
 // the maintenance scan's set, its valid and dirty bits: a copy the write
 // port keeps current (the scan's decision reads 4 bits, not 256)
@@ -406,8 +410,9 @@ logic  [1:0] tway_b;
 logic [20:0] twd_b;
 
 // data: write port for stores and fills, read port for DC1 / engine
-logic [127:0] dq1;                 // DC2's copy of its hit way's line (fast path)
-logic [127:0] dqc, dqh;            // ... DC1's line, every clock; DC2's own, held
+logic  [63:0] dqc;                 // DC1's two long words, every clock
+logic  [63:0] dq2, dqh2;           // DC2's two long words (at its address and
+                                   // the next), and its own, held
 logic         dq_new;              // DC2 took a new uop at the last edge: dqc
 xres_t        x_dc1;               // DC1's translation and lookup
 logic [127:0] dq_rn [4];           // unregistered output (engine)
@@ -433,6 +438,22 @@ function automatic logic [127:0] mrg(input logic [127:0] l, input logic [15:0] b
                                      input logic [31:0] w);
 	for (int i = 0; i < 16; i++) if (be[i]) l[8*i +: 8] = w[8*(i % 4) +: 8];
 	mrg = l;
+endfunction
+// the two long words of a line from long word k (the second wraps): every
+// byte DC2 reads -- the operand (at most four bytes from its address) and
+// AG's aligned long word -- is in them
+function automatic logic [63:0] pair(input logic [127:0] l, input logic [1:0] k);
+	pair = {l[127 - 32 * k -: 32], l[127 - 32 * 2'(k + 2'd1) -: 32]};
+endfunction
+// a write merged into such a pair (be per byte of the line as mrg's)
+function automatic logic [63:0] mrg2(input logic [63:0] p, input logic [1:0] k,
+                                     input logic [15:0] be, input logic [31:0] w);
+	for (int b = 0; b < 8; b++) begin
+		logic [3:0] lb;
+		lb = 4'(4 * k + b);                       // the byte's offset in the line
+		if (be[4'd15 - lb]) p[63 - 8*b -: 8] = w[31 - 8*(b % 4) -: 8];
+	end
+	mrg2 = p;
 endfunction
 
 // the WB fast store of this cycle (its RAM write is dw next cycle): merged
@@ -477,9 +498,12 @@ logic [15:0] mc_be [3];
 logic [31:0] mc_w  [3];
 logic  [2:0] mc_v;
 always_ff @(posedge clk) begin
-	logic [127:0] l, h;
+	logic  [63:0] l;
+	logic  [63:0] h2;
+	// (each way's two long words picked by the registered address, then
+	// the hit way: the late match selects 64 bits, not the line)
 	l = '0;
-	for (int j = 0; j < 4; j++) if (d1_mj[j]) l = l | dq_rn[j];
+	for (int j = 0; j < 4; j++) if (d1_mj[j]) l = l | pair(dq_rn[j], m1.a[3:2]);
 	dqc <= l;
 	mc_v[0] <= dwq && dwq_src == 2'd0 && dwq_set == m1.a[10:4] && d1_mj[dwq_way];
 	mc_v[1] <= dw && dw_src == 2'd0 && dw_set == m1.a[10:4] && d1_mj[dw_way];
@@ -487,21 +511,22 @@ always_ff @(posedge clk) begin
 	mc_be[0] <= dwq_be; mc_w[0] <= dwq_word;
 	mc_be[1] <= dw_be;  mc_w[1] <= dw_word;
 	mc_be[2] <= wfm_be; mc_w[2] <= wfm_word;
-	h = dq1;
+	h2 = dq2;
 	if (dw && dw_src == 2'd0 && dw_set == m2.r.a[10:4] && dw_way == m2.x.way)
-		h = mrg(h, dw_be, dw_word);
+		h2 = mrg2(h2, m2.r.a[3:2], dw_be, dw_word);
 	if (wfm && wfm_set == m2.r.a[10:4] && wfm_way == m2.x.way)
-		h = mrg(h, wfm_be, wfm_word);
-	dqh <= h;
+		h2 = mrg2(h2, m2.r.a[3:2], wfm_be, wfm_word);
+	dqh2 <= h2;
 	dq_new <= adv_dc1;
 end
-// DC2: the captured line with its merges (in the order they were made)
-logic [127:0] dqc_m;
+// DC2: its two long words of the captured line, with the merges (in the
+// order they were made)
+logic [63:0] dqc_m2;
 always_comb begin
-	dqc_m = dqc;
-	for (int k = 0; k < 3; k++) if (mc_v[k]) dqc_m = mrg(dqc_m, mc_be[k], mc_w[k]);
+	dqc_m2 = dqc;
+	for (int k = 0; k < 3; k++) if (mc_v[k]) dqc_m2 = mrg2(dqc_m2, m2.r.a[3:2], mc_be[k], mc_w[k]);
 end
-assign dq1 = dq_new ? dqc_m : dqh;
+assign dq2 = dq_new ? dqc_m2 : dqh2;
 
 //--------------------------------------------------------------------------
 // D-ATC
@@ -517,12 +542,15 @@ logic        atc_wfc2;
 atce_t       atc_went;
 logic        atc_fall, atc_fpage, atc_fng;
 
-ap68060_atc datc (
+logic        tw_upd;              // the search updates an entry (first write: M)
+logic  [3:0] tw_hw;               // ... in this way (the ATC's hit vector then)
+ap68060_atc #(.SAME_SEARCH(0)) datc (
 	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc[11]),
 	.la(steal ? st_la : m1.a), .fc2(steal ? st_fc2 : m1.smode),
 	.hit(atc_hit), .ent(atc_e), .hv(atc_hv), .wpa(atc_wpa),
 	.la_d(m1.a), .fc2_d(m1.smode), .set_d(m1_aset), .hv_d(atc_hvd), .wpa_d(atc_wpad),
 	.wr(atc_wr), .wla(atc_wla), .wfc2(atc_wfc2), .went(atc_went),
+	.wsame(tw_upd), .wsame_hv(tw_hw),
 	.flush_all(atc_fall), .flush_page(atc_fpage), .flush_nonglobal(atc_fng)
 );
 
@@ -603,6 +631,9 @@ wire  [1:0] m2_rw  = (m2.r.mem == M_LD) ? 2'b10 : (m2.r.mem == M_ST) ? 2'b01 : 2
 // translation that is valid and does not fault) still comes from xlate.
 logic       d1_hit;
 logic [1:0] d1_way;
+xres_t      x_dc1r;            // xlate's own result for DC1
+always_comb x_dc1r = xlate(m1.a, m1.smode, m1_wr, fc_tt(m1.fc) == TT_ALT, atc_hit, atc_e,
+                          tq_a[0], tq_a[1], tq_a[2], tq_a[3], lvd_q);
 logic [3:0] d1_mj;            // the matching way, one-hot (for the line select)
 // whether DC1's address is used untranslated (alternate space, a TTR,
 // translation off, CPU space): registered with the address, and again
@@ -627,11 +658,25 @@ always_comb begin
 				ma = 1'b1;
 		mj[j] = lvd_q[j] && (transp ? (tq[j] == m1.a[31:11]) : ma);
 	end
-	d1_hit = |mj;
-	d1_way = mj[3] ? 2'd3 : mj[2] ? 2'd2 : mj[1] ? 2'd1 : 2'd0;
-	d1_mj  = mj;
+	if (DC1_ATC) begin
+		d1_hit = |mj;
+		d1_way = mj[3] ? 2'd3 : mj[2] ? 2'd2 : mj[1] ? 2'd1 : 2'd0;
+		d1_mj  = mj;
+	end
+	else begin
+		d1_hit = x_dc1r.hit;
+		d1_way = x_dc1r.way;
+		d1_mj  = x_dc1r.hit ? (4'd1 << x_dc1r.way) : 4'd0;
+	end
 end
 // synthesis translate_off
+// (the engine's state for the bench's profile: a parameterized module's
+// enum items are not reachable through the hierarchy in Verilator)
+wire sim_es_s  = (e_st == E_S_START);
+wire sim_es_w  = (e_st == E_W_START);
+wire sim_es_m  = (e_st == E_M_START);
+wire sim_es_tw = (e_st == E_TW_START);
+wire sim_es_i  = (e_st == E_IDLE);
 logic sim_xchk = 1'b0;        // (the bench fails the run on it)
 always_ff @(posedge clk) begin
 	xres_t xo;
@@ -649,11 +694,12 @@ end
 // synthesis translate_on
 
 always_comb begin
-	x_dc1 = xlate(m1.a, m1.smode, m1_wr, fc_tt(m1.fc) == TT_ALT, atc_hit, atc_e,
-	              tq_a[0], tq_a[1], tq_a[2], tq_a[3], lvd_q);
+	x_dc1 = x_dc1r;
 	// (the same hit and way, from the parallel compare)
-	x_dc1.hit = d1_hit && x_dc1.ok && !x_dc1.flt;
-	x_dc1.way = d1_way;
+	if (DC1_ATC) begin
+		x_dc1.hit = d1_hit && x_dc1.ok && !x_dc1.flt;
+		x_dc1.way = d1_way;
+	end
 	if (m1.ack != 2'd0) begin
 		// CPU space (interrupt acknowledge) is never translated nor cached
 		x_dc1     = '0;
@@ -712,7 +758,9 @@ logic m1_stale;
 
 // (a store that left WB is still being written this cycle: dw)
 wire fast_now = m2.r.v && m2.fast && !hzf && !(dw && !dwp && dw_set == m2.r.a[10:4]);
-wire [31:0] fast_data = take(dq1, m2.r.a[3:0], nbytes(m2.r.msz));
+// (the operand from DC2's two long words: its bytes start at a[1:0] of the
+// first; a split load's bytes past the line are masked by its user)
+wire [31:0] fast_data = take({dq2, 64'd0}, {2'd0, m2.r.a[1:0]}, nbytes(m2.r.msz));
 
 // a store with its translation known needs nothing from DC2 unless it must
 // allocate (copyback miss), is split, or is a MOVE16 destination
@@ -791,9 +839,9 @@ logic [31:0] bo_pa;               // address of the piece on the bus
 logic  [6:0] f_set;
 // the dirty RAM's one read: the snoop's compare, the scan's set, else the
 // fill/push set
-always_comb ld_ra = (sn_ph == SN_B) ? sn_pa[10:4] :
-                    (e_st == E_M_SCANW || e_st == E_M_SCAN2) ? sc_set :
-                    (e_st == E_S_ACT || e_st == E_W_PART) ? e_va[10:4] : f_set;
+// (the dirty bits share the valid copy's read: the states that read
+// one and not the other are given the other's set)
+always_comb ld_ra = lv_ra;
 logic  [1:0] f_way;
 logic [20:0] f_tag;
 logic        pv_v;                // push buffer holds a dirty line
@@ -822,7 +870,6 @@ logic [31:0] tw_d;                // descriptor
 logic        tw_wp;               // accumulated write protect
 logic        tw_fail, tw_berr;
 logic [31:0] tw_pd;               // final page descriptor
-logic        tw_upd;              // the search updates an entry (first write: M)
 logic        tw_use;              // the data access's search is done: its
 atce_t       tw_e;                // ... entry (or failure) for the access,
                                   // whether or not the ATC took it
@@ -950,12 +997,13 @@ typedef struct packed {
 	logic  [1:0] upa;
 	logic        ci;
 } sbent_t;
-sbent_t      sb [4];
+localparam int SBN = 2;           // store buffer entries (the 68060 has 4: 150 ALMs more)
+sbent_t      sb [SBN];
 logic  [2:0] sb_n;
 logic        sel_q;               // the BIU saw the store buffer's request last cycle
 logic        own_sb;              // the transaction in progress is the buffer's
 logic        sb_fly;              // the head is on the bus (granted, not done)
-wire         sb_room = (sb_n < 3'd4);
+wire         sb_room = (sb_n < 3'(SBN));
 wire         sb_push = (e_st == E_SB) && sb_room;
 // present the head while it is not on the bus already (the BIU may start
 // again in the clock its done comes); the engine's request waits while the
@@ -1003,7 +1051,7 @@ end
 always_ff @(posedge clk) begin
 	if (!nreset) begin
 		sb_n <= '0; sel_q <= 1'b0; own_sb <= 1'b0; sb_fly <= 1'b0; sbe_r <= 1'b0;
-		for (int i = 0; i < 4; i++) sb[i] <= '0;
+		for (int i = 0; i < SBN; i++) sb[i] <= '0;
 	end
 	else begin
 		logic [2:0] n;
@@ -1015,7 +1063,7 @@ always_ff @(posedge clk) begin
 		end
 		if (sb_pop) sb_fly <= 1'b0;
 		if (sb_pop) begin
-			for (int i = 0; i < 3; i++) sb[i] <= sb[i + 1];
+			for (int i = 0; i < SBN - 1; i++) sb[i] <= sb[i + 1];
 			n = n - 3'd1;
 			if (bi_err) sbe_r <= 1'b1;
 		end
@@ -1028,7 +1076,7 @@ always_ff @(posedge clk) begin
 			e.tm  = bo.tm;
 			e.upa = bo.upa;
 			e.ci  = bo.ci;
-			sb[n[1:0]] <= e;
+			sb[n[$clog2(SBN)-1:0]] <= e;
 			n = n + 3'd1;
 		end
 		sb_n <= n;
@@ -1079,6 +1127,16 @@ assign dm_hold1 = sn_frz || steal || steal_q || (m1.v && m1_stale) ||
                   (e_st != E_IDLE && e_st != E_W_START &&
                    e_st != E_W_PART && e_st != E_W_DONE && e_st != E_SB);
 
+// the engine's operand bytes, one extractor for its states: E_SP_3 the
+// rest of a split load from the stolen read, E_S_ACT from the line a fill
+// delivered (bo_line), E_S_RD2 from the read way
+wire  [2:0]  sp_n0    = 3'(5'd16 - {1'b0, m2.r.a[3:0]});
+wire         etk_sp   = (e_st == E_SP_3);
+wire [127:0] etk_line = (e_st == E_S_ACT) ? bo_line : dq_rn[e_x.way];
+wire  [3:0]  etk_o    = etk_sp ? 4'd0 : e_va[3:0];
+wire  [2:0]  etk_n    = etk_sp ? 3'(nbytes(m2.r.msz) - sp_n0) : e_n;
+wire [31:0]  etk      = take(etk_line, etk_o, etk_n);
+
 always_ff @(posedge clk) begin
 	// a store's answer is kept until WB takes it: WB can be held in the
 	// cycle it comes (sb_wait: an interrupt due while older stores are
@@ -1119,7 +1177,7 @@ always_ff @(posedge clk) begin
 		sc_set <= '0; sc_lv <= '0; sc_ld <= '0;
 		tw_lvl <= TW_ROOT; tw_va <= '0; tw_s <= 1'b0; tw_wr <= 1'b0; tw_pt <= 1'b0; tw_cause <= '0;
 		tw_i <= 1'b0; tw_da <= '0; tw_d <= '0; tw_wp <= 1'b0; tw_fail <= 1'b0;
-		tw_berr <= 1'b0; tw_pd <= '0; tw_upd <= 1'b0; tw_use <= 1'b0; tw_e <= '0;
+		tw_berr <= 1'b0; tw_pd <= '0; tw_upd <= 1'b0; tw_hw <= 4'd0; tw_use <= 1'b0; tw_e <= '0;
 		iw_cause <= '0;
 		tset_b <= '0; tway_b <= '0; twd_b <= '0;
 		dw_set <= '0; dw_way <= '0; dw_be <= '0; dw_src <= '0; dw_word <= '0;
@@ -1337,8 +1395,10 @@ always_ff @(posedge clk) begin
 			    !hz && !st_line(m3, e_x.pa[31:4]) && !st_line(m4, e_x.pa[31:4]) &&
 			    !sp_dw && !(dw && (dw_set == m2.r.a[10:4] || dw_set == st_set))) begin
 				// the first part from DC2's copy, the rest from the stolen read
-				e_acc <= (take(dq1, m2.r.a[3:0], n0) << (8 * (nbytes(m2.r.msz) - n0))) |
-				         take(dq_rn[e_x.way], 4'd0, nbytes(m2.r.msz) - n0);
+				// (DC2's bytes are fast_data's: its low bytes, past the
+				// line, give way to the stolen read's)
+				e_acc <= (fast_data & ~((32'd1 << (8 * (nbytes(m2.r.msz) - n0))) - 32'd1)) |
+				         etk;
 				m2.x1 <= e_x;
 				e_st  <= E_S_DONE;
 			end
@@ -1409,6 +1469,7 @@ always_ff @(posedge clk) begin
 				tw_va <= e_va; tw_s <= m2.r.smode; tw_wr <= (m2.r.mem != M_LD);
 				tw_pt <= 1'b0; tw_i <= 1'b0;
 				tw_upd <= atc_hit;          // a first write: the entry's M
+				tw_hw  <= atc_hv;           // (its way: the install rewrites it)
 				e_ret <= E_S_XL;            // look up again after the walk
 				e_st  <= E_TW_START;
 			end
@@ -1441,7 +1502,7 @@ always_ff @(posedge clk) begin
 			else if (e_fillhit) begin
 				// the fill installed the line (f_way) and it is in bo_line:
 				// the operand from it, the part now a hit in that way
-				e_acc     <= (e_acc << (8 * e_n)) | take(bo_line, e_va[3:0], e_n);
+				e_acc     <= (e_acc << (8 * e_n)) | etk;
 				e_fillhit <= 1'b0;
 				e_x.hit   <= 1'b1;
 				e_x.way   <= f_way;
@@ -1449,7 +1510,7 @@ always_ff @(posedge clk) begin
 			end
 			else if (e_fromline) begin
 				// an inhibited fill delivered the line: the operand from it
-				e_acc <= (e_acc << (8 * e_n)) | take(bo_line, e_va[3:0], e_n);
+				e_acc <= (e_acc << (8 * e_n)) | etk;
 				e_fromline <= 1'b0;
 				e_x.hit <= 1'b0;
 				e_x.cm  <= 2'b11;
@@ -1573,7 +1634,7 @@ always_ff @(posedge clk) begin
 		E_S_RDW: e_st <= E_S_RD2;
 		E_S_RD2: begin
 			if (m2.r.msz == SZ_Q) mv_line <= dq_rn[e_x.way];
-			else e_acc <= (e_acc << (8 * e_n)) | take(dq_rn[e_x.way], e_va[3:0], e_n);
+			else e_acc <= (e_acc << (8 * e_n)) | etk;
 			e_st <= E_S_NEXT;
 		end
 		E_S_BUSD: begin
@@ -1851,7 +1912,7 @@ always_ff @(posedge clk) begin
 			end
 			else begin
 				tw_va <= mt_addr; tw_s <= mt_fc[2]; tw_wr <= mt_wr;
-				tw_pt <= 1'b1; tw_i <= isp; tw_upd <= !isp && atc_hit;
+				tw_pt <= 1'b1; tw_i <= isp; tw_upd <= !isp && atc_hit; tw_hw <= atc_hv;
 				e_ret <= E_M_PLD;
 				e_st  <= E_TW_START;
 			end
@@ -2537,7 +2598,6 @@ always_ff @(posedge clk) begin
 				wn[3:0] = vp_lwe ? ((wo[3:0] & ~vp_wm) | (vp_wm & {4{vp_lv}})) : wo[3:0];
 				lsd[vp_set] <= wn;
 				lse[vp_set] <= wn;
-				lsm[vp_set] <= wn;
 				lsw[vp_set] <= wn;
 			end
 			for (int j = 0; j < 4; j++)
@@ -2582,7 +2642,7 @@ assign ldata   = e_dc2_done ? e_ldata : fast_data;
 // for AG's capture of a load into a base or index (a short path): the long
 // word of the line the address points at -- the operand itself for an
 // aligned long or an even word (in the low half), else not offered
-wire [31:0] al_word = dq1[127 - 32 * m2.r.a[3:2] -: 32];
+wire [31:0] al_word = dq2[63:32];
 assign ldata_al  = e_dc2_done ? e_ldata :
                    (m2.r.msz == SZ_W) ? {16'd0, m2.r.a[1] ? al_word[15:0] : al_word[31:16]} : al_word;
 assign ldata_alv = e_dc2_done ||
@@ -2613,10 +2673,11 @@ assign lve_q = lse_q[3:0];
 always_comb
 	lv_ra = (sn_ph == SN_B)                            ? sn_pa[10:4] :
 	        (e_st == E_SP_2)                           ? m2.r.a[10:4] + 7'd1 :
-	        (e_st == E_S_XL2 || e_st == E_S_ACT)       ? e_va[10:4] :
+	        (e_st == E_S_XL2 || e_st == E_S_ACT ||
+	         e_st == E_W_PART)                         ? e_va[10:4] :
 	        (e_st == E_M_SCANW || e_st == E_M_SCAN2)   ? sc_set : f_set;
 initial for (int i = 0; i < 128; i++) begin
-	lsd[i] = 8'd0; lse[i] = 8'd0; lsm[i] = 8'd0; lsw[i] = 8'd0;
+	lsd[i] = 8'd0; lse[i] = 8'd0; lsw[i] = 8'd0;
 end
 // synthesis translate_off
 // the copies against the flip-flop model (after reset's sweep)

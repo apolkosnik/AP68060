@@ -28,6 +28,7 @@ module ap68060_useq
 	input  dinst_t      rq0,
 	input  dinst_t      rq1,
 	output logic        rq_pop,
+	output logic        rq_pop_e,   // an early form: implies rq_pop (D1's room)
 
 	input  logic        smode,
 
@@ -276,7 +277,7 @@ always_comb begin
 				if (src.opw[5]) o.r = dreg(src.opw[11:9]);
 				else begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = q; end
 			end
-			S_NPC:   begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = src.npc; end
+			S_NPC:   begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = src.pc + {27'd0, src.ilen, 1'b0}; end
 			S_PC:    begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = src.pc; end
 			S_CONST: begin o.src = OS_IMM; o.imm_v = 1'b1; o.imm = {{16{uw.cval[15]}}, uw.cval}; end
 			S_ZERO:  o.src = OS_ZERO;
@@ -340,7 +341,7 @@ always_comb begin
 	// FMOVEM / FMOVE of control registers to memory are T0 trace points
 	nu.bcp    = src.bcp && (uw.br != BR_NONE);
 	nu.pc     = src.pc;
-	nu.npc    = src.npc;
+	nu.ilen   = src.ilen;
 	nu.ras    = src.ras;
 	nu.exr     = exc_mode;
 	nu.first  = src_first;
@@ -672,7 +673,7 @@ always_comb begin
 			logic fxb;
 			fxb = fb_in && mv_fix == 2'd0;
 			p = '0;
-			p.pc = nu.pc; p.npc = nu.npc; p.exr = nu.exr; p.first = 1'b0;
+			p.pc = nu.pc; p.ilen = nu.ilen; p.exr = nu.exr; p.first = 1'b0;
 			p.op = OP_MOV; p.sz = SZ_L; p.ccr_we = 5'd0;
 			p.a_src = OS_REG; p.a_reg = fxb ? (R_T0 + 5'd7) : (R_T0 + 5'd6);
 			p.b_src = OS_ZERO;
@@ -686,7 +687,7 @@ always_comb begin
 			// first: T11 = the address, then the transfers from T11
 			uop_t p;
 			p = '0;
-			p.pc = nu.pc; p.npc = nu.npc; p.exr = nu.exr; p.first = nu.first;
+			p.pc = nu.pc; p.ilen = nu.ilen; p.exr = nu.exr; p.first = nu.first;
 			p.ag = 1'b1;
 			p.base_v = nu.base_v; p.base = nu.base;
 			p.idx_v = nu.idx_v; p.idx = nu.idx; p.idx_l = nu.idx_l; p.scale = nu.scale;
@@ -761,7 +762,7 @@ always_comb begin
 	if (n_ptr) begin
 		uop_t p;
 		p = '0;
-		p.pc = nu.pc; p.npc = nu.npc; p.exr = nu.exr; p.first = nu.first; p.last = 1'b0;
+		p.pc = nu.pc; p.ilen = nu.ilen; p.exr = nu.exr; p.first = nu.first; p.last = 1'b0;
 		p.op = OP_MOV; p.sz = SZ_L; p.msz = SZ_L; p.ccr_we = 5'd0;
 		p.a_src = OS_MEM; p.b_src = OS_ZERO;
 		p.ag = 1'b1;
@@ -787,6 +788,20 @@ wire stay = n_ptr || n_mv_pre || (uw.loop && !nu.last);   // same word again
 wire done = emit && !stay && uw.last;                       // instruction ends
 
 assign rq_pop = done && !exc_mode;
+// The pop from the word's own bits and the record's EA modes, not the uop
+// built from them (D1's room, a timing path): a plain last word -- no
+// jump, no MOVEM loop -- of an instruction with no memory-indirect EA (no
+// pointer load) ends it whenever it steps.  It implies rq_pop; the rare
+// pop it misses only costs D1 a clock.
+assign rq_pop_e = step && !exc_mode && uw.last && (uw.jc == JC_NEVER) && !uw.loop &&
+                  (rq0.ea0.mi == 2'd0) && (rq0.ea1.mi == 2'd0);
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (rq_pop_e && !rq_pop) begin
+		$display("FAIL: useq: the early pop without the pop");
+		$finish;
+	end
+// synthesis translate_on
 
 logic [9:0] na;          // next microcode address
 logic       nv;

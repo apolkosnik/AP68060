@@ -57,6 +57,7 @@ module ap68060_decode
 	output dinst_t      rq0,
 	output dinst_t      rq1,
 	input  logic        rq_pop,
+	input  logic        rq_pop_e,       // implies rq_pop, early (room)
 
 	// Bcc history training (from EX)
 	input  logic        bht_we,
@@ -282,6 +283,7 @@ wire        fast  = pd0.legal && !pd0.slow && !full0 && !full1 && (pd0.tot <= 4'
 // record assembly
 //--------------------------------------------------------------------------
 dinst_t      nrec;
+wire  [31:0] nrec_npc = nrec.pc + {27'd0, nrec.ilen, 1'b0};   // the next instruction
 logic        go;            // a record is produced
 logic        go_part;       // a slow-path phase completes (no record yet)
 logic  [3:0] use_n;
@@ -378,24 +380,36 @@ ap68060_lutram #(.AW(8), .DW(2)) bht (
 // training counts from the table's current value (a copy read at the
 // training address), not from the value D1 read when it decoded the
 // branch: two passes of a short loop are often decoded before the first
-// one is trained
-// The update is written a cycle later from registers of its own (the read
-// address is not also the write address); a training of the same counter
-// in that cycle takes the value being written.
+// one is trained.  The copy is a block RAM: the training request is
+// registered with its read address, and the clock after it the counter is
+// read, updated and written to both copies.  A write in the clock the RAM
+// registered the read (the request just before, to the same counter) is
+// not in what it returns: that write's value is taken instead.
 logic  [1:0] bht_t, bht_c, bht_nd;
 logic        bw_we;
 logic  [7:0] bw_wa;
 logic  [1:0] bw_wd;
-ap68060_lutram #(.AW(8), .DW(2)) bht_tr (
+logic        tr_v, tr_dis;           // the training request, a clock on
+logic  [7:0] tr_a;
+logic        wq_v;                   // the write of the clock before
+logic  [7:0] wq_a;
+logic  [1:0] wq_d;
+ap68060_sdpr #(.AW(8), .DW(2)) bht_tr (
 	.clk(clk), .we(bw_we), .waddr(bw_wa), .wdata(bw_wd), .raddr(bht_wa), .q(bht_t)
 );
-assign bht_c  = (bw_we && bw_wa == bht_wa) ? bw_wd : bht_t;
-assign bht_nd = bht_dis ? ((bht_c == 2'd3) ? 2'd3 : bht_c + 2'd1)
-                        : ((bht_c == 2'd0) ? 2'd0 : bht_c - 2'd1);
+assign bht_c  = (wq_v && wq_a == tr_a) ? wq_d : bht_t;
+assign bht_nd = tr_dis ? ((bht_c == 2'd3) ? 2'd3 : bht_c + 2'd1)
+                       : ((bht_c == 2'd0) ? 2'd0 : bht_c - 2'd1);
+assign bw_we  = tr_v;
+assign bw_wa  = tr_a;
+assign bw_wd  = bht_nd;
 always_ff @(posedge clk) begin
-	bw_we <= nreset && bht_we;
-	bw_wa <= bht_wa;
-	bw_wd <= bht_nd;
+	tr_v   <= nreset && bht_we;
+	tr_a   <= bht_wa;
+	tr_dis <= bht_dis;
+	wq_v   <= bw_we;
+	wq_a   <= bw_wa;
+	wq_d   <= bw_wd;
 end
 // (a LUT RAM: one push, one read at the top and one at the pointer the
 // fetch resynchronizes to; never cleared -- an entry is read only below
@@ -487,7 +501,7 @@ always_comb begin
 				go  = 1'b1;
 				nph = PH_IDLE;
 			end
-			nrec.npc = part.pc + {27'd0, part_len + {1'b0, l}, 1'b0};
+			nrec.ilen = 4'(part_len + {1'b0, l});
 			if (flt) begin
 				nrec.exc    = f_code;
 				nrec.target = f_addr;
@@ -499,7 +513,7 @@ always_comb begin
 		// the stream starts at an odd address: address error
 		go       = 1'b1;
 		nrec.pc  = qpc;
-		nrec.npc = qpc;
+		nrec.ilen = 4'd0;
 		nrec.exc = 8'd3;
 		nrec.rt  = UA_DEC_EXC;
 	end
@@ -565,7 +579,7 @@ always_comb begin
 			end
 		end
 
-		nrec.npc = qpc + {27'd0, use_n, 1'b0};
+		nrec.ilen = use_n;
 		nrec.rt  = (jcond(a0.jc0, pd0.i0, pd0.i1, win[1], pd0.sz, opw[2:0])) ? a0.jt0 :
 		           (a0.jc0 != JC_NEVER) ? a0.rt + 10'd1 : a0.rt;
 		// fixed operand forms: (Ay)+,(Ax)+ and -(Ay),-(Ax); MOVE16
@@ -751,7 +765,7 @@ end
 
 // (two records; a full FIFO has room in the clock the sequencer pops one,
 // or D1 would wait a clock behind every pop: 28% on Dhrystone)
-wire room  = (rq_n != 2'd2) || rq_pop;
+wire room  = (rq_n != 2'd2) || rq_pop_e;
 wire stall = flush || hold_redir || d_redir_v || !room;
 wire fire  = (go || go_part) && !stall;
 wire push  = fire && go;
@@ -883,7 +897,7 @@ always_ff @(posedge clk) begin
 		// cost the entry it overwrote -- the oldest, or one a recovery
 		// would restore -- which only costs a prediction: EX checks every
 		// return
-		if (rcall) ras[ras_tp + 3'd1] <= nrec.npc;
+		if (rcall) ras[ras_tp + 3'd1] <= nrec_npc;
 		if (push && nrec_q.exc == 8'd0) begin
 			if (rcall) begin
 				ras_tp <= ras_tp + 3'd1;
@@ -930,7 +944,7 @@ always_ff @(posedge clk) begin
 				// the fetch already took this branch: fine if D1 agrees
 				if (!(nrec.pred && teq)) begin
 					d_redir_v  <= 1'b1;
-					d_redir_pc <= nrec.pred ? ntarget : nrec.npc;
+					d_redir_pc <= nrec.pred ? ntarget : nrec_npc;
 					// (a loop exit keeps the entry: the next pass takes it)
 					btb_we     <= !lp_ovr;
 					btb_wv     <= nrec.pred && btb_ok;

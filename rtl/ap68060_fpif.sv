@@ -229,7 +229,9 @@ logic  [2:0] f_class, f_fmt, f_srcr, f_dstr, f_fmsel;
 logic  [7:0] f_okvn;          // the FPU's register-ready flags, next cycle
 logic        f_aok, f_bok;    // ... of the next source and destination
 logic  [6:0] f_opm;
-logic [95:0] f_din, f_fmwd;
+// (f_din also carries FMOVEM's register data: an operation's instruction
+// waits until the FPU has taken its operand, so FMOVEM's writes come later)
+logic [95:0] f_din;
 logic        f_dnice;          // f_din is an ordinary operand (the FPU pipeline)
 logic  [1:0] f_crsel;
 logic [31:0] f_crwd, f_iapc;
@@ -263,7 +265,7 @@ ap040_fpu #(.PIPE(FPU_PIPE)) fpu (
 	.cr_sel(f_crsel), .cr_we(f_crwe), .cr_wdata(f_crwd), .cr_rdata(f_crrd),
 	.bsun_req(f_bsun), .bsun_enable(f_bsun_en),
 	.ia_we(f_iawe), .ia_wdata(f_iapc),
-	.fm_sel(f_fmsel), .fm_we(f_fmwe), .fm_wdata(f_fmwd), .fm_rdata(f_fmrd),
+	.fm_sel(f_fmsel), .fm_we(f_fmwe), .fm_wdata(f_din), .fm_rdata(f_fmrd),
 	.fpu_used(f_used), .pbusy(f_pbusy), .pdone(f_pdone),
 	.okv_next(f_okvn), .sel_x(1'b1), .aok_x(f_aok), .bok_x(f_bok),
 	.opmode_n(n_opm), .op_class_n(n_class), .src_fmt_n(n_fmt),
@@ -790,7 +792,7 @@ always_ff @(posedge clk) begin
 		f_rest_idle <= 1'b0; f_uack <= 1'b0; f_fsclr <= 1'b0;
 		f_class <= '0; f_fmt <= '0; f_srcr <= '0; f_dstr <= '0; f_fmsel <= '0; f_opm <= '0;
 		f_aok <= 1'b0; f_bok <= 1'b0;
-		f_din <= '0; f_dnice <= 1'b0; f_fmwd <= '0; f_crsel <= '0; f_crwd <= '0; f_iapc <= '0;
+		f_din <= '0; f_dnice <= 1'b0; f_crsel <= '0; f_crwd <= '0; f_iapc <= '0;
 		f_rwe <= 1'b0; f_rwf <= '0; f_rwd <= '0;
 	end
 	else begin
@@ -980,7 +982,7 @@ always_ff @(posedge clk) begin
 				if (cur_on) begin
 					f_fmsel <= cur_reg;
 					f_fmwe  <= 1'b1;
-					f_fmwd  <= {av, bv, latch};
+					f_din   <= {av, bv, latch};
 				end
 				slot <= slot + 3'd1;
 			end

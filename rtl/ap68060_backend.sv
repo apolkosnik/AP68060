@@ -169,6 +169,7 @@ localparam logic [3:0] EK_RESET = 4'd4;   // reset: SSP/PC from 0/4
 //--------------------------------------------------------------------------
 logic        ag_v, dc1_v, dc2_v, ex_v, wb_v;
 uop_t        ag_u, dc1_u, dc2_u, ex_u, wb_u;
+logic [31:0] ex_npc, wb_npc;  // EX's and WB's next instruction (pc + 2 ilen)
 
 // operand values carried with the uop
 logic [31:0] dc1_a, dc1_b, dc1_ea;
@@ -1146,12 +1147,12 @@ end
 // to keep coherent: the 68040 prefetches both paths of a branch and
 // requires CPUSHA before self-modified code runs (MC68040UM 4.5, 7.7).
 wire ex_smc = (ex_u.mem == M_ST || ex_u.mem == M_RMW) &&
-              ((ex_ea[31:6] == ex_u.npc[31:6]) ||
-               (ex_ea[31:6] == ex_u.npc[31:6] + 26'd1));
+              ((ex_ea[31:6] == ex_npc[31:6]) ||
+               (ex_ea[31:6] == ex_npc[31:6] + 26'd1));
 logic smc_pend;
 // mispredict: the actual path differs from the one the front end took
 wire        ex_br      = (ex_u.br != BR_NONE) || (ex_u.op == OP_RTE);
-wire [31:0] ex_next    = ex_taken ? ex_target : ex_u.npc;
+wire [31:0] ex_next    = ex_taken ? ex_target : ex_npc;
 wire        ex_mispred = ex_br && ((ex_taken != ex_u.pred) ||
                                    (ex_taken && ex_u.pred && ex_target != ex_u.target));
 // a mispredicted branch that WB will redirect for no other reason turns
@@ -1438,7 +1439,7 @@ always_comb begin
 		// TRAP #n, TRAPcc, CHK and divide-by-zero stack the next
 		// instruction; faults and illegal opcodes the instruction
 		x_pc   = ((wb_exc >= 8'd32 && wb_exc < 8'd48) ||
-		          wb_exc == 8'd5 || wb_exc == 8'd6 || wb_exc == 8'd7) ? wb_u.npc : wb_u.pc;
+		          wb_exc == 8'd5 || wb_exc == 8'd6 || wb_exc == 8'd7) ? wb_npc : wb_u.pc;
 		if (wb_exc_pcv) x_pc = wb_exc_pc;
 	end
 	else if (take_irq) begin
@@ -1655,6 +1656,7 @@ always_ff @(posedge clk) begin
 		//------------------------------------------------------------------
 		if (adv_dc2) begin
 			ex_u     <= dc2_u;
+			ex_npc   <= dc2_u.pc + {27'd0, dc2_u.ilen, 1'b0};
 			ex_kc    <= {dc2_u.op == OP_DBCC, dc2_u.op == OP_MDRES, dc2_u.op == OP_DIV,
 			             dc2_u.op == OP_FPU};
 			ex_ee    <= dc2_ee;
@@ -1696,6 +1698,7 @@ always_ff @(posedge clk) begin
 		//------------------------------------------------------------------
 		if (adv_ex) begin
 			wb_u        <= ex_u;
+			wb_npc      <= ex_npc;
 			wb_res      <= exw_val;
 			wb_dwe      <= ex_d_eff;
 			wb_upd_val  <= ex_upd;
@@ -1728,7 +1731,7 @@ always_ff @(posedge clk) begin
 			if (ex_u.last) smc_pend <= 1'b0;
 			else if (ex_smc) smc_pend <= 1'b1;
 			// where execution continues, predicted correctly or not
-			wb_redir_pc <= ex_br ? ex_next : ex_u.npc;
+			wb_redir_pc <= ex_br ? ex_next : ex_npc;
 			wb_sr_we    <= ex_sr_we;
 			wb_cof      <= ex_br && ex_taken;
 			wb_sr_new   <= ex_sr_new;
@@ -1795,7 +1798,7 @@ always_ff @(posedge clk) begin
 			wb_xcommit  <= 1'b0;
 			if (ex_u.exc == 8'd0 && !ex_fault && ex_is_fp && ex_xvec != 8'd0) begin
 				wb_exc_pcv  <= 1'b1;
-				wb_exc_pc   <= fp_xnext ? ex_u.npc : ex_u.pc;
+				wb_exc_pc   <= fp_xnext ? ex_npc : ex_u.pc;
 				wb_exc_fmtv <= 1'b1;
 				wb_exc_fmt  <= fp_xfmt;
 				wb_xcommit  <= fp_xcommit;
@@ -1885,7 +1888,7 @@ always_ff @(posedge clk) begin
 			if (wb_is_stop && !stop_traced) begin
 				stopped   <= 1'b1;
 				lpstopped <= (wb_u.cond == 4'd8);
-				stop_pc   <= wb_u.npc;
+				stop_pc   <= wb_npc;
 			end
 			// HALT: the halted state until reset (no debug port to restart)
 			if (wb_u.op == OP_MISC && wb_u.cond == 4'd10) halted <= 1'b1;

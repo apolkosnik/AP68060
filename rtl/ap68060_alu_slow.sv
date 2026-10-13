@@ -154,13 +154,21 @@ always_comb begin
 			ra = (op == OP_ROXR) ? {1'b0, sh_nx}
 			                     : ((sh_nx == 6'd0) ? 7'd0 : ({1'b0, nbits} + 7'd1 - {1'b0, sh_nx}));
 		end
+		OP_ASL, OP_LSL: begin
+			// a left shift through the same funnel: the operand above 31
+			// zeros, shifted right by 31 - n (the count inverted, no
+			// subtraction), is the operand shifted left by n; n >= 32
+			// shifts everything out (C of a long shifted by 32: below)
+			rv = {3'd0, bm, 31'd0};
+			ra = sh_n[5] ? 7'd127 : {2'd0, ~sh_n[4:0]};
+		end
 		default: begin   // LSR
 			rv = {33'd0, bm, 1'b0};
 			ra = {1'b0, sh_n};
 		end
 	endcase
 	ro = (op == OP_ASR) ? 66'($signed(rv) >>> ra) : (rv >> ra);
-	lo = {34'd0, bm} << sh_n;
+	lo = ro;                      // (ASL, LSL: the operand shifted left by n)
 	// ASL: V when the bits shifted out and the new sign bit are not all
 	// equal, i.e. the top count+1 bits of the operand (at the size) differ
 	// somewhere: an adjacent pair among them differs.  yv[i] = x[i] ^ x[i-1],
@@ -177,7 +185,7 @@ always_comb begin
 		case (op)
 			OP_ASL, OP_LSL: begin
 				sh_r = lo[31:0] & szmask;
-				sh_c = (sh_n <= nbits) && lo[nbits];
+				sh_c = (sh_n <= nbits) && (sh_n[5] ? bm[0] : lo[nbits]);
 				sh_x = sh_c;
 				if (op == OP_ASL)
 					sh_v = (sh_n >= nbits) ? (bm != 0) : vl;

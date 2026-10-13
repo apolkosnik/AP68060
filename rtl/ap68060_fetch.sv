@@ -134,7 +134,7 @@ module ap68060_fetch
 	input  logic        b_rtci
 );
 
-localparam int QN = 12;          // 16 measured no faster
+localparam int QN = 8;            // (12: about 2% faster, 100 ALMs more)
 
 wire tc_e  = tc[15] && !mdis;
 wire tc_p  = tc[14];
@@ -277,13 +277,14 @@ logic  [2:0] fras_tp;
 logic  [3:0] fras_n;
 logic        atc_hit;
 atce_t       atc_e;
-ap68060_atc iatc (
+ap68060_atc #(.SAME_SEARCH(0)) iatc (
 	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc[10]),
 	.la(iatc_flush_page ? iatc_flush_la : fpc),
 	.fc2(iatc_flush_page ? iatc_flush_fc2 : smode),
 	.hit(atc_hit), .ent(atc_e), .hv(), .wpa(),
 	.la_d(32'd0), .fc2_d(1'b0), .set_d(4'd0), .hv_d(), .wpa_d(),
 	.wr(iatc_wr), .wla(iatc_wla), .wfc2(iatc_wfc2), .went(iatc_went),
+	.wsame(1'b0), .wsame_hv(4'd0),
 	.flush_all(iatc_flush_all), .flush_page(iatc_flush_page),
 	.flush_nonglobal(iatc_flush_ng)
 );

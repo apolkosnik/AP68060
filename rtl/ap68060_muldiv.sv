@@ -5,7 +5,7 @@
 // ap040_muldiv.v, which the cputest corpus validated)                       //
 //                                                                          //
 // MUL: 32x32 -> 64, signed or unsigned, one registered DSP product        //
-// DIV: 32/32 -> q32,r32 restoring, 4 bits per cycle (the 68060 has no     //
+// DIV: 32/32 -> q32,r32 restoring, 2 bits per cycle (the 68060 has no     //
 //      64-bit dividend: those forms trap); ovf for the one signed quotient //
 //      that does not fit, -2^31 / -1.  Signed quotients truncate toward    //
 //      zero, the remainder takes the dividend's sign.                       //
@@ -45,7 +45,8 @@ reg [64:0] acc;                   // divide: remainder [64:32], dividend/quotien
 wire [31:0] abs_a  = (sign_op && op_a[31]) ? (32'd0 - op_a) : op_a;
 wire [31:0] abs_m  = (sign_op && op_lo[31]) ? (32'd0 - op_lo) : op_lo;   // also |dividend|
 
-// divide: four cascaded restoring steps per cycle (32 bits = 8 rounds),
+// divide: DSTEPS cascaded restoring steps per cycle (2: 32 bits in 16
+// rounds, the 68060's own DIVU.L takes 38 clocks),
 // each exactly one former one-bit iteration; the divisor is an explicit
 // argument so the function stays pure (module-level variables read from
 // inside a function are unreliable in continuous assignments under iverilog)
@@ -62,7 +63,9 @@ function [64:0] div_step;
 	end
 endfunction
 
-wire [64:0] div4 = div_step(div_step(div_step(div_step(acc, den), den), den), den);
+localparam int DSTEPS = 2;
+wire [64:0] div4 = (DSTEPS == 4) ? div_step(div_step(div_step(div_step(acc, den), den), den), den)
+                                 : div_step(div_step(acc, den), den);
 
 wire [63:0] q_raw = div_r ? {32'd0, acc[31:0]} : prod;
 wire [31:0] r_raw = acc[63:32];
@@ -97,7 +100,7 @@ always @(posedge clk) begin
 			if (is_div) begin
 				den   <= abs_a;
 				acc   <= {33'd0, abs_m};
-				count <= 7'd8;
+				count <= 7'(32 / DSTEPS);
 				neg_q <= sign_op && (op_lo[31] ^ op_a[31]);
 				neg_r <= sign_op && op_lo[31];
 			end

@@ -229,7 +229,7 @@ typedef struct packed {
 
 typedef struct packed {
 	logic [31:0] pc;        // address of the 68040 instruction
-	logic [31:0] npc;       // address of the next sequential instruction
+	logic  [3:0] ilen;     // the instruction's length in words (npc = pc + 2 ilen)
 	ras_snap_t   ras;       // see ras_snap_t
 	logic        first;     // first uop of the instruction
 	logic        last;      // last uop: the instruction completes with it
@@ -336,7 +336,7 @@ typedef struct packed {
 
 typedef struct packed {
 	logic [31:0] pc;
-	logic [31:0] npc;
+	logic  [3:0] ilen;     // the instruction's length in words (npc = pc + 2 ilen)
 	logic [15:0] opw;
 	logic [15:0] ext1;
 	logic [15:0] ext2;
