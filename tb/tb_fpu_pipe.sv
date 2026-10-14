@@ -67,7 +67,7 @@ cmd_t cmds [$];
 
 // the current FPU's selection ports: unused here (the FPU selects its own
 // register-ready flags; the core selects them outside, checked in the FPU)
-`define XPORTS .okv_next(), .sel_x(1'b0), .aok_x(1'b0), .bok_x(1'b0), .opmode_n(7'd0), .op_class_n(3'd0), .src_fmt_n(3'd0), .frestore_we(1'b0), .frestore_wf(2'd0), .frestore_wd(32'd0),
+`define XPORTS .okv_next(), .sel_x(1'b0), .aok_x(1'b0), .bok_x(1'b0), .opmode_n(7'd0), .op_class_n(3'd0), .src_fmt_n(3'd0), .frestore_we(1'b0), .frestore_wd(80'd0),
 `define FPU_INST(P, PIPEV, MOD, X) \
 	MOD #(.PIPE(PIPEV)) P``_fpu ( \
 		.clk(clk), .nreset(nreset), .ce(1'b1), \

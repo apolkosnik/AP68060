@@ -25,6 +25,16 @@ DFPCNT  equ     $3880           ; FPU-disabled exceptions (vector 11, format $4)
 DFPPC   equ     $3884           ; ... their stacked PC, address, instruction PC
 DFPEA   equ     $3888
 DFPIP   equ     $388C
+CNTBE   equ     $38A0           ; access errors (vector 2)
+BEPC    equ     $38A4           ; ... their stacked PC, fault address, FSLW
+BEFA    equ     $38A8
+BEFS    equ     $38AC
+BESKIP  equ     $38B0           ; access error handler: bytes to skip
+XSTO    equ     $3900           ; FMOVE.X destination
+RSF     equ     $3920           ; a frame FRESTORE fails on
+ROOT    equ     $4000           ; MMU tables: root, pointer, page
+PTRT    equ     $4200
+PTAB    equ     $4400
 
 check   macro
         cmp.l   #\2,\1
@@ -512,6 +522,168 @@ dfp5:   fnop
         check   d0,$3bca0000,465
         fmove.l #0,fpsr
 
+;------------------------------------------------ FMOVE.X of a signaling NaN
+; the extended image is stored quieted, with SNAN and accrued IOP, the
+; source register keeping its signaling NaN; an enabled SNAN is taken after
+; the store, post-instruction (format $3, the next PC, the operand's
+; address; MC68060UM 6.6.2-6.6.2.2).  FMOVEM moves raw images and sets
+; nothing
+        fmove.l #0,fpcr
+        fmove.l #0,fpsr
+        lea     snan_xp(pc),a0
+        fmovem.x (a0),fp3
+        fmove.x fp3,(XSTO).l
+        frame3  (XSTO).l,$7fff0000,$c0000001,$00000001,500
+        fmove.l fpsr,d0
+        check   d0,$00004080,503
+        fmove.l #0,fpsr
+        fmovem.x fp3,(XSTO).l          ; the register: still signaling
+        frame3  (XSTO).l,$7fff0000,$80000001,$00000001,504
+        fmove.l fpsr,d0
+        check   d0,0,507
+        lea     snan_xn(pc),a0         ; negative, integer bit clear, FP7
+        fmovem.x (a0),fp7
+        fmove.x fp7,(XSTO).l
+        frame3  (XSTO).l,$ffff0000,$60000000,$00000000,508
+        fmove.l fpsr,d0
+        check   d0,$00004080,511
+        fmove.l #0,fpsr
+        lea     qnan_x(pc),a0          ; a quiet NaN: as it is, nothing set
+        fmovem.x (a0),fp4
+        fmove.x fp4,(XSTO).l
+        frame3  (XSTO).l,$7fff0000,$c0000000,$00001234,512
+        fmove.l fpsr,d0
+        check   d0,0,515
+        ; enabled: written all the same, then vector 54 after the FMOVE
+        clr.l   (COUNT+4*6).l
+        clr.l   (XSTO).l
+        fmove.l #$4000,fpcr
+xst1:   fmove.x fp3,(XSTO).l
+xst1n:  move.l  (COUNT+4*6).l,d0
+        check   d0,1,516
+        move.l  (LASTFW).l,d0
+        check   d0,$000030d8,517       ; format $3, vector 54
+        move.l  (LASTPC).l,d0
+        check   d0,xst1n,518
+        move.l  (LASTEA).l,d0
+        check   d0,XSTO,519
+        frame3  (XSTO).l,$7fff0000,$c0000001,$00000001,520
+        move.l  (HSAVE).l,d0
+        and.l   #$ffff,d0
+        check   d0,$0000e006,523       ; the handler saved an SNAN EXCP frame
+        fmove.l #0,fpcr
+        fmove.l fpsr,d0
+        and.l   #$ff00,d0
+        check   d0,$00004000,524
+        fmove.l #0,fpsr
+        fmovem.x fp3,(XSTO).l
+        frame3  (XSTO).l,$7fff0000,$80000001,$00000001,525
+
+;------------------------------------------------ a failed FRESTORE restores nothing
+; an invalid format, or an access error on a later word of the frame,
+; leaves the FPU state as it was: an EXCP state's exception operand is
+; not partly replaced (MC68060UM Appendix D; 8.2.1: FRESTORE may take a
+; page fault before it restores the state; 6.7).  The access error handler
+; records the fault and resumes past the FRESTORE (6 bytes) instead of
+; restarting it
+        move.l  #berr_handler,($08).w
+        clr.l   (CNTBE).l
+        move.l  #6,(SKIP).l            ; frestore (abs).l
+        move.l  #6,(BESKIP).l
+        clr.l   (CNTFMT).l
+        setfr   $1234e006,$11223344,$55667788
+        frestore (FRAME).l
+        move.l  #$5678e105,(RSF).l     ; format $E1: a format error
+        move.l  #$aabbccdd,(RSF+4).l
+        move.l  #$eeff0099,(RSF+8).l
+        frestore (RSF).l
+        move.l  (CNTFMT).l,d0
+        check   d0,1,530
+        fsave   (COPY).l
+        frame3  (COPY).l,$1234e006,$11223344,$55667788,531
+        ; a bus error on the second, then the third word
+        move.b  #$e0,(RSF+2).l         ; a valid EXCP frame now
+        frestore (FRAME).l
+        move.w  #RSF+4,($f15e).l
+rsb1:   frestore (RSF).l
+        move.l  (CNTBE).l,d0
+        check   d0,1,534
+        move.l  (BEPC).l,d0
+        check   d0,rsb1,535
+        move.l  (BEFA).l,d0
+        check   d0,RSF+4,536
+        fsave   (COPY).l
+        frame3  (COPY).l,$1234e006,$11223344,$55667788,537
+        frestore (FRAME).l
+        move.w  #RSF+8,($f15e).l
+rsb2:   frestore (RSF).l
+        move.l  (CNTBE).l,d0
+        check   d0,2,540
+        move.l  (BEPC).l,d0
+        check   d0,rsb2,541
+        move.l  (BEFA).l,d0
+        check   d0,RSF+8,542
+        fsave   (COPY).l
+        frame3  (COPY).l,$1234e006,$11223344,$55667788,543
+        ; and once every word is read, the whole frame is taken
+        frestore (FRAME).l
+        frestore (RSF).l
+        fsave   (COPY).l
+        frame3  (COPY).l,$5678e005,$aabbccdd,$eeff0099,546
+
+        ; a page fault: the frame runs onto a nonresident page.  Identity
+        ; map 0-$3FFFF in 4K pages, $9000 not resident
+        lea     (PTAB).l,a0
+        moveq   #0,d0
+        moveq   #63,d1
+pt_fill:
+        move.l  d0,d2
+        moveq   #12,d3
+        lsl.l   d3,d2
+        addq.l  #3,d2                  ; resident
+        move.l  d2,(a0)+
+        addq.l  #1,d0
+        dbra    d1,pt_fill
+        clr.l   (PTAB+9*4).l
+        move.l  #PTRT+3,(ROOT).l
+        move.l  #PTAB+3,(PTRT).l
+        move.l  #ROOT,d0
+        movec   d0,urp
+        movec   d0,srp
+        pflusha
+        move.l  #2,(BESKIP).l          ; frestore (a2)
+        move.l  #$8000,d0              ; enabled, 4K pages
+        movec   d0,tc
+        move.l  #$5678e005,($8ffc).l   ; the second word faults
+        move.l  #$8ffc,a2
+        bsr     pg_case
+        move.l  (BEFA).l,d0
+        check   d0,$9000,550
+        move.l  (BEFS).l,d0
+        and.l   #$200,d0
+        check   d0,$200,551            ; FSLW PF
+        move.l  #$5678e005,($8ff8).l   ; the third word faults
+        move.l  #$aabbccdd,($8ffc).l
+        move.l  #$8ff8,a2
+        bsr     pg_case
+        move.l  (BEFA).l,d0
+        check   d0,$9000,552
+        moveq   #0,d0
+        movec   d0,tc
+        pflusha
+        move.l  (CNTBE).l,d0
+        check   d0,4,553
+        bra     pg_done
+pg_case:
+        frestore (FRAME).l
+pgr:    frestore (a2)
+        move.l  (BEPC).l,d0
+        check   d0,pgr,554
+        fsave   (COPY).l
+        frame3  (COPY).l,$1234e006,$11223344,$55667788,555
+        rts
+pg_done:
+
         check   sp,$e000,99
         move.w  #$600d,($f102).l
         bra.s   *
@@ -536,6 +708,17 @@ fl_not_dfp:
         rte
 fl_unimp:
         fsave   (FRAME).l
+        rte
+; access errors (vector 2): record, resume BESKIP bytes past the instruction
+berr_handler:
+        cmpi.w  #$4008,6(sp)
+        bne     fail
+        addq.l  #1,(CNTBE).l
+        move.l  2(sp),(BEPC).l
+        move.l  8(sp),(BEFA).l
+        move.l  12(sp),(BEFS).l
+        move.l  (BESKIP).l,d0
+        add.l   d0,2(sp)
         rte
 format_handler:
         cmpi.w  #$0038,6(sp)
@@ -610,3 +793,6 @@ unf_small_s: dc.l $3f670000,$80000000,$00000000
 unf_min_s:   dc.l $bf810000,$80000000,$00000000
 unf_small_d: dc.l $3bca0000,$80000000,$00000000
 unf_min_d:   dc.l $bc010000,$80000000,$00000000
+snan_xp:     dc.l $7fff0000,$80000001,$00000001
+snan_xn:     dc.l $ffff0000,$20000000,$00000000
+qnan_x:      dc.l $7fff0000,$c0000000,$00001234
