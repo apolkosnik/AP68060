@@ -684,6 +684,60 @@ pgr:    frestore (a2)
         rts
 pg_done:
 
+;------------------------------------------------ enabled SNAN, OPERR, DZ: the condition codes
+        ; Motorola's ftest.sa (M68060SP), validated on the 68060: the
+        ; condition codes are set from the default result that is not
+        ; written; the destination keeps its value; the exception is taken
+        ; by the next FPU instruction.  The M68060SP passes these straight
+        ; to _real_snan/_operr/_dz without touching the FPSR.
+        ; SNAN: -SNAN + 2: N and NAN (the quiet NaN keeps the sign)
+        move.l  (COUNT+24).l,d6
+        fmove.l #$4000,fpcr
+        fmovem.x ftsnan(pc),fp0        ; (FMOVEM: loaded as it is)
+        fmove.l #0,fpsr
+        fadd.b  #2,fp0
+        fnop                           ; vector 54
+        fmove.l fpsr,d0
+        check   d0,$09004080,600
+        move.l  (COUNT+24).l,d0
+        sub.l   d6,d0
+        check   d0,1,601
+        fmove.l #0,fpcr
+        fmovem.x fp0,(XSTO).l
+        frame3  (XSTO).l,$ffff0000,$00000000,$00000001,602
+        ; OPERR: -inf + +inf: NAN alone (the default NaN is positive)
+        move.l  (COUNT+16).l,d6
+        fmove.l #$2000,fpcr
+        fmovem.x ftminf(pc),fp0
+        fmove.l #0,fpsr
+        fadd.s  #$7f800000,fp0
+        fnop                           ; vector 52
+        fmove.l fpsr,d0
+        check   d0,$01002080,605
+        move.l  (COUNT+16).l,d0
+        sub.l   d6,d0
+        check   d0,1,606
+        fmove.l #0,fpcr
+        fmovem.x fp0,(XSTO).l
+        frame3  (XSTO).l,$ffff0000,$00000000,$00000000,607
+        ; DZ: 2 / 0: I (the default infinity, positive)
+        move.l  (COUNT+8).l,d6
+        fmove.l #$0400,fpcr
+        fmovem.x fttwo(pc),fp0
+        fmove.l #0,fpsr
+        fdiv.b  #0,fp0
+        fnop                           ; vector 50
+        fmove.l fpsr,d0
+        check   d0,$02000410,610
+        move.l  (COUNT+8).l,d0
+        sub.l   d6,d0
+        check   d0,1,611
+        fmove.l #0,fpcr
+        fmovem.x fp0,(XSTO).l
+        frame3  (XSTO).l,$40000000,$80000000,$00000000,612
+        ; OVFL and UNFL are not changed: the M68060SP forms those
+        fmove.l #0,fpsr
+
         check   sp,$e000,99
         move.w  #$600d,($f102).l
         bra.s   *
@@ -794,5 +848,8 @@ unf_min_s:   dc.l $bf810000,$80000000,$00000000
 unf_small_d: dc.l $3bca0000,$80000000,$00000000
 unf_min_d:   dc.l $bc010000,$80000000,$00000000
 snan_xp:     dc.l $7fff0000,$80000001,$00000001
+ftsnan:      dc.l $ffff0000,$00000000,$00000001
+ftminf:      dc.l $ffff0000,$00000000,$00000000
+fttwo:       dc.l $40000000,$80000000,$00000000
 snan_xn:     dc.l $ffff0000,$20000000,$00000000
 qnan_x:      dc.l $7fff0000,$c0000000,$00001234

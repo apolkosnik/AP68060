@@ -1175,6 +1175,14 @@ wire [7:0] x_en   = (fpsr[15:8] & fpcr[15:8]) | {3'd0, fpsr[12], fpsr[11], 3'd0}
 wire       x_any  = |x_en;
 wire       x_kill = |(fpsr[14:13] & fpcr[14:13]) || (fpsr[10] && fpcr[10]) ||
                     fpsr[12] || fpsr[11];
+// An enabled SNAN, OPERR or DZ still sets the condition codes from the
+// default result (the quiet NaN, the default NaN, the infinity) that is not
+// written: the M68060SP passes these straight to _real_snan/_operr/_dz
+// without touching the FPSR, and Motorola's ftest.sa expects FPSR
+// $09004080 after FADD.B #2,FP0 with FP0 a negative SNAN, $01002080 after
+// -inf + +inf, $02000410 after FDIV.B #0 of 2.  OVFL and UNFL do not: the
+// M68060SP forms their result and condition codes itself.
+wire       x_cc   = |(fpsr[14:13] & fpcr[14:13]) || (fpsr[10] && fpcr[10]);
 
 // unimplemented in the FPU (the core traps these before dispatch): IDLE
 task capture_unimp;
@@ -2549,11 +2557,14 @@ always @(posedge clk) begin
 					exc_vec   <= fp_exception_vector(x_en);
 					fstate_et <= sh_src;
 				end
-				if (x_kill) begin
-					// enabled SNAN, OPERR, DZ; OVFL, UNFL: the destination is kept
+				if (x_kill && !x_cc) begin
+					// OVFL, UNFL: the destination is kept, the condition
+					// codes are the M68060SP's
 					fpu_used <= 1;
 					begin fst <= F_IDLE; acc_r <= 1'b0; end
 				end
+				// (an enabled SNAN, OPERR, DZ: the condition codes as below,
+				// the destination kept: fr_wb_we and fr_valid see x_kill)
 				else if (r_op == 7'h38) begin : f_cmp
 					// FCMP: condition codes from FPn - source
 					du = {b_s, b_e, b_m, b_t};
@@ -2611,7 +2622,7 @@ always @(posedge clk) begin
 					// in a_m: created infinities carry all-zero bits and
 					// pass-through infinities keep the operand's raw image
 					// (inf_clear_intbit is a 68060 flag, not 68040).
-					fr_valid[r_dst] <= 1;
+					if (!x_kill) fr_valid[r_dst] <= 1;
 					fpsr[27:24] <= {a_s,
 					                (a_t == T_ZERO),
 					                (a_t == T_INF),
