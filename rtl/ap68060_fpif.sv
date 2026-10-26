@@ -120,7 +120,8 @@ localparam logic [3:0] K_NONE = 4'd0,
                        K_EA60 = 4'd6,      // unimplemented effective address, format $0
                        K_PK = 4'd7,        // packed operand in Dn: vector 55, format $2
                        K_PKM = 4'd8,       // packed operand in memory, its address
-                       K_DFPM = 4'd9;      // FPU disabled, the memory operand's address
+                       K_DFPM = 4'd9,      // FPU disabled, the memory operand's address
+                       K_FLCR = 4'd10;     // F-line, format $0, the FPU enabled or not
 
 //--------------------------------------------------------------------------
 // helpers
@@ -359,8 +360,13 @@ function automatic logic [6:0] chk_dec(input logic [15:0] ow, input logic [15:0]
 	if (ow[15:6] == 10'b1111_0010_00) case (ol)
 		3'b000, 3'b010: begin
 			if (ol == 3'b010 && fm == 3'd7) begin
-				// FMOVECR: unimplemented before the opmode is looked at
-				k = K_FMOVECR; ia = 1'b1;
+				// FMOVECR: unimplemented before the opmode is looked at.
+				// An <ea> field other than 0 is not one: F-line, even with
+				// the FPU disabled (the M68060SP's _fpsp_fline converts that
+				// frame, to FPU disabled when PCR.DFP is set; FPIAR is its
+				// to write)
+				if (ow[5:0] != 6'd0) k = K_FLCR;
+				else begin k = K_FMOVECR; ia = 1'b1; end
 			end
 			else if (oc == 2'd1) k = K_FLINE;
 			else if (oc == 2'd2) k = K_ILL;
@@ -561,7 +567,7 @@ always_comb begin
 				// the FPU sees it now: done at once if it went into the
 				// pipeline (pdone: the registered done of this cycle may be
 				// a released operation's, which fresh masks)
-				if (dfp) begin
+				if (dfp && chk_k != K_FLCR) begin
 					// the FPU disabled: the trap here, or at the EA uop
 					if (eal || !dfp_mem) begin
 						xvec = VEC_FLINE; xfmt = 4'd4; xnext = 1'b1;
@@ -589,7 +595,7 @@ always_comb begin
 					xvec = pend_vec;
 				end
 				else case (chk_k)
-					K_FLINE: xvec = VEC_FLINE;
+					K_FLINE, K_FLCR: xvec = VEC_FLINE;
 					K_ILL:   xvec = VEC_ILL;
 					K_UNIMP, K_FMOVECR: begin
 						xvec = VEC_FLINE; xfmt = 4'd2; xnext = 1'b1; xaddr = 32'd0;
