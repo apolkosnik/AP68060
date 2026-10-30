@@ -927,6 +927,16 @@ def emit():
             else:
                 f.write('\ts[%d] = m[%d];\n' % (i, i))
         f.write('\tdec_sel = s;\nendfunction\n\n')
+        # some pattern matches: the OR of the raw matches (the most specific
+        # matching entry survives the exclusions), formed from the word
+        # alone so that the predecoder need not OR the one-hot selection
+        f.write('function automatic logic dec_match(input logic [15:0] op);\n')
+        f.write('\tdec_match = 1\'b0;\n')
+        for i, e in enumerate(ents):
+            m, v = mv(e)
+            zc = " && (op[7:6] != 2'b11)" if e.sz == 'z' else ''
+            f.write("\tif (((op & 16'h%04x) == 16'h%04x)%s) dec_match = 1'b1;\n" % (m, v, zc))
+        f.write('endfunction\n\n')
         # attributes of an entry index
         lits = []
         f.write('function automatic pla_t ent_attr(input logic [8:0] ent, input logic hit);\n')

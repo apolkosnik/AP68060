@@ -13,7 +13,8 @@
 //   * a source (An)+/-(An) update marked noupd is deferred into the uop    //
 //     flagged upd2 (merged when both EAs use the same register), so an     //
 //     instruction that faults on its second access restarts cleanly        //
-//   * the back end's exception entry starts an exception routine           //
+//   * the back end's exception entry starts an exception routine (the     //
+//     clock after it, from its kind registered here)                       //
 //                                                                          //
 // Three stages:                                                            //
 //   D2a  the microcode address (the ROM's address register).  The next    //
@@ -23,16 +24,20 @@
 //        ROM's output only feeds registers.  A jump word is resolved here //
 //        (an unconditional one at once, a conditional one a clock later). //
 //        What depends on the word and its record alone and sits deep in  //
-//        the uop (the memory EA, its access, the AG displacement, the     //
-//        pointer-load candidates, the MOVEM terms) is formed here.         //
+//        the uop (the memory EA, its access, the explicit AG modes'       //
+//        displacement, the operand selectors' registers, the pointer-load //
+//        candidates, the MOVEM terms) is formed here; the record carries  //
+//        its EAs' kinds from D1 (no mode decode here).                     //
 //   D2b  the uop from the word and its record in registers, without the   //
 //        instruction's running state: a memory-indirect EA's uop through //
 //        its pointer, and the pointer's address apart.                     //
 //   D2c  the uop the state makes of it: the pointer load first, MOVEM's    //
 //        transfers and fix-ups, a deferred update merged; into the uop    //
-//        FIFO.  A word that repeats (pointer load, MOVEM) holds D2b and   //
-//        D2a; whether the word will repeat is itself a register           //
-//        (c_stay_q), formed a clock ahead.                                 //
+//        FIFO (two words, a ring: the back end's pop moves its read      //
+//        pointer only).  A word that repeats (pointer load, MOVEM) holds //
+//        D2b and D2a; whether the word will repeat is itself a register   //
+//        (c_stay_q), formed a clock ahead, as are MOVEM's per-transfer    //
+//        terms (a transfer ahead).                                         //
 //--------------------------------------------------------------------------//
 
 module ap68060_useq
@@ -187,8 +192,22 @@ assign src = rb;
 uword_t      uw;
 assign uw = ub;
 
-// uop FIFO
-uop_t        uq1;
+// uop FIFO: two words, a ring; uq0 is the one at the read pointer (one
+// LUT from flip-flops).  The back end's pop (late) moves the pointer only:
+// the words are written at the write pointer by D2c's emit, from registers
+(* ramstyle = "logic" *) uop_t ue [2];
+logic        uq_rp, uq_wp;
+// ... but the register numbers the back end reads its register file with
+// at once (A, B, the AG's base and index) are the head's own flip-flops,
+// the pop the last select (few of them: the late pop fans out little)
+logic  [4:0] h_areg, h_breg, h_base, h_idx;
+always_comb begin
+	uq0        = uq_rp ? ue[1] : ue[0];
+	uq0.a_reg  = h_areg;
+	uq0.b_reg  = h_breg;
+	uq0.base   = h_base;
+	uq0.idx    = h_idx;
+end
 wire         room_out = (uq_n != 2'd2);
 
 // at most one bit set
@@ -1262,19 +1281,6 @@ always_ff @(posedge clk) begin
 	end
 end
 
-// the uop FIFO's words for the back end's pop and without it, as kept
-// nets: the pop (late, and fanned out over both words) is the last select,
-// one LUT before each flop -- not a clock enable, which synthesis would
-// otherwise form from it and the emit, a LUT and a wide spread later
-(* keep *) wire [$bits(uop_t)-1:0] uq0_p;
-(* keep *) wire [$bits(uop_t)-1:0] uq0_h;
-(* keep *) wire [$bits(uop_t)-1:0] uq1_p;
-(* keep *) wire [$bits(uop_t)-1:0] uq1_h;
-assign uq0_h = (emit && uq_n == 2'd0) ? nu : uq0;
-assign uq0_p = (emit && !uq_n[1]) ? nu : (uq_n == 2'd0) ? uq0 : uq1;   // (not through uq0_h)
-assign uq1_h = (emit && uq_n == 2'd1) ? nu : uq1;
-assign uq1_p = uq1;            // (a pop leaves no uop for uq1: D2c emits only below two)
-
 //--------------------------------------------------------------------------
 // the stages' data and the uop FIFO's: no reset (the valid bits and the
 // count qualify them)
@@ -1395,10 +1401,19 @@ always_ff @(posedge clk) begin
 		t_off  <= t_off + (c_pd ? -{29'd0, c_sb} : {29'd0, c_sb});
 		t_amt  <= t_amt + {5'd0, c_sb};
 	end
-	// uop FIFO: both outcomes formed without the pop (the back end's
-	// stall, a late signal), which selects between them last
-	uq0 <= uop_t'(uq_pop ? uq0_p : uq0_h);
-	uq1 <= uop_t'(uq_pop ? uq1_p : uq1_h);
+	// uop FIFO: D2c's uop at the write pointer; the head's register numbers
+	// (the next head: the other word, or D2c's uop if it becomes the head)
+	if (emit) ue[uq_wp] <= nu;
+	begin
+		uop_t nh;
+		nh = (uq_n == 2'd2) ? (uq_rp ? ue[0] : ue[1]) : nu;
+		if (uq_pop && uq_n != 2'd0) begin
+			h_areg <= nh.a_reg; h_breg <= nh.b_reg; h_base <= nh.base; h_idx <= nh.idx;
+		end
+		else if (uq_n == 2'd0) begin
+			h_areg <= nu.a_reg; h_breg <= nu.b_reg; h_base <= nu.base; h_idx <= nu.idx;
+		end
+	end
 end
 
 //--------------------------------------------------------------------------
@@ -1423,6 +1438,8 @@ always_ff @(posedge clk) begin
 		mv_t11   <= 1'b0;
 		mv_fix   <= 2'd0;
 		uq_n     <= 2'd0;
+		uq_rp    <= 1'b0;
+		uq_wp    <= 1'b0;
 	end
 	else begin
 		logic        i0n, i1n, actn, is0n, pc1n, t11n;
@@ -1470,6 +1487,8 @@ always_ff @(posedge clk) begin
 		// stall, a late signal), which selects between them last
 		if (uq_pop && uq_n != 2'd0) uq_n <= emit ? uq_n : uq_n - 2'd1;
 		else                        uq_n <= emit ? uq_n + 2'd1 : uq_n;
+		if (emit) uq_wp <= !uq_wp;
+		if (uq_pop && uq_n != 2'd0) uq_rp <= !uq_rp;
 
 		if (emit) begin
 			first <= 1'b0;
@@ -1518,11 +1537,15 @@ always_ff @(posedge clk) begin
 			mv_t11 <= 1'b0;
 			mv_fix <= 2'd0;
 			uq_n  <= 2'd0;
+			uq_rp <= 1'b0;
+			uq_wp <= 1'b0;
 		end
 		if (exc_go) begin
 			first    <= 1'b1;
 			ssp      <= exc_ssp;
 			uq_n     <= 2'd0;
+			uq_rp    <= 1'b0;
+			uq_wp    <= 1'b0;
 		end
 	end
 end
@@ -1541,6 +1564,15 @@ always_ff @(posedge clk)
 		$display("FAIL: useq: a merged uop's displacement %h changed from %h", nu.disp, dbg_dpre);
 		$finish;
 	end
+// the head's register numbers against the ring's word
+always_ff @(posedge clk) begin
+	uop_t h;
+	h = uq_rp ? ue[1] : ue[0];
+	if (nrst && uq_n != 2'd0 && {h_areg, h_breg, h_base, h_idx} != {h.a_reg, h.b_reg, h.base, h.idx}) begin
+		$display("FAIL: useq: the uop FIFO head's register numbers");
+		$finish;
+	end
+end
 // the registered forms against the combinational ones
 always_ff @(posedge clk)
 	if (nrst && c_v && c_upd2 && def_v &&

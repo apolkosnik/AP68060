@@ -41,10 +41,11 @@
 //                                                                          //
 // The queue holds QN words: slot 0 is always the next word D1 decodes,   //
 // and D1 sees the first eight.  D1 takes the head instruction (its       //
-// predecoded length, cs_fire, decided late in the clock) or a length it  //
-// decided the clock before (cr_fire, cr_use): the queue's next state is  //
-// formed for both, and for neither, from registers, and the takes pick   //
-// one last.  A redirect (D1 branch or WB) empties the queue and the      //
+// predecoded length, cs_fire: one LUT from registers, fanned out over the //
+// queue) or a length it decided the clock before (cr_fire, cr_use): the //
+// queue's next state is formed for both, and for neither, from registers //
+// (kept nets), and the takes pick one last.  The BTB targets of flagged  //
+// words are a ring.  A redirect (D1 branch or WB) empties the queue and  //
 // pipeline.  A faulted fetch marks its words; D1 raises the fault only if //
 // it uses them (8.2.1).  Only the first fetch of a stream the back end   //
 // redirected is a demand fetch; a fault on the lookahead after it (or in //
@@ -626,8 +627,13 @@ wire       f0_go    = (st == S_RUN) && !odd && !stop_q && !m_setpc &&
 (* keep *) wire [30:0] f1_t1;
 (* keep *) wire        f1_tg0;
 (* keep *) wire        f1_tg1;
-assign fpc_b  = redir_any ? {redir_npc[31:1], 1'b0} : f2_miss ? f2_pc :
-                f0_go ? {fpc[31:2], 2'b00} + 32'd4 : m_setpc ? m_la : fpc;
+// (F0's advance, a decision over many flops, picks the sequential address
+// last: the others are formed apart)
+(* keep *) wire [31:0] fpc_o;
+(* keep *) wire        fpc_sq;
+assign fpc_o  = redir_any ? {redir_npc[31:1], 1'b0} : f2_miss ? f2_pc : m_setpc ? m_la : fpc;
+assign fpc_sq = f0_go && !redir_any && !f2_miss;
+assign fpc_b  = fpc_sq ? {fpc[31:2], 2'b00} + 32'd4 : fpc_o;
 assign atc_b  = iatc_flush_page ? iatc_flush_la : fpc_b;
 assign f1_t0  = (bk0 == 2'd2) ? fras_top : btb_q0[30:0];
 assign f1_t1  = (bk1 == 2'd2) ? fras_top : btb_q1[30:0];

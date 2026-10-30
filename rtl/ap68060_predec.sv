@@ -13,7 +13,8 @@
 // Three stages, a register after each (no enable: the fetch pipeline      //
 // carries its words' valid bits alongside, and never holds):              //
 //   P1  the decoder's entry: every pattern matched in parallel, each      //
-//       excluded by the more specific ones overlapping it (one-hot)       //
+//       excluded by the more specific ones overlapping it (one-hot); and  //
+//       whether any matches (from the word: not an OR of the entries)     //
 //   P2  the entry's attributes (OR trees over the one-hot selection), and //
 //       what comes from the word alone: its EA mode indexes and their     //
 //       extension lengths, the immediate kinds' lengths                    //
@@ -52,8 +53,10 @@ endfunction
 //--------------------------------------------------------------------------
 logic [NENT-1:0] s1;
 logic     [15:0] op1;
+logic            m1;           // some pattern matches (not the OR of s1: P2's)
 always_ff @(posedge clk) begin
 	s1  <= dec_sel(op);
+	m1  <= dec_match(op);
 	op1 <= op;
 end
 
@@ -61,6 +64,7 @@ end
 // P2
 //--------------------------------------------------------------------------
 pla_t        a2;
+logic        m2;
 logic [15:0] op2;
 logic  [3:0] i0r, i1r;        // the EA fields' mode indexes
 logic  [2:0] l0l, l0n, l1r;   // ... their extension words (EA0 long / shorter)
@@ -68,6 +72,7 @@ logic  [2:0] nim5, nim6, nim7; // the immediate lengths that depend on the word
 always_ff @(posedge clk) begin
 	logic [3:0] i0, i1;
 	a2   <= ent_attr_oh(s1);
+	m2   <= m1;
 	op2  <= op1;
 	i0    = ea_idx(op1[5:3], op1[2:0]);
 	i1    = ea_idx(op1[8:6], op1[11:9]);
@@ -111,7 +116,7 @@ always_ff @(posedge clk) begin
 	l1   = a.ea1v ? l1r : 3'd0;
 	b_l  = 3'd1 + {1'b0, a.nfix} + nimm_l;
 	b_n  = 3'd1 + {1'b0, a.nfix} + nimm_n;
-	legal = a.match &&
+	legal = m2 &&
 	        (!a.ea0v || (i0 != EM_NONE && a.ea0m[i0])) &&
 	        (!a.ea1v || (i1 != EM_NONE && a.ea1m[i1]));
 	pd.legal <= legal;
@@ -159,7 +164,8 @@ always_ff @(posedge clk) if (warm == 3'd4) begin
 	i1 = a.ea1v ? ea_idx(opq[8:6], opq[11:9]) : EM_NONE;
 	l  = a.match && (!a.ea0v || (i0 != EM_NONE && a.ea0m[i0])) &&
 	     (!a.ea1v || (i1 != EM_NONE && a.ea1m[i1]));
-	if (pd.legal != l || (l && (pd.ent != a.ent || pd.i0 != i0 || pd.i1 != i1))) begin
+	if (pd.legal != l || (l && (pd.ent != a.ent || pd.i0 != i0 || pd.i1 != i1)) ||
+	    (|dec_sel(opq)) != dec_match(opq)) begin
 		$display("FAIL: predec: word %h: legal %b/%b entry %0d/%0d", opq, pd.legal, l, pd.ent, a.ent);
 		$finish;
 	end

@@ -16,10 +16,13 @@
 // an FPU immediate, an illegal word, a fault, the multi-part slow path:  //
 // one phase per part, operation word with fixed words and immediate,     //
 // then EA0's extension, then EA1's) is decided in one clock and taken in //
-// the next.  D1b builds the record from IR: the EAs and their PC-relative//
-// displacements, the routine, the predictions (Bcc by the static rule   //
-// and a history table, JSR/JMP absolute and PC-relative, RTS by a return //
-// stack), which redirect fetch unless the fetch BTB already took the     //
+// the next.  D1a also forms the EAs (but a one-pass instruction's        //
+// displacements, which D1b forms from the two words D1a selects) and the //
+// predictions' static terms.  D1b builds the record from IR: the PC-     //
+// relative displacements, the routine, the predictions (Bcc by the static//
+// rule and a history table read at IR's address, JSR/JMP absolute and   //
+// PC-relative, RTS by a return stack), which redirect fetch unless the  //
+// fetch BTB already took the                                              //
 // same branch (D1b checks every word the BTB flagged), the return stack  //
 // and the loop exit predictor.  A redirect drops the instruction D1a     //
 // took meanwhile.  Records go to D2 through a four-entry FIFO; D1a takes //
@@ -392,6 +395,7 @@ logic  [3:0] part_len;      // ... words consumed so far
 logic  [2:0] part_imml;     // ... EA0 immediate length
 logic [31:0] part_pc;       // ... its address
 logic  [5:0] part_rr;       // ... its EA register fields (opw[11:9], opw[2:0])
+logic        part_fg;       // ... an FPU general instruction (opw F200-F23F)
 // a decision for the head made the clock before (anything but the common
 // case): take r_use words; a record (r_go) or a part (r_part), then r_nph
 logic        r_v, r_go, r_part;
@@ -559,6 +563,8 @@ logic        ir_flt;        // a fault in the words taken
 logic [15:0] ir_w [5];      // the words at the head
 ea_t         ir_ea0, ir_ea1; // the EAs, formed in D1a (a part's: its own)
 logic        ir_epc;        // ... EA0's (a part's) displacement is the PC sum
+logic        ir_fimm;       // ... EA0 is an FPU instruction's immediate: its
+                            // displacement is its address (ir_pcb0)
 logic        ir_e0f, ir_e1f; // ... a one-pass instruction's displacement is
 logic [15:0] ir_e0 [2];     // formed in D1b from its EA's two words
 logic [15:0] ir_e1 [2];
@@ -575,12 +581,15 @@ logic [18:0] ir_fpkk;       // ... its first word's kind
 logic [31:0] ir_imm;
 logic  [7:0] ir_exc;        // exception vector (a fault's included)
 logic        ir_xany;       // ... it is one (ir_exc != 0)
+logic        ir_nr0;        // the prediction: the class's rule and the history
+logic        ir_nrb;        // ... Bcc: the history counter's (D1b reads it)
+logic        ir_lpb;        // ... a loop exit may overrule it
+logic        ir_rts;        // ... RTS (the return stack's count decides)
 logic [31:0] ir_faddr;      // a fault's address
 logic        ir_jtake;      // the routine's first jump is taken
 logic        ir_jsrk;       // JSR to a known target
 logic [31:0] ir_ntgt;       // the branch target (Bcc, DBcc, FBcc, FDBcc, JSR/JMP)
 logic        ir_dsign;      // the displacement's sign
-logic  [1:0] ir_bht;        // the history counter at its address
 logic  [7:0] ir_lph;        // loop table entries tagged with its address
 logic [31:0] ir_bt_tgt;     // the BTB's target for the first flagged word
 logic        ir_bt_end;     // the BTB flagged its last word only
@@ -594,7 +603,7 @@ logic        bw_we;
 logic  [7:0] bw_wa;
 logic  [1:0] bw_wd;
 ap68060_lutram #(.AW(8), .DW(2)) bht (
-	.clk(clk), .we(bw_we), .waddr(bw_wa), .wdata(bw_wd), .raddr(qpc[8:1]), .q(bht_q)
+	.clk(clk), .we(bw_we), .waddr(bw_wa), .wdata(bw_wd), .raddr(ir_pc[8:1]), .q(bht_q)
 );
 
 // loop exit predictor entries (D1b's), their tags compared here
@@ -672,6 +681,7 @@ always_ff @(posedge clk) begin
 		part_imml <= '0;
 		part_pc   <= '0;
 		part_rr   <= '0;
+		part_fg   <= 1'b0;
 		r_v       <= 1'b0;
 		r_go      <= 1'b0;
 		r_part    <= 1'b0;
@@ -695,6 +705,7 @@ always_ff @(posedge clk) begin
 					             (pd0.sz == SZ_L) ? 3'd2 : 3'd1;
 					part_pc   <= qpc;
 					part_rr   <= {win[0][11:9], win[0][2:0]};
+					part_fg   <= (win[0][15:6] == 10'b1111_0010_00);
 				end
 				else
 					part_len <= part_len + {1'b0, u_use};
@@ -804,6 +815,9 @@ always_ff @(posedge clk) begin
 			ir_ea1 <= (ph == PH_IDLE) ? e1 : ep;
 			ir_epc <= (ph == PH_IDLE) ? pc0 : ((ip == EM_PC16) || (ip == EM_PCX && !ep.bs));
 			ir_e0f <= (ph == PH_IDLE) && f0 && !pc0;
+			ir_fimm <= (ph == PH_IDLE) ? (pd0.legal && !(q_odd && qcnt == 4'd0) &&
+			                              pd0.cls == CL_FPU_GEN && e0.m == EM_IMM)
+			                           : (ph == PH_EA0 && ep.m == EM_IMM && part_fg);
 			ir_e1f <= (ph == PH_IDLE) && f1;
 			ir_e0[0] <= win[fb];
 			ir_e0[1] <= win[3'(fb + 3'd1)];
@@ -855,13 +869,28 @@ always_ff @(posedge clk) begin
 		end
 		ir_faddr <= f_addr;
 		ir_jtake <= a_jtake;
+		begin
+			// the prediction's terms (a legal one-part record's): the rule by
+			// class; D1b's: Bcc's history counter (read at IR's address), the
+			// loop exit's overrule, RTS by the return stack's count
+			logic ok, jj;
+			ok = pd0.legal && !(q_odd && qcnt == 4'd0);
+			jj = (pd0.cls == CL_JSR || pd0.cls == CL_JMP) && u_go && !u_part &&
+			     (pd0.i0 == EM_ABSW || pd0.i0 == EM_ABSL || pd0.i0 == EM_PC16);
+			ir_nr0 <= ok && ((pd0.cls == CL_BSR) || (pd0.cls == CL_BCC && opw[11:8] == 4'h0) || jj ||
+			                 (pd0.cls == CL_DBCC && a_dsign) ||
+			                 (pd0.cls == CL_FBCC && (opw[5:0] == 6'h0F || a_dsign)) ||
+			                 (pd0.cls == CL_FDBCC && a_dsign));
+			ir_nrb <= ok && (pd0.cls == CL_BCC) && opw[11:8] != 4'h0;
+			ir_lpb <= ok && a_dsign && ((pd0.cls == CL_BCC && opw[11:9] != 3'd0) || pd0.cls == CL_DBCC);
+			ir_rts <= ok && (pd0.cls == CL_RTS);
+		end
 		ir_jsrk  <= (pd0.cls == CL_JSR) && u_go && !u_part &&
 		            (pd0.i0 == EM_ABSW || pd0.i0 == EM_ABSL || pd0.i0 == EM_PC16);
 		ir_fpk   <= fpu_k(win[1], pd0.i0);
 		ir_fpkk  <= kind_fix(10'(fpu_k(win[1], pd0.i0)), 19'd0);
 		ir_ntgt  <= a_ntgt;
 		ir_dsign <= a_dsign;
-		ir_bht   <= bht_q;
 		ir_lph   <= lp_hit;
 		ir_bt_tgt <= bt_tgt;
 		ir_bt_end <= a_bt_end;
@@ -991,6 +1020,14 @@ end
 dinst_t      nrec;
 logic [31:0] ntarget;
 logic        teq;           // ntarget is the BTB's target
+logic        nr_ref, lpb_ref; // (simulation: the prediction by the class's case,
+logic        dbg_pred;       // and whether D1a's terms agree)
+// (the two targets' compares apart, kept: the target's select by the
+// class, D1a's ir_tsel, picks the outcome rather than the operand)
+(* keep *) wire teq_n;
+(* keep *) wire teq_r;
+assign teq_n = (ir_ntgt == ir_bt_tgt);
+assign teq_r = (ras_top == ir_bt_tgt);
 logic        nredir;
 wire         ir_lg = ir_pd.legal && !ir_odd;      // (an illegal word has no class)
 wire         rcall = (ir_ph == PH_IDLE) ? ir_lg && (ir_pd.cls == CL_BSR || ir_pd.cls == CL_JSR) : part_call;
@@ -1002,10 +1039,13 @@ always_comb begin
 	logic flt;
 	nrec    = '0;
 	ntarget = '0;
-	teq     = 1'b0;
+	teq     = (ir_tsel == 2'd2) ? teq_r : teq_n;   // (used with a prediction only)
 	nredir  = 1'b0;
 	lp_br   = 1'b0;
 	lp_ovr  = 1'b0;
+	nr_ref  = 1'b0;
+	lpb_ref = 1'b0;
+	dbg_pred = 1'b1;
 	flt     = ir_flt;
 
 	if (ir_ph != PH_IDLE) begin
@@ -1014,13 +1054,12 @@ always_comb begin
 		nrec = part;
 		e = (ir_ph == PH_EA0) ? ir_ea0 : ir_ea1;
 		if (ir_epc) e.bd = ir_pcs0;
-		if (ir_ph == PH_EA0) nrec.ea0 = e; else nrec.ea1 = e;
 		// an FPU immediate is read from the instruction stream by the
 		// microcode: its address follows the extension word (the
 		// operation word says FPU: the record's routine is past the
-		// first word D1 resolves)
-		if (ir_ph == PH_EA0 && nrec.ea0.m == EM_IMM && part.opw[15:6] == 10'b1111_0010_00)
-			nrec.ea0.bd = ir_pcb0;
+		// first word D1 resolves) -- D1a's flag
+		if (ir_fimm) e.bd = ir_pcb0;
+		if (ir_ph == PH_EA0) nrec.ea0 = e; else nrec.ea1 = e;
 		nrec.ilen = ir_len;
 		if (flt) begin
 			nrec.exc    = ir_exc;
@@ -1064,49 +1103,52 @@ always_comb begin
 		if (ir_pd.legal && !ir_odd) case (ir_pd.cls)
 			CL_BCC, CL_BSR: begin
 				ntarget  = ir_ntgt;
-				teq      = (ir_ntgt == ir_bt_tgt);
 				nrec.bst = ir_dsign;
-				nrec.bhc = ir_bht;
-				nredir   = (ir_pd.cls == CL_BSR) || (ir_w[0][11:8] == 4'h0) || (ir_dsign ^ ir_bht[1]);
-				lp_br    = (ir_pd.cls == CL_BCC) && (ir_w[0][11:9] != 3'd0) && ir_dsign;
-				lp_ovr   = lp_br && lp_exit;
-				if (lp_ovr) nredir = 1'b0;
+				nrec.bhc = bht_q;
+				nr_ref   = (ir_pd.cls == CL_BSR) || (ir_w[0][11:8] == 4'h0) || (ir_dsign ^ bht_q[1]);
+				lpb_ref  = (ir_pd.cls == CL_BCC) && (ir_w[0][11:9] != 3'd0) && ir_dsign;
+				if (lpb_ref && lp_exit) nr_ref = 1'b0;
 			end
 			CL_JSR, CL_JMP:
 				if (ir_jj) begin
 					ntarget = ir_ntgt;
-					teq     = (ir_ntgt == ir_bt_tgt);
-					nredir  = 1'b1;
+					nr_ref  = 1'b1;
 				end
 			CL_RTS:
 				if (ras_n != 4'd0) begin
 					ntarget = ras_top;
-					teq     = (ras_top == ir_bt_tgt);
-					nredir  = 1'b1;
+					nr_ref  = 1'b1;
 				end
 			CL_DBCC: begin
 				ntarget  = ir_ntgt;
-				teq      = (ir_ntgt == ir_bt_tgt);
 				nrec.bst = ir_dsign;
-				lp_br    = ir_dsign;
-				lp_ovr   = lp_br && lp_exit;
-				nredir   = ir_dsign && !lp_exit;
+				lpb_ref  = ir_dsign;
+				nr_ref   = ir_dsign && !lp_exit;
 			end
 			CL_FBCC: begin
 				ntarget = ir_ntgt;
-				teq     = (ir_ntgt == ir_bt_tgt);
-				nredir  = (ir_w[0][5:0] == 6'h0F) || ir_dsign;
+				nr_ref  = (ir_w[0][5:0] == 6'h0F) || ir_dsign;
 			end
 			CL_FDBCC: begin
 				ntarget = ir_ntgt;
-				teq     = (ir_ntgt == ir_bt_tgt);
-				nredir  = ir_dsign;
+				nr_ref  = ir_dsign;
 			end
 			default: ;
 		endcase
-		// (FPU_GEN: the operation word and the command word, b = 2)
-		if (fpg && nrec.ea0.m == EM_IMM && !ir_odd)
-			nrec.ea0.bd = ir_pcb0;
+		// the prediction from D1a's terms (the class's static rule, the
+		// history counter; whether a loop exit can overrule it) and the
+		// two D1b keeps: the loop exit, the return stack's count.  (The
+		// case above: the reference, for the simulation's check.)
+		nredir = ir_rts ? (ras_n != 4'd0)
+		                : ((ir_nr0 || (ir_nrb && (ir_dsign ^ bht_q[1]))) && !(ir_lpb && lp_exit));
+		lp_br  = ir_lpb;
+		lp_ovr = ir_lpb && lp_exit;
+		// synthesis translate_off
+		dbg_pred = (nredir == nr_ref) && (lp_br == lpb_ref);
+		// synthesis translate_on
+		// (FPU_GEN: the operation word and the command word, b = 2; D1a's
+		// flag)
+		if (ir_fimm) nrec.ea0.bd = ir_pcb0;
 		// (the target as the prediction's case picks it, by a select formed
 		// in D1a: off the class decode)
 		nrec.target = flt ? ir_faddr :
@@ -1565,6 +1607,11 @@ always_ff @(posedge clk)
 	if (nrst && !flush && !flush_q && !hold_redir && !d_redir_v &&
 	    q_flt != |(win_flt & 8'((9'd1 << qcnt) - 9'd1))) begin
 		$display("FAIL: decode: a fault flag past the queue's count");
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst && ir_v && ir_ph == PH_IDLE && !dbg_pred) begin
+		$display("FAIL: decode: the prediction from D1a's terms, the class's case's");
 		$finish;
 	end
 always_ff @(posedge clk)
