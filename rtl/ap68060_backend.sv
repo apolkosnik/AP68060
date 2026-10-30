@@ -261,8 +261,8 @@ logic [31:0] ag_uoh, ag_u2oh;      // AG's update registers
 logic [31:0] ex_doh;               // EX's destination
 logic [31:0] wb_uoh, wb_u2oh, wb_doh;
 logic [31:0] fwd [3], bwd [3];
-logic  [4:0] rra [5];
-logic [31:0] frd [5], brd [5], rrd [5];
+logic  [4:0] rra [7];
+logic [31:0] frd [7], brd [7], rrd [7];
 logic  [4:0] ccr_f, ccr_b;
 
 // special registers (architectural, written at WB)
@@ -423,13 +423,21 @@ wire [31:0] dc2_capv = dc2_u.a_sxw ? {{16{dm_ldata_al[15]}}, dm_ldata_al[15:0]} 
 
 assign ag_hold = ilk_q;
 
-ap68060_rf #(.NR(5)) rff (.clk(clk), .we(fwe), .wa(fwa), .woh(fwoh), .wd(fwd), .ra(rra), .rd(frd));
-ap68060_rf #(.NR(5), .NW(2)) rfb (.clk(clk), .we(bwe), .wa(bwa), .woh(bwoh), .wd(bwd), .ra(rra), .rd(brd));
+ap68060_rf #(.NR(7)) rff (.clk(clk), .we(fwe), .wa(fwa), .woh(fwoh), .wd(fwd), .ra(rra), .rd(frd));
+ap68060_rf #(.NR(7), .NW(2)) rfb (.clk(clk), .we(bwe), .wa(bwa), .woh(bwoh), .wd(bwd), .ra(rra), .rd(brd));
 // AG's base and index are read as the uop enters AG (ports 0/1 address
 // the incoming uop) and kept in registers, so AG's address adders, and the
 // data cache's set index after them, start from flip-flops
-assign rra[0] = sk_vr ? sk_u.base : in_u.base;   // (= ain_u's)
-assign rra[1] = sk_vr ? sk_u.idx  : in_u.idx;
+// (each source's own read port, the sequencer's 0/1 and the skid's 5/6,
+// so the reads start from flip-flops and the skid's select comes after)
+assign rra[0] = in_u.base;
+assign rra[1] = in_u.idx;
+assign rra[5] = sk_u.base;
+assign rra[6] = sk_u.idx;
+// AG's entering base and index from the file: front or back copy, the
+// skid's or the sequencer's (= ain_u's)
+wire [31:0] ain_fb = sk_vr ? (fv[sk_u.base] ? frd[5] : brd[5]) : (fv[in_u.base] ? frd[0] : brd[0]);
+wire [31:0] ain_fx = sk_vr ? (fv[sk_u.idx]  ? frd[6] : brd[6]) : (fv[in_u.idx]  ? frd[1] : brd[1]);
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && wb_commit && wb_dwe && wb_u.upd2_v) begin
@@ -445,7 +453,7 @@ always_ff @(posedge clk)
 assign rra[2] = ag_u.upd2_reg;
 assign rra[3] = ag_u.a_reg;
 assign rra[4] = ag_u.b_reg;
-always_comb for (int i = 0; i < 5; i++) rrd[i] = fv[rra[i]] ? frd[i] : brd[i];
+always_comb for (int i = 0; i < 7; i++) rrd[i] = fv[rra[i]] ? frd[i] : brd[i];
 
 logic [31:0] agb_q, agx_q;     // the base, and the index sign-extended
 wire  [31:0] ag_base = agb_q;
@@ -2663,12 +2671,10 @@ always_ff @(posedge clk) begin
 	x0 = fwe_ag[0] && fwa[0] == ain_u.idx;
 	b = ({32{ain_u.base_v && b1}}                  & fwd[1])  |
 	    ({32{ain_u.base_v && !b1 && b0}}           & fwd[0])  |
-	    ({32{ain_u.base_v && !b1 && !b0 &&  fv[rra[0]]}} & frd[0]) |
-	    ({32{ain_u.base_v && !b1 && !b0 && !fv[rra[0]]}} & brd[0]);
+	    ({32{ain_u.base_v && !b1 && !b0}} & ain_fb);
 	x = ({32{x1}}                  & ixf(fwd[1], ain_u))  |
 	    ({32{!x1 && x0}}           & ixf(fwd[0], ain_u))  |
-	    ({32{!x1 && !x0 &&  fv[rra[1]]}} & ixf(frd[1], ain_u)) |
-	    ({32{!x1 && !x0 && !fv[rra[1]]}} & ixf(brd[1], ain_u));
+	    ({32{!x1 && !x0}} & ixf(ain_fx, ain_u));
 	// the value staying: EX's result of last clock (exw_q), else its own
 	qb_o = exw_qv && exw_qreg == ag_u.base && !cbl;
 	qx_o = exw_qv && exw_qreg == ag_u.idx  && !cxl;
