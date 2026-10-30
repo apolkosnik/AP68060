@@ -57,7 +57,9 @@ module ap040_fpu
 	                               // pipeline (nice_mem: the interface forms
 	                               // it as it registers din)
 	input       [2:0] din_cls,     // with sel_x: din's class by src_fmt (din_class,
-	                               // formed outside as din is registered)
+	                               // formed outside from flags registered with din)
+	input       [1:0] din_nrm,     // with sel_x: din as a double [1] / a single [0]
+	                               // is a normal number (its integer bit)
 	output reg        done,
 	// the operation has passed operand classification: unimp/unsupp can no
 	// longer occur, only completion or an enabled arithmetic exception.
@@ -467,11 +469,19 @@ reg  [2:0] r_dcls;
 // number, clear for zero, a denormal, infinity and a NaN
 // (formed from din as the dispatch latches it: unp_m is a register; FINT's
 // rounded integer goes there too, for the normalizer's count)
+// a single's / double's image in din is a normal number
+function [1:0] din_nrm_of;
+	input [95:0] d;
+	begin
+		din_nrm_of = {(d[94:84] != 11'd0) && (d[94:84] != 11'h7FF),
+		              (d[94:87] != 8'd0) && (d[94:87] != 8'hFF)};
+	end
+endfunction
 function [63:0] unp_of;
 	input [95:0] d;
 	input  [2:0] f;
-	input  [2:0] c;      // din's class (din_class): a single's or double's
-	                     // integer bit is set for a normal number
+	input  [1:0] n;      // din as a double / a single is a normal number:
+	                     // the integer bit
 	reg   [31:0] im;
 	reg          hs, hd;
 	begin
@@ -480,8 +490,8 @@ function [63:0] unp_of;
 		im = (f == 3'd0) ? (d[95] ? (32'd0 - d[95:64]) : d[95:64]) :
 		     (f == 3'd4) ? {(d[95] ? (16'd0 - d[95:80]) : d[95:80]), 16'd0} :
 		                   {(d[95] ? (8'd0 - d[95:88]) : d[95:88]), 24'd0};
-		hs = (c == {1'b0, T_NUM});
-		hd = (c == {1'b0, T_NUM});
+		hs = n[0];
+		hd = n[1];
 		unp_of = (f == 3'd1) ? {hs, d[86:64], 40'd0} :
 		         (f == 3'd5) ? {hd, d[83:32], 11'd0} :
 		         (f == 3'd0 || f == 3'd4 || f == 3'd6) ? {im, 32'd0} : d[63:0];
@@ -1927,6 +1937,14 @@ function [2:0] din_class;
 endfunction
 
 // synthesis translate_off
+wire [1:0] din_nrm_own = din_nrm_of(din);
+always @(posedge clk)
+	if (nreset && sel_x && fst == F_IDLE && rq && op_class == 3'b010 &&
+	    (src_fmt == 3'd1 || src_fmt == 3'd5) && din_nrm[src_fmt[2]] != din_nrm_own[src_fmt[2]]) begin
+		$display("FAIL: the outside normal flags of the memory operand %b, its own %b", din_nrm,
+		         din_nrm_own);
+		$finish;
+	end
 always @(posedge clk)
 	if (nreset && sel_x && fst == F_IDLE && rq && op_class == 3'b010 && din_cls != din_class(din, src_fmt)) begin
 		$display("FAIL: the outside class of the memory operand %0d, its own %0d", din_cls,
@@ -2105,7 +2123,7 @@ always @(posedge clk) begin : fsm
 				r_icnt <= 7'd62 - fr_src_e[6:0];
 				n_wk = 1'b0;
 				r_din  <= din;
-				unp_m  <= unp_of(din, src_fmt, sel_x ? din_cls : din_class(din, src_fmt));
+				unp_m  <= unp_of(din, src_fmt, sel_x ? din_nrm : din_nrm_of(din));
 				r_lde  <= lde_of(din, src_fmt, sel_x ? din_cls : din_class(din, src_fmt));
 				r_dcls <= sel_x ? din_cls : din_class(din, src_fmt);
 				r_bin  <= bin_op(opmode);

@@ -176,6 +176,43 @@ function automatic logic [2:0] din_cls(input logic [95:0] d, input logic [2:0] f
 		default: din_cls = x_unsup(d[94:80], d[63:0]) ? 3'd4 : {1'b0, x_tag(d[94:80], d[63:0])};
 	endcase
 endfunction
+// The operand's class flags, formed from the operand words as they are
+// registered, with no format select in front of the compares: din_cls is
+// selected from them by the format the cycle after (dcls_of), and a single's
+// or double's integer bit (a normal number) is a flag of its own
+function automatic logic [14:0] dcf_of(input logic [31:0] a, input logic [31:0] b,
+                                       input logic [31:0] c);
+	dcf_of[0]  = (a == 32'd0);                         // long: zero
+	dcf_of[1]  = (a[15:0] == 16'd0);                   // word: zero
+	dcf_of[2]  = (a[7:0] == 8'd0);                     // byte: zero
+	dcf_of[3]  = (a[30:23] == 8'hFF);                  // single: exponent all ones
+	dcf_of[4]  = (a[30:23] == 8'd0);                   // ... zero
+	dcf_of[5]  = (a[22:0] != 23'd0);                   // ... a fraction
+	dcf_of[6]  = (a[30:20] == 11'h7FF);                // double: exponent all ones
+	dcf_of[7]  = (a[30:20] == 11'd0);                  // ... zero
+	dcf_of[8]  = (a[19:0] != 20'd0) || (b != 32'd0);   // ... a fraction
+	dcf_of[9]  = (a[30:16] == 15'h7FFF);               // extended: exponent all ones
+	dcf_of[10] = (a[30:16] == 15'd0);                  // ... zero
+	dcf_of[11] = b[31];                                // ... the integer bit
+	dcf_of[12] = (b[30:0] != 31'd0) || (c != 32'd0);   // ... a fraction
+	dcf_of[13] = (a[30:23] != 8'hFF) && (a[30:23] != 8'd0);     // a normal single
+	dcf_of[14] = (a[30:20] != 11'h7FF) && (a[30:20] != 11'd0);  // a normal double
+endfunction
+// din_cls (din_of's image by the format) from the flags
+function automatic logic [2:0] dcls_of(input logic [14:0] q, input logic [2:0] f);
+	case (f)
+		3'd0: dcls_of = q[0] ? 3'd1 : 3'd0;
+		3'd4: dcls_of = q[1] ? 3'd1 : 3'd0;
+		3'd6: dcls_of = q[2] ? 3'd1 : 3'd0;
+		3'd1: dcls_of = q[3] ? (q[5] ? 3'd3 : 3'd2) : q[4] ? (q[5] ? 3'd4 : 3'd1) : 3'd0;
+		3'd5: dcls_of = q[6] ? (q[8] ? 3'd3 : 3'd2) : q[7] ? (q[8] ? 3'd4 : 3'd1) : 3'd0;
+		// x_unsup: no integer bit, a fraction, not all-ones; x_tag
+		3'd2, 3'd3: dcls_of = (!q[11] && q[12] && !q[9]) ? 3'd4 :
+		                      q[9] ? (q[12] ? 3'd3 : 3'd2) : (q[11] || q[12]) ? 3'd0 : 3'd1;
+		// (din_of's image {a, 64'd0}: no significand)
+		default: dcls_of = q[9] ? 3'd2 : 3'd1;
+	endcase
+endfunction
 // WinUAE fault_if_nonexisting_opmode: 1 = F-line (format $0, no side
 // effects), 2 = opmodes $78-$7F, which the 68040 reports as illegal
 function automatic logic [1:0] opmode_class(input logic [6:0] op);
@@ -262,6 +299,8 @@ logic  [6:0] f_opm;
 logic [95:0] f_din;
 logic        f_dnice;          // f_din is an ordinary operand (the FPU pipeline)
 logic  [2:0] f_dcls;           // ... its class by the format (the FPU's din_class)
+logic [14:0] f_dcf;            // ... the class flags of its words (dcf_of)
+assign f_dcls = dcls_of(f_dcf, f_fmt);
 logic  [1:0] f_crsel;
 logic [31:0] f_crwd, f_iapc;
 logic        f_done, f_accepted, f_unimp, f_unsupp, f_excreq, f_used, f_wbok;
@@ -298,7 +337,8 @@ ap040_fpu #(.PIPE(FPU_PIPE)) fpu (
 	.clk(clk), .nreset(nreset), .ce(1'b1),
 	.req(f_req), .op_class(f_class), .opmode(f_opm), .wb_ok(f_wbok),
 	.src_fmt(f_fmt), .src_r(f_srcr), .dst_r(f_dstr),
-	.din(f_din), .din_nice(f_dnice), .din_cls(f_dcls), .done(f_done), .accepted(f_accepted),
+	.din(f_din), .din_nice(f_dnice), .din_cls(f_dcls), .din_nrm(f_dcf[14:13]),
+	.done(f_done), .accepted(f_accepted),
 	.known(f_known), .end_ok(f_endok),
 	.unimp(f_unimp), .unsupp(f_unsupp),
 	.exc_req(f_excreq), .exc_vec(f_excvec), .dout(f_dout),
@@ -953,6 +993,41 @@ always_ff @(posedge clk)
 	end
 // synthesis translate_on
 
+// The pending exception vector's write (the sequencer below, without its
+// act): the later assignment of a case wins, as in the sequencer
+logic       pv_we;
+logic [7:0] pv_d;
+always_comb begin
+	pv_we = 1'b0;
+	pv_d  = pend_vec;
+	case (sub)
+		FC_CHK: if (fuse && go) begin
+			if (f_unsupp) begin pv_we = 1'b1; pv_d = VEC_UNSUP; end
+			if (f_excreq) begin pv_we = 1'b1; pv_d = f_excvec; end
+		end
+		FC_DISP: if (go) begin
+			if (ocl_l == 3'b011) begin
+				if (f_unimp) ;
+				else if (f_unsupp) begin pv_we = 1'b1; pv_d = VEC_UNSUP; end
+				else if (f_done && f_excreq) begin pv_we = 1'b1; pv_d = f_excvec; end
+			end
+			else begin
+				if (f_unsupp) begin pv_we = 1'b1; pv_d = VEC_UNSUP; end
+				if (f_excreq) begin pv_we = 1'b1; pv_d = f_excvec; end
+			end
+		end
+		FC_COND, FC_DBCC:
+			if (adv && is_bcc_l && opw_q[4] && f_cc[0] && f_bsun_en) begin
+				pv_we = 1'b1; pv_d = VEC_BSUN;
+			end
+		FC_END:
+			if (adv && is_frest_l && rs_kind != 2'd0 && rs_kind != 2'd1) begin
+				pv_we = 1'b1; pv_d = (rs_v == 3'd7) ? VEC_UNSUP : {5'b00110, rs_v};
+			end
+		default: ;
+	endcase
+end
+
 always_ff @(posedge clk) begin : seq
 	logic pn;                  // pend's next value
 	if (!nreset) begin
@@ -1009,8 +1084,8 @@ always_ff @(posedge clk) begin : seq
 			else if (fuse && go) begin
 				// the operation's outcome: a datatype trap or an arithmetic
 				// exception puts the FPU in the EXCP state
-				if (f_unsupp) begin pn = 1'b1; pend_vec <= VEC_UNSUP; end
-				if (f_excreq) begin pn = 1'b1; pend_vec <= f_excvec; end
+				if (f_unsupp) pn = 1'b1;
+				if (f_excreq) pn = 1'b1;
 				if (adv) begin
 					go <= 1'b0;
 					if (f_accepted && !f_done && !f_excreq) bg <= 1'b1;
@@ -1069,7 +1144,7 @@ always_ff @(posedge clk) begin : seq
 					if (f_unimp || f_unsupp || f_done) done_q <= 1'b1;
 					if (f_unimp) begin
 						sx_v <= 1'b1; sx_vec <= VEC_FLINE; sx_fmt <= 4'd2;
-						sx_addr <= eav ? eaa : 32'd0; sx_kill <= 1'b1; sx_commit <= 1'b0;
+						sx_kill <= 1'b1; sx_commit <= 1'b0;
 					end
 					else if (f_unsupp) begin
 						// a denormal or unnormal register: nothing stored.  The
@@ -1078,21 +1153,20 @@ always_ff @(posedge clk) begin : seq
 						// stands; for X the EA of -(An) is An + 8 and An stays
 						// (_calc_ea_fout)
 						sx_v <= 1'b1; sx_vec <= VEC_UNSUP; sx_fmt <= 4'd3;
-						sx_addr <= ea_dn_l ? 32'd0 : (eaa + ((ea_pd_l && fmt_l == 3'd2) ? 32'd8 : 32'd0));
 						sx_kill <= 1'b1; sx_commit <= (fmt_l != 3'd2);
-						pn = 1'b1; pend_vec <= VEC_UNSUP;
+						pn = 1'b1;
 					end
 					else if (f_done && f_excreq) begin
 						// the destination is written as if the trap were
 						// disabled, then the post-instruction exception
 						sx_v <= 1'b1; sx_vec <= f_excvec; sx_fmt <= 4'd3;
-						sx_addr <= ea_dn_l ? 32'd0 : eaa; sx_kill <= 1'b0; sx_commit <= 1'b1;
-						pn = 1'b1; pend_vec <= f_excvec;
+						sx_kill <= 1'b0; sx_commit <= 1'b1;
+						pn = 1'b1;
 					end
 				end
 				else begin
-					if (f_unsupp) begin pn = 1'b1; pend_vec <= VEC_UNSUP; end
-					if (f_excreq) begin pn = 1'b1; pend_vec <= f_excvec; end
+					if (f_unsupp) pn = 1'b1;
+					if (f_excreq) pn = 1'b1;
 					if (adv && f_accepted && !f_done && !f_excreq) bg <= 1'b1;
 				end
 			end
@@ -1110,10 +1184,7 @@ always_ff @(posedge clk) begin : seq
 					// selected this cycle, registered the next (fmr_q)
 					mvr_wait <= 1'b1;
 				end
-				else if (!mvr_ok) begin
-					fmr_q  <= f_fmrd;
-					mvr_ok <= 1'b1;
-				end
+				else if (!mvr_ok) mvr_ok <= 1'b1;   // (fmr_q: below)
 				else if (adv) begin
 					mvr_wait <= 1'b0;
 					mvr_ok   <= 1'b0;
@@ -1129,7 +1200,7 @@ always_ff @(posedge clk) begin : seq
 				// BSUN is the EXCP state (taken again until FSAVE)
 				if (opw_q[4] && f_cc[0]) begin
 					f_bsun <= 1'b1;
-					if (f_bsun_en) begin pn = 1'b1; pend_vec <= VEC_BSUN; end
+					if (f_bsun_en) pn = 1'b1;
 				end
 			end
 			FC_END: if (adv) begin
@@ -1143,7 +1214,6 @@ always_ff @(posedge clk) begin : seq
 						// EXCP: its exception, for the next FPU instruction
 						f_rest_idle <= 1'b1;
 						pn     = 1'b1;
-						pend_vec <= (rs_v == 3'd7) ? VEC_UNSUP : {5'b00110, rs_v};
 					end
 				endcase
 			end
@@ -1159,6 +1229,21 @@ always_ff @(posedge clk) begin : seq
 		if (kill) begin
 			go <= 1'b0; mvr_wait <= 1'b0; mvr_ok <= 1'b0; crr_wait <= 1'b0;
 		end
+		// the pending exception's vector, written with act last (pv_we,
+		// pv_d: the same decisions without it)
+		if (act && pv_we) pend_vec <= pv_d;
+		// MVR's register image: follows the read port until it is taken
+		// (mvr_ok; the same cycle's read as the case above would take)
+		if (!mvr_ok) fmr_q <= f_fmrd;
+		// The store exception's frame address (the FPU's outcome selects
+		// the case, the instruction's registered EA gives the values):
+		// formed every cycle until the exception is recorded (sx_v, which
+		// every CHK clears), so the capture's decision is not in front of
+		// its flip-flops; it is read only with sx_v (FC_END)
+		if (!sx_v)
+			sx_addr <= f_unimp ? (eav ? eaa : 32'd0) :
+			           f_unsupp ? (ea_dn_l ? 32'd0 : (eaa + ((ea_pd_l && fmt_l == 3'd2) ? 32'd8 : 32'd0))) :
+			           (ea_dn_l ? 32'd0 : eaa);
 		pend <= pn;
 		// a fused CHK may dispatch: no pending exception, no fault in its
 		// words (the hold's flip-flop, from the next values)
@@ -1179,7 +1264,7 @@ always_ff @(posedge clk) begin : dat
 		opw_q <= '0; ext_q <= '0; fsr_q <= 1'b0; lst_q <= '0; st_q <= 1'b0;
 		q_bcc <= 1'b0; q_fdbcc <= 1'b0; q_fsccm <= 1'b0; q_dsrc <= '0;
 		eaa <= '0; eav <= 1'b0;
-		f_din <= '0; f_dnice <= 1'b0; f_dcls <= '0; f_iapc <= '0; f_fmsel <= '0;
+		f_din <= '0; f_dnice <= 1'b0; f_dcf <= '0; f_iapc <= '0; f_fmsel <= '0;
 		f_crsel <= '0; f_crwd <= '0; get_q <= '0;
 		list <= '0; mv_slots <= '0; mv_lsb <= 1'b0; mv_rev <= 1'b0; mv_st <= 1'b0; mv_m1 <= 1'b0;
 		sv_kind <= '0; sv_v <= '0; rs_kind <= '0; rs_v <= '0; rs_w0 <= '0; rs_w1 <= '0; f_rwd <= '0;
@@ -1211,7 +1296,7 @@ always_ff @(posedge clk) begin : dat
 			if (!go) begin
 				f_din   <= din_of(fmt_l, av, bv, latch);
 				f_dnice <= nice_mem(din_of(fmt_l, av, bv, latch), fmt_l);
-				f_dcls  <= din_cls(din_of(fmt_l, av, bv, latch), fmt_l);
+				f_dcf   <= dcf_of(av, bv, latch);
 			end
 			// a store's result, as its outcome is known
 			else if (st_q && (f_unimp || f_unsupp || f_done)) get_q <= f_dout;
