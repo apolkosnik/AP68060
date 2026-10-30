@@ -14,6 +14,17 @@
 //     flagged upd2 (merged when both EAs use the same register), so an     //
 //     instruction that faults on its second access restarts cleanly        //
 //   * the back end's exception entry starts an exception routine           //
+//                                                                          //
+// Two stages:                                                              //
+//   D2a  the microcode address (the ROM's address register).  The next    //
+//        address comes from registers only: every word carries the kind   //
+//        (last, jump, target) of the word after it and of its jump target,//
+//        so the kind of the word being read is a register (a_k) and the   //
+//        ROM's output only feeds registers.  A jump word is resolved here //
+//        (an unconditional one at once, a conditional one a clock later). //
+//   D2b  the uop, from the word and its record in registers.  A word that //
+//        repeats (pointer load, MOVEM) holds D2a; whether the word will   //
+//        repeat is itself a register (b_stay_q), formed a clock ahead.    //
 //--------------------------------------------------------------------------//
 
 module ap68060_useq
@@ -24,11 +35,10 @@ module ap68060_useq
 	input  logic        flush,
 
 	// record FIFO from D1
-	input  logic  [1:0] rq_n,
+	input  logic  [2:0] rq_n,
 	input  dinst_t      rq0,
 	input  dinst_t      rq1,
 	output logic        rq_pop,
-	output logic        rq_pop_e,   // an early form: implies rq_pop (D1's room)
 
 	input  logic        smode,
 
@@ -42,15 +52,38 @@ module ap68060_useq
 	input  logic        uq_pop      // the back end takes uq0 this cycle
 );
 
-
+//--------------------------------------------------------------------------
+// D2a state: the word being read
+//--------------------------------------------------------------------------
+logic  [9:0] upc;               // its address (the ROM's address register's copy)
+logic  [9:0] upc1;              // ... plus one
+logic        a_v;               // it belongs to the current instruction
+ukind_t      a_k;               // its kind
+logic        a_exc;             // it is an exception routine's
+logic        a_cjv, a_cjt;      // a conditional jump's condition, evaluated
+uword_t      ur;                // the word (the ROM's output)
 
 //--------------------------------------------------------------------------
-// state
+// D2b state: the word a uop is built from
 //--------------------------------------------------------------------------
-logic  [9:0] upc;               // address of uw_q
-uword_t      uw_q;              // microcode word at upc (the ROM's output)
-logic        uw_v;              // uw_q is valid for the current instruction
-logic        exc_mode;          // running an exception routine
+logic        b_v;
+uword_t      ub;                // the word
+dinst_t      rb;                // its record ('0 for an exception routine)
+logic        b_exr;             // an exception routine's
+logic        b_stay_q;          // the word repeats after this clock's uop
+// per word, formed in D2a: the pointer-load candidates (the EA the uop
+// accesses is EA0 / EA1 and memory indirect), and the MOVEM terms
+logic        b_pc0, b_pc1;
+logic        b_base_in, b_fb_in, b_fx_in, b_e1pc1;
+// ... the uop's memory EA (the first memory operand, or its AG mode's),
+// whether it computes an address, its access; an explicit AG mode's
+// displacement; the mask's lowest bit for MOVEM's first transfer
+logic        b_mev, b_me1, b_agin;
+ea_t         b_me;
+logic  [1:0] b_mem;
+logic [31:0] b_dsv;
+logic [15:0] b_low1;
+logic  [3:0] b_bi1;
 logic        first;
 logic        ind0, ind1;        // pointer of EA0 / EA1 already loaded
 logic        def_v;             // a deferred source update is pending
@@ -60,25 +93,38 @@ logic  [4:0] ssp;
 // MOVEM loop
 logic        mv_act;            // the loop has started for this instruction
 logic [15:0] mv_mask;           // registers still to transfer
+logic        mv_is0, mv_pc1;    // ... none / at most one (formed with it)
+logic [15:0] mv_low;            // ... its lowest bit, one-hot
+logic  [3:0] mv_bi;             // ... and its number
 logic [31:0] mv_off;            // address offset of the next transfer
 logic  [7:0] mv_cnt;            // bytes transferred so far
 logic        mv_t11;            // the address is in T11 (base register in the list)
 logic  [1:0] mv_fix;            // fix-up uops emitted after the last transfer
 
-// the instruction being sequenced: the D1 FIFO head, or nothing for an
-// exception routine
+// the instruction a uop is built for
 dinst_t      src;
-always_comb src = exc_mode ? '0 : rq0;
+assign src = rb;
 logic        src_first;
 assign src_first = first;
 
 uword_t      uw;
-assign uw = uw_q;
+assign uw = ub;
 
 // uop FIFO
 uop_t        uq1;
 wire         room_out = (uq_n != 2'd2);
 
+// at most one bit set
+function automatic logic pc1(input logic [15:0] m);
+	pc1 = ((m & (m - 16'd1)) == 16'd0);
+endfunction
+// the lowest set bit's number
+function automatic logic [3:0] enc16(input logic [15:0] m);
+	enc16 = 4'd0;
+	for (int i = 15; i >= 0; i--) if (m[i]) enc16 = 4'(i);
+endfunction
+
+logic        n_ptr_p;          // the pointer load (from the D2a candidates)
 //--------------------------------------------------------------------------
 // register naming
 //--------------------------------------------------------------------------
@@ -343,7 +389,7 @@ always_comb begin
 	nu.pc     = src.pc;
 	nu.ilen   = src.ilen;
 	nu.ras    = src.ras;
-	nu.exr     = exc_mode;
+	nu.exr    = b_exr;
 	nu.first  = src_first;
 	nu.last   = uw.last;
 	nu.exc    = (src.exc != 8'd0) ? src.exc : 8'd0;
@@ -357,27 +403,16 @@ always_comb begin
 	//----------------------------------------------------------------------
 	// memory access and address generation
 	//----------------------------------------------------------------------
-	me_v   = oa.mem || ob.mem || od.mem;
-	me_ea1 = oa.mem ? oa.ea1 : ob.mem ? ob.ea1 : od.ea1;
-	me     = me_ea1 ? src.ea1 : src.ea0;
-	if (uw.ag == AGM_EA0 || uw.ag == AGM_LEA0 || uw.ag == AGM_FEA) begin me = src.ea0; me_ea1 = 1'b0; end
-	if (uw.ag == AGM_EA1) begin me = src.ea1; me_ea1 = 1'b1; end
+	// (the uop's memory EA, its access and whether it computes an
+	// address: formed in D2a from the word and the record, b_me*)
+	me_v   = b_mev;
+	me_ea1 = b_me1;
+	me     = b_me;
 	me_sp  = (me.r == 3'd7);
 	amt    = size_bytes(msz, me_sp && (me.m == EM_AIP || me.m == EM_APD));
+	nu.mem = b_mem;
 
-	if (uw.mem != 2'd0)
-		nu.mem = uw.mem;
-	else if (uw.a == S_LD || uw.b == S_LD)
-		nu.mem = M_LD;
-	else if (me_v) begin
-		if ((ob.mem || oa.mem) && od.mem) nu.mem = M_RMW;
-		else if (od.mem)                  nu.mem = M_ST;
-		else                              nu.mem = M_LD;
-	end
-
-
-	if (me_v || uw.ag == AGM_EA0 || uw.ag == AGM_EA1 || uw.ag == AGM_LEA0 ||
-	    (uw.ag == AGM_FEA && src.ea0.m != EM_IMM)) begin
+	if (b_agin) begin
 		logic [4:0] bre;
 		logic       mi_stage1;
 		nu.ag = 1'b1;
@@ -505,15 +540,7 @@ always_comb begin
 			S_SSP: rw = ssp;
 			default: rw = 5'(uw.agw - 6'd25);
 		endcase
-		case (uw.dsel)
-			DS_IMM:    dsv = src.imm;
-			DS_NIMM:   dsv = -((src.sz == SZ_W) ? {{16{src.ea0.bd[15]}}, src.ea0.bd[15:0]} : src.ea0.bd);
-			DS_QUICK:  dsv = q;
-			DS_NQUICK: dsv = neg5(q[4:0]);      // q: 1..8
-			DS_IMMC:   dsv = src.imm + {{16{uw.cval[15]}}, uw.cval};
-			DS_SZB:    dsv = {27'd0, size_bytes(src.sz, 1'b0)};
-			default:   dsv = {{16{uw.cval[15]}}, uw.cval};
-		endcase
+		dsv = b_dsv;                    // (D2a's: its sums and negations)
 		case (uw.ag)
 			AGM_PUSH: begin
 				nu.ag = 1'b1; nu.base_v = 1'b1; nu.base = sp_reg;
@@ -615,15 +642,14 @@ always_comb begin
 		m  = mv_act ? mv_mask : src.ext1;
 		pd = (src.ea0.m == EM_APD);
 		pi = (src.ea0.m == EM_AIP);
-		bi = 4'd0;
-		for (int i = 15; i >= 0; i--) if (m[i]) bi = 4'(i);
+		// the mask's lowest set bit, one-hot and its number, kept with the
+		// mask (the first transfer's formed in D2a): no encoder here
+		bi = mv_act ? mv_bi : b_bi1;
 		rn = pd ? (4'd15 - bi) : bi;
 		r  = rn[3] ? areg(rn[2:0], sp_reg) : dreg(rn[2:0]);
-		// (the lowest set bit cleared: m & ~low, no encoder on the way to
-		// the last-transfer test, which pops the decoder's record)
-		low   = m & (~m + 16'd1);
+		low   = mv_act ? mv_low : b_low1;
 		n_mv_rest = m & ~low;
-		lastx = (n_mv_rest == 16'd0);
+		lastx = mv_act ? mv_pc1 : b_e1pc1;
 		sb = (src.sz == SZ_L) ? 3'd4 : 3'd2;
 		an = areg(src.ea0.r, sp_reg);
 		// whether this transfer's register is An or the index register,
@@ -758,8 +784,9 @@ always_comb begin
 		nu.dma  = def_amt;
 	end
 
-	// a pointer load replaces the uop this cycle
-	if (n_ptr) begin
+	// a pointer load replaces the uop this cycle (the condition from the
+	// candidates D2a formed: the EA selection is not on its path)
+	if (n_ptr_p) begin
 		uop_t p;
 		p = '0;
 		p.pc = nu.pc; p.ilen = nu.ilen; p.exr = nu.exr; p.first = nu.first; p.last = 1'b0;
@@ -777,78 +804,263 @@ always_comb begin
 		n_def_set = 1'b0;
 	end
 end
+//--------------------------------------------------------------------------
+// D2b sequencing.  Every word in D2b makes a uop when the uop FIFO has
+// room; a word that repeats (pointer load, MOVEM) stays.
+//--------------------------------------------------------------------------
+wire b_step = b_v && room_out && !flush && !exc_go;
+wire emit   = b_step;
+assign n_ptr_p = (b_pc0 && !ind0) || (b_pc1 && !ind1);
+// (the combinational form, checked against b_stay_q below)
+wire stay   = n_ptr || n_mv_pre || (uw.loop && !nu.last);
+wire done   = emit && !b_stay_q && uw.last;                 // instruction ends
+// D2b takes a word from D2a this clock (registers only)
+wire b_free = !b_v || (b_step && !b_stay_q);
+
+// Whether a word repeats, from its per-word terms and the state its next
+// uop sees: a pointer load first (its EA's pointer not loaded yet); MOVEM:
+// the T11 copy, then a transfer per register, then the fix-ups
+function automatic logic stay_fn(input logic loop, input logic c0, input logic c1,
+                                 input logic i0, input logic i1, input logic base_in,
+                                 input logic fb_in, input logic fx_in, input logic act,
+                                 input logic is0, input logic mpc1, input logic t11,
+                                 input logic [1:0] fix, input logic e1pc1);
+	logic fixp, pre, last;
+	fixp = act && is0;
+	pre  = !fixp && base_in && !t11;
+	last = fixp ? !(fb_in && fix == 2'd0 && fx_in) : ((act ? mpc1 : e1pc1) && !fb_in && !fx_in);
+	stay_fn = (c0 && !i0) || (c1 && !i1) || (loop && (pre || !last));
+endfunction
 
 //--------------------------------------------------------------------------
-// sequencing.  uw_q is read one cycle ahead: the next address is chosen
-// from the current word and the records, and the ROM output registered.
+// D2a: the per-word terms D2b keeps, from the ROM's output and the record
 //--------------------------------------------------------------------------
-wire step = uw_v && room_out && !flush && !exc_go;
-wire emit = step && !n_jump;
-wire stay = n_ptr || n_mv_pre || (uw.loop && !nu.last);   // same word again
-wire done = emit && !stay && uw.last;                       // instruction ends
+dinst_t as;                      // D2a's record
+assign as = a_exc ? '0 : rq0;
 
-assign rq_pop = done && !exc_mode;
-// The pop from the word's own bits and the record's EA modes, not the uop
-// built from them (D1's room, a timing path): a plain last word -- no
-// jump, no MOVEM loop -- of an instruction with no memory-indirect EA (no
-// pointer load) ends it whenever it steps.  It implies rq_pop; the rare
-// pop it misses only costs D1 a clock.
-assign rq_pop_e = step && !exc_mode && uw.last && (uw.jc == JC_NEVER) && !uw.loop &&
-                  (rq0.ea0.mi == 2'd0) && (rq0.ea1.mi == 2'd0);
-// synthesis translate_off
-always_ff @(posedge clk)
-	if (rq_pop_e && !rq_pop) begin
-		$display("FAIL: useq: the early pop without the pop");
-		$finish;
+function automatic logic omem(input logic [5:0] s, input dinst_t r, output logic e1);
+	e1   = (s == S_EA1);
+	omem = (s == S_EA0 && !(r.ea0.m == EM_DN || r.ea0.m == EM_AN || r.ea0.m == EM_IMM)) ||
+	       (s == S_EA1 && !(r.ea1.m == EM_DN || r.ea1.m == EM_AN || r.ea1.m == EM_IMM));
+endfunction
+
+logic a_pc0, a_pc1, a_base_in, a_fb_in, a_fx_in, a_e1pc1;
+logic        a_mev, a_me1, a_agin;
+ea_t         a_me;
+logic  [1:0] a_mem;
+logic [31:0] a_dsv;
+logic [15:0] a_low1;
+logic  [3:0] a_bi1;
+always_comb begin
+	logic ma, mb, md, ea, eb, ed, mv, e1, agin, c;
+	logic [31:0] q;
+	logic [3:0] m;
+	logic [1:0] mi;
+	logic [4:0] spr, an, xreg;
+	logic pdm, pim;
+	// the uop's memory EA (as the build below selects it)
+	ma = omem(ur.a, as, ea);
+	mb = omem(ur.b, as, eb);
+	md = omem(ur.d, as, ed);
+	mv = ma || mb || md;
+	e1 = ma ? ea : mb ? eb : ed;
+	if (ur.ag == AGM_EA0 || ur.ag == AGM_LEA0 || ur.ag == AGM_FEA) e1 = 1'b0;
+	if (ur.ag == AGM_EA1) e1 = 1'b1;
+	agin = mv || ur.ag == AGM_EA0 || ur.ag == AGM_EA1 || ur.ag == AGM_LEA0 ||
+	       (ur.ag == AGM_FEA && as.ea0.m != EM_IMM);
+	a_mev  = mv;
+	a_me1  = e1;
+	a_agin = agin;
+	a_me   = e1 ? as.ea1 : as.ea0;
+	if (ur.mem != 2'd0)
+		a_mem = ur.mem;
+	else if (ur.a == S_LD || ur.b == S_LD)
+		a_mem = M_LD;
+	else if (mv) begin
+		if ((mb || ma) && md) a_mem = M_RMW;
+		else if (md)          a_mem = M_ST;
+		else                  a_mem = M_LD;
 	end
-// synthesis translate_on
+	else a_mem = M_NONE;
+	// an explicit AG mode's displacement
+	q = (as.opw[11:9] == 3'd0) ? 32'd8 : {29'd0, as.opw[11:9]};
+	case (ur.dsel)
+		DS_IMM:    a_dsv = as.imm;
+		DS_NIMM:   a_dsv = -((as.sz == SZ_W) ? {{16{as.ea0.bd[15]}}, as.ea0.bd[15:0]} : as.ea0.bd);
+		DS_QUICK:  a_dsv = q;
+		DS_NQUICK: a_dsv = neg5(q[4:0]);      // q: 1..8
+		DS_IMMC:   a_dsv = as.imm + {{16{ur.cval[15]}}, ur.cval};
+		DS_SZB:    a_dsv = {27'd0, size_bytes(as.sz, 1'b0)};
+		default:   a_dsv = {{16{ur.cval[15]}}, ur.cval};
+	endcase
+	// MOVEM's first transfer: the mask's lowest bit
+	a_low1 = as.ext1 & (~as.ext1 + 16'd1);
+	a_bi1  = 4'd0;
+	for (int i = 15; i >= 0; i--) if (as.ext1[i]) a_bi1 = 4'(i);
+	m  = e1 ? as.ea1.m : as.ea0.m;
+	mi = e1 ? as.ea1.mi : as.ea0.mi;
+	c  = agin && (m == EM_AX || m == EM_PCX) && mi != 2'd0;
+	a_pc0 = c && !e1;
+	a_pc1 = c && e1;
+	// MOVEM: a base or index register in a load list (see the loop below)
+	spr = !smode ? R_USP : R_ISP;
+	pdm = (as.ea0.m == EM_APD);
+	pim = (as.ea0.m == EM_AIP);
+	an  = areg(as.ea0.r, spr);
+	xreg = as.ea0.xa ? areg(as.ea0.xr, spr) : dreg(as.ea0.xr);
+	a_fb_in = (ur.d == S_MVR) && !pdm && !pim &&
+	          (as.ea0.m == EM_AI || as.ea0.m == EM_AD16 || (as.ea0.m == EM_AX && !as.ea0.bs)) &&
+	          as.ext1[{1'b1, as.ea0.r}];
+	a_fx_in = (ur.d == S_MVR) && (as.ea0.m == EM_AX || as.ea0.m == EM_PCX) &&
+	          !as.ea0.is && as.ext1[{as.ea0.xa, as.ea0.xr}] && !(a_fb_in && xreg == an);
+	a_base_in = a_fb_in || a_fx_in || ((ur.d == S_MVR) && pim && as.ext1[{1'b1, as.ea0.r}]);
+	a_e1pc1 = pc1(as.ext1);
+end
 
-logic [9:0] na;          // next microcode address
-logic       nv;
+//--------------------------------------------------------------------------
+// D2a sequencing.  The word at upc is passed to D2b when D2b is free; a
+// jump word is resolved here instead (no uop).  Its record is popped as
+// its last word passes.
+//--------------------------------------------------------------------------
+wire a_jmp  = a_k.jmp;
+wire pass   = a_v && !a_jmp && b_free && !flush && !exc_go;
+assign rq_pop   = pass && a_k.last && !a_exc;
+
+// a conditional jump's condition, on the record (a clock: a_cjv)
+function automatic logic jc_eval(input logic [5:0] jc, input dinst_t s, input logic sm);
+	case (jc)
+		JC_ALWAYS:   jc_eval = 1'b1;
+		JC_EXT10:    jc_eval = s.ext1[10];
+		JC_EXT11:    jc_eval = s.ext1[11];
+		JC_EA0_MEM:  jc_eval = is_mem(s.ea0.m);
+		JC_EA0_DN:   jc_eval = (s.ea0.m == EM_DN);
+		JC_EA0_IMM:  jc_eval = (s.ea0.m == EM_IMM);
+		JC_SZ_L:     jc_eval = (s.sz == SZ_L);
+		JC_AY7:      jc_eval = (s.opw[2:0] == 3'd7);
+		JC_SUPER:    jc_eval = sm;
+		JC_MASK0:    jc_eval = (s.ext1 == 16'd0);
+		JC_X1A:      jc_eval = s.ext1[15];
+		JC_SZ_B:     jc_eval = (s.sz == SZ_B);
+		JC_EA0_AN:   jc_eval = (s.ea0.m == EM_AN);
+		JC_EA0_APD:  jc_eval = (s.ea0.m == EM_APD);
+		JC_EA0_AIP:  jc_eval = (s.ea0.m == EM_AIP);
+		JC_EXT13:    jc_eval = s.ext1[13];
+		JC_FP_OC0:   jc_eval = (s.ext1[15:13] == 3'b000);
+		JC_FP_OC2:   jc_eval = (s.ext1[15:13] == 3'b010);
+		JC_FP_OC3:   jc_eval = (s.ext1[15:13] == 3'b011);
+		JC_FP_OC45:  jc_eval = (s.ext1[15:14] == 2'b10);
+		JC_FP_OC67:  jc_eval = (s.ext1[15:14] == 2'b11);
+		JC_FMT_1:    jc_eval = (s.ext1[12:10] == 3'd6);
+		JC_FMT_2:    jc_eval = (s.ext1[12:10] == 3'd4);
+		JC_FMT_8:    jc_eval = (s.ext1[12:10] == 3'd5);
+		JC_FMT_12:   jc_eval = (s.ext1[12:10] == 3'd2 || s.ext1[12:10] == 3'd3);
+		JC_FMT_7:    jc_eval = (s.ext1[12:10] == 3'd7);
+		JC_CREG_RF:  jc_eval = (s.ext1[11:0] == 12'h800);    // USP
+		default:     jc_eval = 1'b0;
+	endcase
+endfunction
+
+logic  [9:0] na;          // next microcode address
+logic        nv;
+ukind_t      nk;          // ... its kind
 always_comb begin
 	na = upc;
-	nv = uw_v;
+	nv = a_v;
+	nk = a_k;
 	if (exc_go) begin
 		case (exc_kind)
-			4'd1:    na = UA_EXC_FMT2;
-			4'd2:    na = UA_EXC_FMT4;
-			4'd3:    na = UA_EXC_IRQ;
-			4'd4:    na = UA_EXC_RESET;
-			default: na = UA_EXC_FMT0;
+			4'd1:    begin na = UA_EXC_FMT2;  nk = UK_EXC_FMT2;  end
+			4'd2:    begin na = UA_EXC_FMT4;  nk = UK_EXC_FMT4;  end
+			4'd3:    begin na = UA_EXC_IRQ;   nk = UK_EXC_IRQ;   end
+			4'd4:    begin na = UA_EXC_RESET; nk = UK_EXC_RESET; end
+			default: begin na = UA_EXC_FMT0;  nk = UK_EXC_FMT0;  end
 		endcase
 		nv = 1'b1;
 	end
 	else if (flush) begin
 		nv = 1'b0;
 	end
-	else if (step) begin
-		if (n_jump)      na = jc_now ? uw.jt : upc + 10'd1;
-		else if (stay)   na = upc;
-		else if (!uw.last) na = upc + 10'd1;
-		else if (!exc_mode && rq_n[1]) na = rq1.rt;        // next instruction
+	else if (a_v && a_jmp) begin
+		// an unconditional jump at once, a conditional one when its
+		// condition is in (a_cjt)
+		if (a_k.jalw || a_cjv) begin
+			if (a_k.jalw || a_cjt) begin na = a_k.jt; nk = ur.tk; end
+			else begin na = upc1; nk = ur.nk; end
+		end
+	end
+	else if (pass) begin
+		if (!a_k.last) begin na = upc1; nk = ur.nk; end
+		else if (!a_exc && rq_n >= 3'd2) begin na = rq1.rt; nk = rq1.k0; end   // next instruction
 		else nv = 1'b0;
 	end
-	else if (!uw_v && !exc_mode && rq_n != 2'd0) begin
+	else if (!a_v && !a_exc && rq_n != 3'd0) begin
 		na = rq0.rt;                                         // first word
+		nk = rq0.k0;
 		nv = 1'b1;
 	end
 end
 
 // the microcode ROM in block RAM: its address register is the sequencing
-// register (uw_q is the word at upc, read one cycle ahead as before)
+// register (ur is the word at upc, read a clock after its address)
 (* romstyle = "M10K" *) logic [$bits(uword_t)-1:0] urom [0:1023];
 initial begin
 `include "gen/ap68060_ucode_init.svh"
 end
 logic [$bits(uword_t)-1:0] uw_raw;
 always_ff @(posedge clk) uw_raw <= urom[na];
-assign uw_q = uword_t'(uw_raw);
+assign ur = uword_t'(uw_raw);
 
 always_ff @(posedge clk) begin
 	if (!nreset) begin
 		upc      <= '0;
-		uw_v     <= 1'b0;
-		exc_mode <= 1'b0;
+		upc1     <= 10'd1;
+		a_v      <= 1'b0;
+		a_k      <= '0;
+		a_exc    <= 1'b0;
+		a_cjv    <= 1'b0;
+		a_cjt    <= 1'b0;
+	end
+	else begin
+		upc  <= na;
+		upc1 <= na + 10'd1;
+		a_v  <= nv;
+		a_k  <= nk;
+		a_cjv <= 1'b0;
+		if (!flush && !exc_go && a_v && a_jmp && !a_k.jalw && !a_cjv) begin
+			a_cjv <= 1'b1;
+			a_cjt <= jc_eval(a_k.jc, as, smode);
+		end
+		// an exception routine ends with its last word
+		if (pass && a_k.last && a_exc) a_exc <= 1'b0;
+		if (flush && !exc_go) a_exc <= 1'b0;
+		if (exc_go) a_exc <= 1'b1;
+	end
+end
+
+//--------------------------------------------------------------------------
+// D2b registers
+//--------------------------------------------------------------------------
+always_ff @(posedge clk) begin
+	if (!nreset) begin
+		b_v      <= 1'b0;
+		ub       <= '0;
+		rb       <= '0;
+		b_exr    <= 1'b0;
+		b_stay_q <= 1'b0;
+		b_pc0    <= 1'b0;
+		b_pc1    <= 1'b0;
+		b_base_in <= 1'b0;
+		b_fb_in  <= 1'b0;
+		b_fx_in  <= 1'b0;
+		b_e1pc1  <= 1'b0;
+		b_mev    <= 1'b0;
+		b_me1    <= 1'b0;
+		b_agin   <= 1'b0;
+		b_me     <= '0;
+		b_mem    <= '0;
+		b_dsv    <= '0;
+		b_low1   <= '0;
+		b_bi1    <= '0;
 		first    <= 1'b1;
 		ind0     <= 1'b0;
 		ind1     <= 1'b0;
@@ -858,6 +1070,10 @@ always_ff @(posedge clk) begin
 		ssp      <= R_ISP;
 		mv_act   <= 1'b0;
 		mv_mask  <= '0;
+		mv_is0   <= 1'b1;
+		mv_pc1   <= 1'b1;
+		mv_low   <= '0;
+		mv_bi    <= '0;
 		mv_off   <= '0;
 		mv_cnt   <= '0;
 		mv_t11   <= 1'b0;
@@ -867,8 +1083,61 @@ always_ff @(posedge clk) begin
 		uq1      <= '0;
 	end
 	else begin
-		upc  <= na;
-		uw_v <= nv;
+		logic        i0n, i1n, actn, is0n, pc1n, t11n;
+		logic  [1:0] fixn;
+		// the per-instruction state after this clock's uop (the word stays)
+		i0n  = ind0 || (emit && n_ptr_p && !b_pc1);
+		i1n  = ind1 || (emit && n_ptr_p && b_pc1);
+		actn = mv_act; is0n = mv_is0; pc1n = mv_pc1; t11n = mv_t11; fixn = mv_fix;
+		if (emit && !n_ptr_p) begin
+			if (n_mv_pre) t11n = 1'b1;
+			else if (uw.loop && b_stay_q) begin
+				if (mv_act && mv_mask == 16'd0) fixn = mv_fix + 2'd1;
+				actn = 1'b1;
+				is0n = (n_mv_rest == 16'd0);
+				pc1n = pc1(n_mv_rest);
+			end
+		end
+
+		// D2b's word: a new one from D2a, the same one, or none
+		if (flush || exc_go) begin
+			b_v      <= 1'b0;
+			b_stay_q <= 1'b0;
+		end
+		else if (pass) begin
+			b_v      <= 1'b1;
+			ub       <= ur;
+			rb       <= as;
+			b_exr    <= a_exc;
+			b_pc0    <= a_pc0;
+			b_pc1    <= a_pc1;
+			b_base_in <= a_base_in;
+			b_fb_in  <= a_fb_in;
+			b_fx_in  <= a_fx_in;
+			b_e1pc1  <= a_e1pc1;
+			b_mev    <= a_mev;
+			b_me1    <= a_me1;
+			b_agin   <= a_agin;
+			b_me     <= a_me;
+			b_mem    <= a_mem;
+			b_dsv    <= a_dsv;
+			b_low1   <= a_low1;
+			b_bi1    <= a_bi1;
+			// (a MOVEM word starts its instruction's loop: the loop state is
+			// clear; the pointers are the instruction's unless it ends now)
+			b_stay_q <= stay_fn(ur.loop, a_pc0, a_pc1, ind0 && !done, ind1 && !done,
+			                    a_base_in, a_fb_in, a_fx_in, 1'b0, 1'b0, 1'b0, 1'b0, 2'd0,
+			                    a_e1pc1);
+		end
+		else if (b_v && !(b_step && !b_stay_q)) begin
+			if (b_step)
+				b_stay_q <= stay_fn(uw.loop, b_pc0, b_pc1, i0n, i1n, b_base_in, b_fb_in,
+				                    b_fx_in, actn, is0n, pc1n, t11n, fixn, b_e1pc1);
+		end
+		else begin
+			b_v      <= 1'b0;
+			b_stay_q <= 1'b0;
+		end
 
 		// uop FIFO: both outcomes formed without the pop (the back end's
 		// stall, a late signal), which selects between them last
@@ -885,16 +1154,20 @@ always_ff @(posedge clk) begin
 
 		if (emit) begin
 			first <= 1'b0;
-			if (n_ptr) begin
-				if (n_ptr_ea1) ind1 <= 1'b1; else ind0 <= 1'b1;
+			if (n_ptr_p) begin
+				if (b_pc1) ind1 <= 1'b1; else ind0 <= 1'b1;
 			end
 			else if (n_mv_pre) begin
 				mv_t11 <= 1'b1;
 			end
-			else if (uw.loop && !nu.last) begin
+			else if (uw.loop && b_stay_q) begin
 				if (mv_act && mv_mask == 16'd0) mv_fix <= mv_fix + 2'd1;
 				mv_act  <= 1'b1;
 				mv_mask <= n_mv_rest;
+				mv_is0  <= (n_mv_rest == 16'd0);
+				mv_pc1  <= pc1(n_mv_rest);
+				mv_low  <= n_mv_rest & (~n_mv_rest + 16'd1);
+				mv_bi   <= enc16(n_mv_rest);
 				mv_off  <= (mv_act ? mv_off : ((src.ea0.m == EM_APD) ?
 				            -{29'd0, (src.sz == SZ_L) ? 3'd4 : 3'd2} : 32'd0)) +
 				           ((src.ea0.m == EM_APD) ? -{29'd0, (src.sz == SZ_L) ? 3'd4 : 3'd2}
@@ -916,7 +1189,6 @@ always_ff @(posedge clk) begin
 			mv_act <= 1'b0;
 			mv_t11 <= 1'b0;
 			mv_fix <= 2'd0;
-			if (exc_mode) exc_mode <= 1'b0;
 		end
 
 		if (flush) begin
@@ -928,50 +1200,13 @@ always_ff @(posedge clk) begin
 			mv_t11 <= 1'b0;
 			mv_fix <= 2'd0;
 			uq_n  <= 2'd0;
-			if (!exc_go) exc_mode <= 1'b0;
 		end
 		if (exc_go) begin
-			exc_mode <= 1'b1;
 			first    <= 1'b1;
 			ssp      <= exc_ssp;
 			uq_n     <= 2'd0;
 		end
 	end
-end
-
-// jump condition of the current word (named for the sequencing block)
-logic jc_now;
-always_comb begin
-	case (uw.jc)
-		JC_ALWAYS:   jc_now = 1'b1;
-		JC_EXT10:    jc_now = src.ext1[10];
-		JC_EXT11:    jc_now = src.ext1[11];
-		JC_EA0_MEM:  jc_now = is_mem(src.ea0.m);
-		JC_EA0_DN:   jc_now = (src.ea0.m == EM_DN);
-		JC_EA0_IMM:  jc_now = (src.ea0.m == EM_IMM);
-		JC_SZ_L:     jc_now = (src.sz == SZ_L);
-		JC_AY7:      jc_now = (src.opw[2:0] == 3'd7);
-		JC_SUPER:    jc_now = smode;
-		JC_MASK0:    jc_now = (src.ext1 == 16'd0);
-		JC_X1A:      jc_now = src.ext1[15];
-		JC_SZ_B:     jc_now = (src.sz == SZ_B);
-		JC_EA0_AN:   jc_now = (src.ea0.m == EM_AN);
-		JC_EA0_APD:  jc_now = (src.ea0.m == EM_APD);
-		JC_EA0_AIP:  jc_now = (src.ea0.m == EM_AIP);
-		JC_EXT13:    jc_now = src.ext1[13];
-		JC_FP_OC0:   jc_now = (src.ext1[15:13] == 3'b000);
-		JC_FP_OC2:   jc_now = (src.ext1[15:13] == 3'b010);
-		JC_FP_OC3:   jc_now = (src.ext1[15:13] == 3'b011);
-		JC_FP_OC45:  jc_now = (src.ext1[15:14] == 2'b10);
-		JC_FP_OC67:  jc_now = (src.ext1[15:14] == 2'b11);
-		JC_FMT_1:    jc_now = (src.ext1[12:10] == 3'd6);
-		JC_FMT_2:    jc_now = (src.ext1[12:10] == 3'd4);
-		JC_FMT_8:    jc_now = (src.ext1[12:10] == 3'd5);
-		JC_FMT_12:   jc_now = (src.ext1[12:10] == 3'd2 || src.ext1[12:10] == 3'd3);
-		JC_FMT_7:    jc_now = (src.ext1[12:10] == 3'd7);
-		JC_CREG_RF:  jc_now = (src.ext1[11:0] == 12'h800);    // USP
-		default:     jc_now = 1'b0;
-	endcase
 end
 
 // synthesis translate_off
@@ -983,6 +1218,60 @@ always_ff @(posedge clk)
 always_ff @(posedge clk)
 	if (nreset && emit && dbg_dm && nu.disp != dbg_dpre) begin
 		$display("FAIL: useq: a merged uop's displacement %h changed from %h", nu.disp, dbg_dpre);
+		$finish;
+	end
+// the registered forms against the combinational ones
+always_ff @(posedge clk)
+	if (nreset && b_v) begin
+		if (b_stay_q != stay || n_ptr_p != n_ptr || n_jump) begin
+			$display("FAIL: useq: stay %b/%b ptr %b/%b jump %b at upc %0d", b_stay_q, stay,
+			         n_ptr_p, n_ptr, n_jump, upc);
+			$finish;
+		end
+		if (uw.loop && (mv_act ? (mv_is0 != (mv_mask == 16'd0) || mv_pc1 != pc1(mv_mask)) : 1'b0)) begin
+			$display("FAIL: useq: the MOVEM mask terms");
+			$finish;
+		end
+	end
+// D2a's terms against the word and record they were formed from
+always_ff @(posedge clk)
+	if (nreset && b_v) begin
+		logic ma, mb, md, ea, eb, ed, mv, e1;
+		logic [1:0] mm;
+		ma = omem(ub.a, rb, ea);
+		mb = omem(ub.b, rb, eb);
+		md = omem(ub.d, rb, ed);
+		mv = ma || mb || md;
+		e1 = ma ? ea : mb ? eb : ed;
+		if (ub.ag == AGM_EA0 || ub.ag == AGM_LEA0 || ub.ag == AGM_FEA) e1 = 1'b0;
+		if (ub.ag == AGM_EA1) e1 = 1'b1;
+		mm = (ub.mem != 2'd0) ? ub.mem : (ub.a == S_LD || ub.b == S_LD) ? M_LD :
+		     !mv ? M_NONE : ((mb || ma) && md) ? M_RMW : md ? M_ST : M_LD;
+		if (b_mev != mv || b_me1 != e1 || b_me != (e1 ? rb.ea1 : rb.ea0) || b_mem != mm ||
+		    b_agin != (mv || ub.ag == AGM_EA0 || ub.ag == AGM_EA1 || ub.ag == AGM_LEA0 ||
+		               (ub.ag == AGM_FEA && rb.ea0.m != EM_IMM)) ||
+		    b_low1 != (rb.ext1 & (~rb.ext1 + 16'd1)) || b_bi1 != enc16(rb.ext1) ||
+		    (uw.loop && mv_act && (mv_low != (mv_mask & (~mv_mask + 16'd1)) || mv_bi != enc16(mv_mask)))) begin
+			$display("FAIL: useq: D2a's terms for the word at %0d", upc);
+			$finish;
+		end
+	end
+// the kind kept for the word being read is the word's
+always_ff @(posedge clk)
+	if (nreset && a_v && (a_k.last != ur.last || a_k.jmp != (ur.jc != JC_NEVER) ||
+	                      a_k.jalw != (ur.jc == JC_ALWAYS) || a_k.jc != ur.jc ||
+	                      (a_k.jmp && a_k.jt != ur.jt))) begin
+		$display("FAIL: useq: the kind %h of the word at %0d", a_k, upc);
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nreset && a_v && !a_exc && rq_n == 3'd0) begin
+		$display("FAIL: useq: a word without its record at %0d", upc);
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nreset && pass && ur.loop && !done && (mv_act || mv_t11 || mv_fix != 2'd0)) begin
+		$display("FAIL: useq: a MOVEM word with the loop state set");
 		$finish;
 	end
 // synthesis translate_on

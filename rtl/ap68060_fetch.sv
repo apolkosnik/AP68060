@@ -20,6 +20,13 @@
 // kept for the page (wf_*) until the next redirect, so the fetch that     //
 // looks again uses it (also in the no-allocate mode, TCR NAI).           //
 //                                                                          //
+// A stream D1 or the BTB redirected to is a prediction (fspec): the back  //
+// end has not asked for it, and older stores (a descriptor the program   //
+// just wrote) may not be performed yet.  Its fetches do not search the   //
+// tables: an ATC miss there is a speculative ATC fault, which the back   //
+// end refetches on demand (then the search sees every older store), and  //
+// none of its faults is a demand fetch's.                                  //
+//                                                                          //
 // Pipeline, one aligned long word (two words) per cycle -- D1 decodes at  //
 // most one instruction a cycle, and the queue absorbs long ones:         //
 //   F0  fpc: I-ATC and ITT lookup, cache tag and data RAM read            //
@@ -78,10 +85,12 @@ module ap68060_fetch
 	output logic  [7:0] win_bt,       // ... ends a branch the BTB took
 	output logic [31:0] bt_tgt,       // the target of the first such word
 	output pd_t         pd0,          // predecode of win[0]
-	output pd_t         pd0_n,        // ... as it will be next cycle
 	output logic  [3:0] qcnt,         // words available in win (0..8)
 	output logic [31:0] qpc,
-	input  logic  [2:0] consume,
+	// what D1 takes: the head instruction (pd0.tot words), or cr_use words
+	input  logic        cs_fire,
+	input  logic        cr_fire,
+	input  logic  [2:0] cr_use,
 	output logic        q_odd,        // the stream starts at an odd address
 	input  logic        bc_clr,       // CACR.CABC/CUBC: clear the branch cache
 	input  logic        btb_we,       // D1 writes a BTB entry
@@ -174,8 +183,9 @@ assign qcnt  = (cnt > 5'd8) ? 4'd8 : cnt[3:0];
 assign qpc   = qpc_r;
 assign q_odd = odd;
 assign pd0   = qp0;
-// the head's predecode as it will be next cycle (qp0's load): D1's
-// attribute ROM reads it a cycle ahead
+wire [2:0] consume = cs_fire ? qp0.tot[2:0] : cr_fire ? cr_use : 3'd0;
+// the head's predecode as it will be next cycle (qp0's load)
+pd_t       pd0_n;
 wire [3:0] qh_n = qwrap(5'(qh) + {2'b00, consume});        // the head next cycle
 pd_t       qpr_rd;
 assign qpr_rd = pd_t'(qh_n[0] ? qpr_o[qh_n[3:1]] : qpr_e[qh_n[3:1]]);
@@ -348,6 +358,7 @@ typedef enum logic [2:0] {
 st_t st;
 
 logic        fnew;             // the next F0 starts a redirected stream
+logic        fspec;            // ... a predicted one (D1's, the BTB's)
 
 // F1
 logic        f1_v;
@@ -356,7 +367,7 @@ wire         f1_bt    = f1_btok && btb_hit;   // the BTB hit (in F1)
 wire         f1_bslot = btb_qslot;            // ... where the branch ends
 wire   [1:0] f1_bkind = btb_q[32:31];
 wire  [30:0] f1_btgt  = btb_q[30:0];
-logic        f1_s, f1_dem;
+logic        f1_s, f1_dem, f1_spec;
 logic        f1_hit;
 atce_t       f1_e;
 logic        f1_wff;            // the page's last walk failed
@@ -517,6 +528,7 @@ always_ff @(posedge clk) begin
 		fnew  <= 1'b1;
 		st    <= S_RUN;
 		f1_v  <= 1'b0; f1_pc <= '0; f1_s <= 1'b0; f1_dem <= 1'b0; f1_hit <= 1'b0; f1_e <= '0;
+		f1_spec <= 1'b0; fspec <= 1'b0;
 		f1_wff <= 1'b0;
 		wf_v  <= 1'b0; wf_ok <= 1'b0; wf_fc2 <= 1'b0; wf_la <= '0; wf_e <= '0;
 		if_cause <= '0;
@@ -650,7 +662,8 @@ always_ff @(posedge clk) begin
 			f1_tt0 <= ttr_hit(itt0, fpc, smode);
 			f1_tt1 <= ttr_hit(itt1, fpc, smode);
 			f1_tce <= tc_e;
-			f1_dem <= fnew;
+			f1_dem <= fnew && !fspec;
+			f1_spec <= fspec;
 			begin
 				// the ATC, else the page's last walk (formed here, as the
 				// ATC's lookup is registered, so F1 starts from flip-flops)
@@ -688,6 +701,7 @@ always_ff @(posedge clk) begin
 				f1_btok <= 1'b0;
 				fpc  <= {t, 1'b0};
 				fnew <= 1'b0;
+				fspec <= 1'b1;
 				if (f1_bkind == 2'd1) begin
 					frw  = 1'b1;
 					frwa = fras_tp + 3'd1;
@@ -711,7 +725,15 @@ always_ff @(posedge clk) begin
 			m_s    <= f1_s;
 			m_dem  <= f1_dem;
 			m_ci   <= x_cm[1];
-			if (x_walk) begin
+			if (x_walk && f1_spec) begin
+				// a predicted stream does not search: a speculative ATC
+				// fault, refetched on demand by the back end
+				f2_n <= f1_pc[1] ? 2'd1 : 2'd2;
+				for (int i = 0; i < 2; i++) f2_w[i] <= 16'd0;
+				f2_f <= 1'b1; f2_d <= 1'b0; f2_a <= 1'b1;
+				st   <= S_HALT;
+			end
+			else if (x_walk) begin
 				st     <= S_WALK;
 				iw_req <= 1'b1;
 			end
@@ -917,6 +939,7 @@ always_ff @(posedge clk) begin
 			fras_tp <= d_ras_tp;
 			fras_n  <= d_ras_n;
 			fpc   <= {redir_npc[31:1], 1'b0};
+			fspec <= !redir_v;
 			qpc_r <= redir_npc;
 			odd   <= redir_npc[0];
 			fnew  <= 1'b1;

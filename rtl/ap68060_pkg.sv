@@ -332,6 +332,12 @@ typedef struct packed {
 	logic        slow;    // parsed in several cycles (FPU immediate)
 	logic  [3:0] i0;      // EA0 mode index, EM_NONE when absent
 	logic  [3:0] i1;
+	// the entry's attributes D1 needs before its attribute ROM's answer
+	logic  [3:0] cls;     // instruction class (CL_*: branches, exceptions)
+	logic        priv;    // privileged
+	logic  [5:0] jc0;     // the routine's first jump condition (D1 resolves it)
+	logic  [1:0] nfix;    // fixed extension words (the immediate follows them)
+	logic        bzx;     // a one-word immediate is a zero-extended byte
 } pd_t;
 
 typedef struct packed {
@@ -355,6 +361,7 @@ typedef struct packed {
 	logic        bst;     // Bcc: the static prediction (backward taken)
 	logic  [1:0] bhc;     // Bcc: its history counter as D1 read it
 	ras_snap_t   ras;     // D1's return stack before this instruction
+	logic [18:0] k0;      // the kind of its first micro-instruction (ukind_t)
 } dinst_t;
 
 endpackage

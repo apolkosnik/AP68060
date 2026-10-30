@@ -34,10 +34,11 @@ logic  [7:0] win_fatc;
 logic  [7:0] win_bt;
 logic [31:0] bt_tgt;
 pd_t         pd0;
-pd_t         pd0_n;
 logic  [3:0] qcnt;
 logic [31:0] qpc;
-logic  [2:0] consume;
+logic        cs_fire;
+logic        cr_fire;
+logic  [2:0] cr_use;
 logic        q_odd;
 logic        bc_clr;
 logic        btb_we;
@@ -123,7 +124,9 @@ itt0 = '0;
 itt1 = '0;
 cdis = '0;
 mdis = '0;
-consume = '0;
+cs_fire = '0;
+cr_fire = '0;
+cr_use = '0;
 bc_clr = '0;
 btb_we = '0;
 btb_wi = '0;
@@ -184,7 +187,7 @@ b_rtci = '0;
   ic_inv=0; repeat(3) tick();
  end
  // A new sequential or redirected IFU request after burst completion and a memory update.
- if ($test$plusargs("sequential")) begin consume=2; tick(); consume=0; end
+ if ($test$plusargs("sequential")) begin cr_fire=1; cr_use=2; tick(); cr_fire=0; end
  else begin redir_v=1; redir_pc=32'h2000; tick(); redir_v=0; end
  stop=0; tick(); stop=1;
  repeat(5) tick();

@@ -727,6 +727,21 @@ ECCR = {
 # signed multiply/divide and the CCR/SR logic variant ride in the cond field
 ECOND = {'MULS': 1, 'DIVS': 1, 'ORSR': 1, 'ANDSR': 0, 'EORSR': 2}
 
+# instruction class for D1 (its predictions and decode-time exceptions),
+# from the entry's routine; STOP by its operation word
+CLS = {'NONE': 0, 'BCC': 1, 'BSR': 2, 'JSR': 3, 'JMP': 4, 'RTS': 5, 'DBCC': 6,
+       'FBCC': 7, 'FDBCC': 8, 'FPU_GEN': 9, 'MOVEC': 10, 'LPSTOP': 11,
+       'TRAP': 12, 'ILLEGAL': 13, 'UNIMPL': 14, 'STOP': 15}
+
+
+def cls_of(e):
+    if e.rt in ('MOVEC_RD', 'MOVEC_WR'):
+        return CLS['MOVEC']
+    if e.pat == '0100111001110010':
+        return CLS['STOP']
+    return CLS.get(e.rt, 0)
+
+
 # imm kind encoding for D1
 IMMK = {None: 0, 'z': 1, 'B': 2, 'W': 3, 'L': 4, 'bcc': 5, 'trapcc': 6,
         'fbcc': 7}
@@ -743,12 +758,33 @@ def resolve_jumps():
         ROM.extend((name, k, u) for k, u in enumerate(ROUTINES[name]))
 
 
-def val(u, name):
+def jt_of(u):
+    if u.f['jt'] is None:
+        return 0
+    rn, k = u.f['jt'].split('.')
+    return ENTRY[rn] + int(k)
+
+
+# A word's sequencing kind, as D2's address stage keeps it for the word it
+# reads (MSB first): last, jump, unconditional jump, the jump's target and
+# condition.  Every word carries the kind of the word after it (nk) and,
+# for a jump, of its target (tk): the sequencer knows the kind of the next
+# word from a register, never from the ROM's output in the same clock.
+KW = 1 + 1 + 1 + 10 + 6
+
+
+def kind(a):
+    if a >= len(ROM):
+        return 0
+    u = ROM[a][2]
+    jc = JC[u.f['jc']]
+    return ((u.f['last'] << 18) | ((jc != JC['NEVER']) << 17) |
+            ((jc == JC['ALWAYS']) << 16) | (jt_of(u) << 6) | jc)
+
+
+def val(u, name, addr=None):
     f = u.f
-    jt = 0
-    if f['jt'] is not None:
-        rn, k = f['jt'].split('.')
-        jt = ENTRY[rn] + int(k)
+    jt = jt_of(u)
     op = f['op']
     op_inst = 1 if op == 'EOP' else 0
     opc = 0 if op in (None, 'EOP') else OPS[op]
@@ -767,7 +803,9 @@ def val(u, name):
         mem=MEM[f['mem']], mfc=MFC[f['mfc']], lock=f['lock'], locke=f['locke'],
         br=BR[f['br']],
         last=f['last'], ser=f['ser'], noupd=f['noupd'], upd2=f['upd2'],
-        jc=JC[f['jc']], jt=jt, loop=f['loop'], dyn=f['dyn'], dynk=f['dynk'])
+        jc=JC[f['jc']], jt=jt, loop=f['loop'], dyn=f['dyn'], dynk=f['dynk'],
+        nk=kind(addr + 1) if addr is not None else 0,
+        tk=kind(jt) if (addr is not None and f['jt'] is not None) else 0)
     return v
 
 
@@ -777,7 +815,8 @@ LAYOUT = [('op_inst', 1), ('op', 7), ('sz', 2), ('msz', 3), ('cond_inst', 3),
           ('dsel', 3), ('cval', 16), ('mem', 2), ('mfc', 3), ('lock', 1),
           ('locke', 1),
           ('br', 3), ('last', 1), ('ser', 1), ('noupd', 1), ('upd2', 1),
-          ('jc', 6), ('jt', 10), ('loop', 1), ('dyn', 3), ('dynk', 5)]
+          ('jc', 6), ('jt', 10), ('loop', 1), ('dyn', 3), ('dynk', 5),
+          ('nk', KW), ('tk', KW)]
 WIDTH = sum(w for _, w in LAYOUT)
 
 
@@ -803,6 +842,10 @@ def emit():
         for n, w in LAYOUT:
             f.write('\tlogic [%d:0] %s;\n' % (w - 1, n))
         f.write('} uword_t;\n')
+        f.write('typedef struct packed {\n\tlogic last;\n\tlogic jmp;\n\tlogic jalw;\n'
+                '\tlogic [9:0] jt;\n\tlogic [5:0] jc;\n} ukind_t;\n')
+        for n, i in CLS.items():
+            f.write('localparam logic [3:0] CL_%s = 4\'d%d;\n' % (n, i))
         for n, i in SYMI.items():
             f.write('localparam logic [5:0] S_%s = 6\'d%d;\n' % (n, i))
         for n, i in AGM.items():
@@ -819,6 +862,7 @@ def emit():
                   'FPU_K_IN12', 'FPU_K_OUTD', 'FPU_K_OUT1', 'FPU_K_OUT2',
                   'FPU_K_OUT4', 'FPU_K_OUT8', 'FPU_K_OUT12']:
             f.write('localparam logic [9:0] UA_%s = 10\'d%d;\n' % (n, ENTRY[n]))
+            f.write('localparam logic [%d:0] UK_%s = %d\'h%x;\n' % (KW - 1, n, KW, kind(ENTRY[n])))
         f.write('endpackage\n')
 
     # ROM
@@ -828,7 +872,7 @@ def emit():
         f.write('\tcase (a)\n')
         for i, (name, k, u) in enumerate(ROM):
             f.write("\t\t10'd%d: ucode_rom = %d'h%x;  // %s.%d\n" %
-                    (i, WIDTH, pack(val(u, name)), name, k))
+                    (i, WIDTH, pack(val(u, name, i)), name, k))
         f.write("\t\tdefault: ucode_rom = '0;\n\tendcase\nendfunction\n")
 
     # the same ROM as memory initialization (useq reads it from block RAM)
@@ -837,7 +881,7 @@ def emit():
         f.write('for (int i = 0; i < 1024; i++) urom[i] = \'0;\n')
         for i, (name, k, u) in enumerate(ROM):
             f.write("urom[%d] = %d'h%x;  // %s.%d\n" %
-                    (i, WIDTH, pack(val(u, name)), name, k))
+                    (i, WIDTH, pack(val(u, name, i)), name, k))
 
     # decoder: parallel match of every pattern, each excluded by the more
     # specific patterns that overlap it (one-hot), then OR trees
@@ -867,7 +911,8 @@ def emit():
                 '\tlogic [1:0] szc;\n\tlogic [11:0] ea0m;\n\tlogic [11:0] ea1m;\n'
                 '\tlogic [1:0] nfix;\n\tlogic [2:0] immk;\n\tlogic priv;\n'
                 '\tlogic [5:0] jc0;\n\tlogic [9:0] jt0;\n\tlogic ea0v;\n\tlogic ea1v;\n\tlogic [1:0] fea;\n\tlogic t0;\n'
-                '} pla_t;\n')
+                '\tlogic [3:0] cls;\n\tlogic [9:0] rtn;\n\tlogic [%d:0] k0;\n\tlogic [%d:0] kn;\n\tlogic [%d:0] kj;\n'
+                '} pla_t;\n' % (KW - 1, KW - 1, KW - 1))
         # entry selection
         f.write('function automatic logic [NENT-1:0] dec_sel(input logic [15:0] op);\n')
         f.write('\tlogic [NENT-1:0] m, s;\n')
@@ -898,11 +943,16 @@ def emit():
             if u0['jt'] is not None:
                 rn, k = u0['jt'].split('.')
                 jt0 = ENTRY[rn] + int(k)
-            lit = ("'{1'b1, 9'd%d, 10'd%d, 7'd%d, 4'd%d, 1'b%d, 5'h%x, 2'd%d, 12'h%03x, 12'h%03x, 2'd%d, 3'd%d, 1'b%d, 6'd%d, 10'd%d, 1'b%d, 1'b%d, 2'd%d, 1'b%d}"
+            # the first word D2 runs: the routine's entry, or past its first
+            # jump (D1 resolves it): the word after it (rtn) or the target;
+            # their kinds (k0 the entry's, kn and kj)
+            rtn = ENTRY[e.rt] + (1 if jc0 != JC['NEVER'] else 0)
+            lit = ("'{1'b1, 9'd%d, 10'd%d, 7'd%d, 4'd%d, 1'b%d, 5'h%x, 2'd%d, 12'h%03x, 12'h%03x, 2'd%d, 3'd%d, 1'b%d, 6'd%d, 10'd%d, 1'b%d, 1'b%d, 2'd%d, 1'b%d, 4'd%d, 10'd%d, %d'h%x, %d'h%x, %d'h%x}"
                    % (i, ENTRY[e.rt], eop, ec or 0, 1 if ec is not None else 0,
                       ccr, SZC[e.sz], mask0, mask1, e.nfix, IMMK[e.imm],
                       1 if e.priv else 0, jc0, jt0, e.ea0 is not None,
-                      e.ea1 is not None, e.fea, e.rt in T0_RT))
+                      e.ea1 is not None, e.fea, e.rt in T0_RT, cls_of(e), rtn,
+                      KW, kind(ENTRY[e.rt]), KW, kind(rtn), KW, kind(jt0)))
             lits.append((lit, e.name, e.rt))
             f.write("\t\t9'd%d: ent_attr = %s;  // %s %s\n" % (i, lit, e.name, e.rt))
         f.write("\t\tdefault: ;\n\tendcase\n\tif (!hit) ent_attr = '0;\nendfunction\n\n")

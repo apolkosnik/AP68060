@@ -581,11 +581,11 @@ end
 int btc [3];
 initial for (int i = 0; i < 3; i++) btc[i] = 0;
 always_ff @(posedge clk) if (rsti_n) begin
-	if (dut.dec.push && dut.dec.ph == 0 && dut.dec.bt_end) begin
-		if (dut.dec.nrec.pred && dut.dec.ntarget == dut.dec.bt_tgt) btc[0]++;
+	if (dut.dec.push && dut.dec.ir_ph == 0 && dut.dec.ir_bt_end) begin
+		if (dut.dec.nrec.pred && dut.dec.teq) btc[0]++;
 		else btc[1]++;
 	end
-	if (dut.dec.bt_restart && !dut.dec.stall) btc[2]++;
+	if (dut.dec.ir_bt_restart && dut.dec.ir_ok) btc[2]++;
 end
 // EX-blamed cycles by EX op; WB-blamed by WB op
 int exop [64], wbop [64];
@@ -603,12 +603,12 @@ always_ff @(posedge clk) if (rsti_n && prof) begin
 	if (!dut.be.ag_v || !dut.be.stall_ag) begin
 		// AG could take a uop: does the front end have one?
 		if (dut.uq_n == 2'd0) begin
-			if (dut.rq_n != 2'd0) begin
+			if (dut.rq_n != 3'd0) begin
 				hold[5]++;                            // useq busy / expanding
-				if (!dut.useq.uw_v) us[0]++;          // first-word ROM read
-				else if (dut.useq.step && dut.useq.n_jump) us[1]++;   // jump word
-				else if (!dut.useq.step) us[2]++;     // not stepping
-				else if (dut.useq.n_ptr) us[3]++;     // pointer load
+				if (!dut.useq.a_v) us[0]++;           // first-word ROM read
+				else if (dut.useq.a_k.jmp) us[1]++;   // jump word
+				else if (!dut.useq.b_v) us[2]++;      // the uop stage is empty
+				else if (dut.useq.n_ptr_p) us[3]++;   // pointer load
 				else us[4]++;
 			end
 			else if (dut.fetch.cnt != 0) hold[6]++;   // decode has words, no record

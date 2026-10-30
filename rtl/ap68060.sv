@@ -373,15 +373,16 @@ logic  [2:0] ras_rtp;
 logic  [3:0] ras_rn;
 logic  [2:0] d_ras_tp;
 logic  [3:0] d_ras_n;
-pd_t         pd0, pd0_n;
+pd_t         pd0;
 logic  [3:0] qcnt;
 logic [31:0] qpc;
-logic  [2:0] consume;
+logic        cs_fire, cr_fire;
+logic  [2:0] cr_use;
 logic        d_redir_v;
 logic [31:0] d_redir_pc;
-logic  [1:0] rq_n;
+logic  [2:0] rq_n;
 dinst_t      rq0, rq1;
-logic        rq_pop, rq_pop_e;
+logic        rq_pop;
 
 ap68060_fetch fetch (
 	.clk(clk), .nreset(nreset),
@@ -394,7 +395,8 @@ ap68060_fetch fetch (
 	.cacr(cacr), .tc(tc), .itt0(itt0), .itt1(itt1), .cdis(cdis), .mdis(mdis),
 	.win(win), .win_flt(win_flt), .win_fdem(win_fdem), .win_fatc(win_fatc),
 	.win_bt(win_bt), .bt_tgt(bt_tgt),
-	.pd0(pd0), .pd0_n(pd0_n), .qcnt(qcnt), .qpc(qpc), .consume(consume),
+	.pd0(pd0), .qcnt(qcnt), .qpc(qpc),
+	.cs_fire(cs_fire), .cr_fire(cr_fire), .cr_use(cr_use),
 	.q_odd(q_odd),
 	.bc_clr(bc_clr),
 	.btb_we(btb_we), .btb_wi(btb_wi), .btb_wv(btb_wv), .btb_wtag(btb_wtag),
@@ -422,10 +424,11 @@ ap68060_decode #(.LOOP_PRED(LOOP_PRED)) dec (
 	.ras_rv(ras_rv), .ras_rtp(ras_rtp), .ras_rn(ras_rn),
 	.win(win), .win_flt(win_flt), .win_fdem(win_fdem), .win_fatc(win_fatc),
 	.win_bt(win_bt), .bt_tgt(bt_tgt),
-	.pd0(pd0), .pd0_n(pd0_n), .qcnt(qcnt), .qpc(qpc), .q_odd(q_odd),
+	.pd0(pd0), .qcnt(qcnt), .qpc(qpc), .q_odd(q_odd),
 	.smode(sr[13]),
-	.consume(consume), .d_redir_v(d_redir_v), .d_redir_pc(d_redir_pc),
-	.rq_n(rq_n), .rq0(rq0), .rq1(rq1), .rq_pop(rq_pop), .rq_pop_e(rq_pop_e),
+	.cs_fire(cs_fire), .cr_fire(cr_fire), .cr_use(cr_use),
+	.d_redir_v(d_redir_v), .d_redir_pc(d_redir_pc),
+	.rq_n(rq_n), .rq0(rq0), .rq1(rq1), .rq_pop(rq_pop),
 	.bht_we(bht_we), .bht_wa(bht_wa), .bht_dis(bht_dis),
 	.lp_we(lp_we), .lp_wa(lp_wa), .lp_tk(lp_tk), .lp_mp(lp_mp),
 	.btb_we(btb_we), .btb_wi(btb_wi), .btb_wv(btb_wv), .btb_wtag(btb_wtag),
@@ -435,8 +438,8 @@ ap68060_decode #(.LOOP_PRED(LOOP_PRED)) dec (
 
 ap68060_useq useq (
 	.clk(clk), .nreset(nreset), .flush(fe_flush),
-	.rq_n(rq_n), .rq0(rq0), .rq1(rq1), .rq_pop(rq_pop), .rq_pop_e(rq_pop_e),
-		.smode(sr[13]),
+	.rq_n(rq_n), .rq0(rq0), .rq1(rq1), .rq_pop(rq_pop),
+	.smode(sr[13]),
 	.exc_go(exc_go), .exc_kind(exc_kind), .exc_ssp(exc_ssp),
 	.uq_n(uq_n), .uq0(uq0), .uq_pop(uo_rdy && uq_n != 2'd0)
 );
