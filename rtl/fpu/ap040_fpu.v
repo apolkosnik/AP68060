@@ -555,7 +555,8 @@ always @* begin
 			ur_g = add_r[67] ? {add_r[3], add_r[2], add_r[1] | add_r[0]} : add_r[2:0];
 		end
 		okh[1]: begin
-			ur_m = mul_pd[127] ? mul_pd[127:64] : mul_pd[126:63];
+			ur_m[63:32] = mul_top[1] ? mul_pd[127:96] : mul_pd[126:95];
+			ur_m[31:0]  = mul_top[0] ? mul_pd[95:64] : mul_pd[94:63];
 			ur_g = mul_pd[127] ? {mul_pd[63], mul_pd[62], mul_slo || (mul_pd[61:32] != 0)} :
 			                     {mul_pd[62], mul_pd[61], mul_slo || (mul_pd[60:32] != 0)};
 		end
@@ -956,6 +957,12 @@ wire [127:0] mul_out = {mul_hh, mul_ll} + {31'd0, mul_cross, 32'd0};
 reg  [63:0] mf_hh, mf_hl, mf_lh, mf_ll, mc_hh, mc_ll;
 reg  [64:0] mc_x;
 reg         mul_slo;          // mul_pd[31:0] != 0
+wire [127:0] mul_sum = {mc_hh, mc_ll} + {31'd0, mc_x, 32'd0};
+wire         mul_sum127 = mul_sum[127];
+// mul_pd[127] twice more, each the normalizing select of half of the
+// product's 64 significand bits (kept apart: one flip-flop does not reach
+// all 64 in one clock)
+(* preserve *) reg [1:0] mul_top;
 always @(posedge clk) if (ce) begin
 	mf_hh  <= mul_hh;
 	mf_hl  <= mul_hl;
@@ -964,7 +971,8 @@ always @(posedge clk) if (ce) begin
 	mc_x   <= {1'b0, mf_hl} + {1'b0, mf_lh};
 	mc_hh  <= mf_hh;
 	mc_ll  <= mf_ll;
-	mul_pd <= {mc_hh, mc_ll} + {31'd0, mc_x, 32'd0};
+	mul_pd <= mul_sum;
+	mul_top <= {2{mul_sum127}};
 	// the product's low long word passes the sum unchanged: its sticky
 	// OR formed beside it
 	mul_slo <= (mc_ll[31:0] != 32'd0);
@@ -1764,6 +1772,12 @@ always @(posedge clk)
 	if (nreset && (fst == F_BIN0 || fst == F_EXEC) && b_unsup != unsupported_x(b_e[14:0], b_m)) begin
 		$display("FAIL: FPU b_unsup %b, the destination classifies as %b", b_unsup,
 		         unsupported_x(b_e[14:0], b_m));
+		$finish;
+	end
+// the product's normalizing selects are its top bit
+always @(posedge clk)
+	if (nreset && mul_top != {2{mul_pd[127]}}) begin
+		$display("FAIL: FPU product select copies %b, the product's top bit %b", mul_top, mul_pd[127]);
 		$finish;
 	end
 // F_RND2's overflow choice formed the cycle before must be this cycle's
