@@ -88,7 +88,8 @@ module ap68060_backend
 	output logic        lp_mp,
 	output logic        dm_noalloc,     // exception stacking / vector fetch
 	output logic  [1:0] dm_ack,         // acknowledge cycle: 1 IACK, 2 BKPT, 3 LPSTOP
-	input  logic        dm_hold1,       // the DMU holds DC1
+	input  logic        dm_hold1,       // the DMU holds DC1 (a register)
+	input  logic        dm_hold1_c,     // ... as its state gives it now (checks)
 	input  logic        dm_hold_dt,     // ... and DT (a register)
 	// WB maintenance (CINV/CPUSH/PFLUSH/PTEST) in the DMU
 	output logic        mt_v,
@@ -106,6 +107,7 @@ module ap68060_backend
 	input  logic        dm_lkend,       // a LOCKE write completed (BUSCR sequences)
 	input  logic        dm_iack_end,    // the interrupt acknowledge cycle ended
 	input  logic        sb_empty,       // the DMU's store buffer is empty
+	input  logic        sb_ne_n,        // ... and next cycle it holds a write
 	input  logic        sb_err,         // ... and one of its writes, or a push, ended in TEA
 	input  logic [31:0] sb_fslw,        // ... FSLW.SBE / FSLW.PBE
 	output logic        sb_err_ack,     // the access error for it is being taken
@@ -114,7 +116,8 @@ module ap68060_backend
 	output logic        adv_dc2,        // DC2 -> EX
 	output logic        adv_ex,         // EX -> WB
 	output logic        adv_wb,         // WB completes
-	input  logic        dm_dc2_rdy,     // DC2 memory op has its result
+	input  logic        dm_dc2_rdy,     // DC2 memory op has its result (a register)
+	input  logic        dm_dc2_rdy_c,   // ... as the DMU's state gives it now (checks)
 	input  logic [31:0] dm_ldata,       // load data, right aligned
 	input  logic [31:0] dm_ldata_al,    // the aligned operand (AG's capture)
 	input  logic        dm_ldata_alv,   // ... is the load's data
@@ -127,6 +130,7 @@ module ap68060_backend
 	output logic [31:0] dm_st_data,
 	input  logic        dm_st_rdy,      // store accepted (WB may complete)
 	input  logic        dm_st_fault,
+	input  logic        dm_st_ok,       // ... without a fault (a register, a clock ahead)
 	input  logic [31:0] dm_st_fslw,
 	input  logic [31:0] dm_st_faddr,
 
@@ -281,13 +285,23 @@ assign dfc  = dfc_r;
 //--------------------------------------------------------------------------
 logic wb_hold, ex_hold, dc2_hold, ag_hold;
 logic stall_wb, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag;
+// Every hold the chain reads is a register, formed a clock ahead (or from
+// registers in one level): WB's (wbh_q, and the DMU's store answer), EX's
+// (from flags registered as the uop enters), DC2's and DC1's (the DMU's),
+// DT's (the DMU's), AG's interlock (ilk_q).  A registered hold may be on a
+// clock longer than the stage's state needs, never shorter (checked).
+logic wbh_q;                  // WB holds but for its store's answer
+logic dc2_mx;                 // DC2's uop accesses memory, no exception (registered)
+logic ex_mdw, ex_fpw;         // EX's uop runs the multiply/divide unit, the FPU
+logic ilk_q;                  // AG's interlock
+wire  wb_hold_r = wb_v && (wbh_q || (wb_stv && !dm_st_ok));
 
 // EX holds for a multicycle unit; DC2 for memory; WB for stores/serial ops
 logic md_busy;                // multiply/divide running (register)
 logic ex_md_start;
 // DC2 holds until the data memory unit has its result
-assign dc2_hold  = dc2_v && (dc2_u.mem != M_NONE) && (dc2_u.exc == 8'd0) && !dm_dc2_rdy;
-assign stall_wb  = wb_v  && wb_hold;
+assign dc2_hold  = dc2_v && dc2_mx && !dm_dc2_rdy;
+assign stall_wb  = wb_hold_r;
 assign stall_ex  = ex_v  && (ex_hold  || stall_wb);
 assign stall_dc2 = dc2_v && (dc2_hold || stall_ex);
 assign stall_dt  = dt_v  && (stall_dc2 || dm_hold_dt);
@@ -350,7 +364,7 @@ wire        dc2_capd = dc2_u.d_v && dc2_u.op == OP_MOV && dc2_u.cond == 4'd0 &&
 // a misaligned load reaches AG a cycle later, through EX's write)
 wire [31:0] dc2_capv = dc2_u.a_sxw ? {{16{dm_ldata_al[15]}}, dm_ldata_al[15:0]} : dm_ldata_al;
 
-assign ag_hold = ag_interlock;
+assign ag_hold = ilk_q;
 
 ap68060_rf #(.NR(5)) rff (.clk(clk), .we(fwe), .wa(fwa), .wd(fwd), .ra(rra), .rd(frd));
 ap68060_rf #(.NR(5), .NW(2)) rfb (.clk(clk), .we(bwe), .wa(bwa), .wd(bwd), .ra(rra), .rd(brd));
@@ -592,9 +606,10 @@ ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 // operand stays off the stall path, and the exception goes a cycle later)
 // (multiply/divide: the result, flags and kill are registered from the
 // unit's result in its done cycle, md_q_*, and presented the cycle after)
-assign ex_hold = (ex_v && ex_is_md && !md_z && !ex_fault && !md_fin) ||
-                 (ex_v && ex_slow && ex_sp != ex_np) ||
-                 (ex_v && ex_is_fp && !ex_fault && ex_u.exc == 8'd0 && fp_hold);
+// (the unit each uop uses, without a fault or an exception, registered as
+// it enters: ex_mdw, ex_fpw)
+assign ex_hold = ex_v && ((ex_mdw && !md_z && !md_fin) || (ex_slow && ex_sp != ex_np) ||
+                          (ex_fpw && fp_hold));
 
 // multiply/divide result and flags
 logic [31:0] md_res, md_q_res;
@@ -1487,6 +1502,64 @@ assign wb_hold = wb_v && (halted || (!wb_is_exc &&
                   (wb_reset && (!rst_issued || rsto_busy)) ||
                   (wb_mt && !mt_seen) || (wb_sr_we && !wb_srw))) || sb_wait);
 
+// WB's hold a clock ahead (wb_hold_r: but for the store's answer, which the
+// DMU forms), for the uop entering WB and for the one staying; what is not
+// known early -- the interrupt level, the store buffer draining, RSTO --
+// taken at its worst (a clock longer at most)
+always_ff @(posedge clk) begin
+	logic [2:0] mk_n;
+	logic       irq_n, tr_n, hlt_n, ok_new, x_new, h_new, ok_stay, x_stay, h_stay;
+	// an interrupt may be pending next cycle (irq_pend's terms, from the
+	// values its registers take; IPEND's level at its worst)
+	mk_n   = (wb_v && wb_sr_we && wb_ok) ? wb_sr_new[10:8] : sr_r[10:8];
+	irq_n  = nmi_edge || (ipl == 3'd7 && ipl_q != 3'd7) || (ipl > mk_n) ||
+	         (ipl != 3'd7 && (ipend_r || ipl_q > sr_r[10:8]));
+	tr_n   = sr_r[15] || (wb_v && wb_sr_we && wb_sr_new[15]);
+	hlt_n  = halted || dbl_fault || (wb_commit && wb_u.op == OP_MISC && wb_u.cond == 4'd10);
+	// entering: RESET, maintenance and an SR write each wait at least a clock
+	ok_new = ex_xok && !ex_fault && ex_xvec == 8'd0 && !ex_odd;
+	x_new  = ((ex_u.op == OP_MISC) && (ex_u.cond == 4'd1 || (ex_u.cond >= 4'd3 && ex_u.cond <= 4'd5))) ||
+	         ex_sr_we;
+	h_new  = hlt_n || (ok_new && x_new) ||
+	         (sb_ne_n && (!ok_new || ex_u.ser || (ex_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
+	// staying: a store's or a PLPA's fault becomes its exception; RESET
+	// until RSTO is done, maintenance until the DMU is (an SR write's clock
+	// has passed)
+	ok_stay = wb_ok && !(wb_st && dm_st_rdy && dm_st_fault) &&
+	          !(wb_mt && mt_done && wb_u.cond == 4'd5 && mt_fault);
+	x_stay  = (wb_reset && (!rst_issued || rsto_busy)) || (wb_mt && !(mt_seen || mt_done));
+	h_stay  = hlt_n || (ok_stay && x_stay) ||
+	          (sb_ne_n && (!ok_stay || wb_u.ser || (wb_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
+	wbh_q <= nreset && (adv_ex ? h_new : h_stay);
+end
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset) begin
+		if (wb_v && wb_hold && !wb_hold_r) begin
+			$display("FAIL: WB's registered hold is off while WB holds (pc %h)", wb_u.pc);
+			$finish;
+		end
+		if (dc1_v && dm_hold1_c && !dm_hold1) begin
+			$display("FAIL: DC1's registered hold is off while the DMU holds it (pc %h)", dc1_u.pc);
+			$finish;
+		end
+		if (ex_v && ex_hold != ((ex_is_md && !md_z && !ex_fault && !md_fin) ||
+		                        (ex_slow && ex_sp != ex_np) ||
+		                        (ex_is_fp && !ex_fault && ex_u.exc == 8'd0 && fp_hold))) begin
+			$display("FAIL: EX's hold from its entry flags disagrees (pc %h)", ex_u.pc);
+			$finish;
+		end
+		if (dc2_v && dc2_mx != ((dc2_u.mem != M_NONE) && (dc2_u.exc == 8'd0))) begin
+			$display("FAIL: DC2's memory flag disagrees (pc %h)", dc2_u.pc);
+			$finish;
+		end
+		if (ilk_q != ag_interlock) begin
+			$display("FAIL: AG's registered interlock %b, the flags' %b (pc %h)", ilk_q, ag_interlock, ag_u.pc);
+			$finish;
+		end
+	end
+// synthesis translate_on
+
 assign mt_v      = wb_v && wb_mt && !wb_is_exc && !mt_seen;
 assign mt_op     = (wb_u.cond == 4'd3) ? (wb_u.imm_b[5] ? 3'd2 : 3'd1) :
                    (wb_u.cond == 4'd4) ? 3'd3 : 3'd4;
@@ -1748,6 +1821,7 @@ always_ff @(posedge clk) begin
 		//------------------------------------------------------------------
 		if (adv_dt) begin
 			dc2_u    <= dt_u;
+			dc2_mx   <= (dt_u.mem != M_NONE) && (dt_u.exc == 8'd0);
 			dc2_a    <= (exw_fw && dt_u.a_src == OS_REG && dt_u.a_reg == exw_reg) ? exw_val : dt_a;
 			dc2_b    <= (exw_fw && dt_u.b_src == OS_REG && dt_u.b_reg == exw_reg) ? exw_val : dt_b;
 			dc2_ea   <= dt_ea;
@@ -1781,6 +1855,10 @@ always_ff @(posedge clk) begin
 			ex_upd   <= dc2_upd;
 			ex_upd2  <= dc2_upd2;
 			ex_fault <= (dc2_u.mem != M_NONE) && dm_fault;
+			ex_mdw   <= (dc2_u.op == OP_MUL || dc2_u.op == OP_DIV) &&
+			            !((dc2_u.mem != M_NONE) && dm_fault);
+			ex_fpw   <= (dc2_u.op == OP_FPU) && !((dc2_u.mem != M_NONE) && dm_fault) &&
+			            (dc2_u.exc == 8'd0);
 			ex_fvec  <= dm_fvec;
 			ex_faddr <= dm_faddr;
 			ex_fslw  <= dm_fslw;
@@ -2293,7 +2371,8 @@ function automatic logic [3:0] wm(input logic [4:0] r);
 	      wmatch(dc1_v, dc1_u, r)};
 endfunction
 always_ff @(posedge clk) begin
-	logic ag_new, cb_n, cx_n, cb_o, cx_o;
+	logic ag_new, cb_n, cx_n, cb_o, cx_o, agv_n;
+	logic [3:0] nb, nx, nu, nu2;
 	ag_new = !flush && !stall_ag && ain_v && !stopped;
 	// a plain load leaving DC2 whose data a base or index takes
 	cb_n = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.base;
@@ -2327,10 +2406,10 @@ always_ff @(posedge clk) begin
 		    ({32{!xe && !x1 && !x0 && !fv[rra[1]]}} & ixf(brd[1], ain_u));
 		agb_q <= !ain_u.base_v ? 32'd0 : cb_n ? dc2_capv : b;
 		agx_q <= cx_n ? ixf(dc2_capv, ain_u) : x;
-		wf_b  <= ain_u.base_v ? wf_next(wm(ain_u.base), wmatch(ag_v, ag_u, ain_u.base), cb_n) : 4'd0;
-		wf_x  <= ain_u.idx_v  ? wf_next(wm(ain_u.idx),  wmatch(ag_v, ag_u, ain_u.idx),  cx_n) : 4'd0;
-		wf_u  <= ain_u.upd_v  ? wf_next(wm(ain_u.upd_reg),  wmatch(ag_v, ag_u, ain_u.upd_reg),  1'b0) : 4'd0;
-		wf_u2 <= ain_u.upd2_v ? wf_next(wm(ain_u.upd2_reg), wmatch(ag_v, ag_u, ain_u.upd2_reg), 1'b0) : 4'd0;
+		nb  = ain_u.base_v ? wf_next(wm(ain_u.base), wmatch(ag_v, ag_u, ain_u.base), cb_n) : 4'd0;
+		nx  = ain_u.idx_v  ? wf_next(wm(ain_u.idx),  wmatch(ag_v, ag_u, ain_u.idx),  cx_n) : 4'd0;
+		nu  = ain_u.upd_v  ? wf_next(wm(ain_u.upd_reg),  wmatch(ag_v, ag_u, ain_u.upd_reg),  1'b0) : 4'd0;
+		nu2 = ain_u.upd2_v ? wf_next(wm(ain_u.upd2_reg), wmatch(ag_v, ag_u, ain_u.upd2_reg), 1'b0) : 4'd0;
 	end
 	else begin
 		// AG holds (or is empty): the flags follow their stages, nothing
@@ -2343,14 +2422,19 @@ always_ff @(posedge clk) begin
 			if (exw_ag && exw_reg == ag_u.idx) agx_q <= ixf(exw_val, ag_u);
 			if (cx_o) agx_q <= ixf(dc2_capv, ag_u);
 		end
-		wf_b  <= wf_next(wf_b,  1'b0, cb_o);
-		wf_x  <= wf_next(wf_x,  1'b0, cx_o);
-		wf_u  <= wf_next(wf_u,  1'b0, 1'b0);
-		wf_u2 <= wf_next(wf_u2, 1'b0, 1'b0);
+		nb  = wf_next(wf_b,  1'b0, cb_o);
+		nx  = wf_next(wf_x,  1'b0, cx_o);
+		nu  = wf_next(wf_u,  1'b0, 1'b0);
+		nu2 = wf_next(wf_u2, 1'b0, 1'b0);
 	end
 	if (flush || kill_now || !nreset) begin
-		wf_b <= 4'd0; wf_x <= 4'd0; wf_u <= 4'd0; wf_u2 <= 4'd0;
+		nb = 4'd0; nx = 4'd0; nu = 4'd0; nu2 = 4'd0;
 	end
+	wf_b <= nb; wf_x <= nx; wf_u <= nu; wf_u2 <= nu2;
+	// the interlock as it will be: AG's next uop (ag_v as it is loaded) and
+	// its flags
+	agv_n = !(flush || kill_now || !nreset) && (stall_ag ? ag_v : (ain_v && !stopped && !halted));
+	ilk_q <= agv_n && ((nb | nx | nu | nu2) != 4'd0);
 end
 // synthesis translate_off
 // the flags against the compares they replace

@@ -86,10 +86,13 @@ module ap68060_dmu
 	input  logic        adv_ex,
 	input  logic        adv_wb,
 	input  logic        kill_now,
-	output logic        dm_hold1,       // DC1 must hold (the engine owns its ports)
+	output logic        dm_hold1,       // DC1 must hold (the engine owns its ports): a
+	                                    // register, formed a clock ahead, conservative
+	output logic        dm_hold1_c,     // ... as the stage's own state gives it (checks)
 	output logic        hold_dt,        // DT must hold (a register): its lookup or
 	                                    // data read is stale
-	output logic        dc2_rdy,
+	output logic        dc2_rdy,        // DC2's access is done: a register, conservative
+	output logic        dc2_rdy_c,      // ... as the stage's own state gives it (checks)
 	output logic [31:0] ldata,
 	output logic [31:0] ldata_al,       // the aligned long (or word, low half)
 	output logic        ldata_alv,      // ... is the load's data
@@ -101,6 +104,8 @@ module ap68060_dmu
 	input  logic [31:0] st_data,
 	output logic        st_rdy,
 	output logic        st_fault,
+	output logic        st_ok,          // WB's store answered without a fault: a
+	                                    // register, formed a clock ahead, conservative
 	output logic [31:0] st_fslw,
 	output logic        lkend,          // a LOCKE write completed
 	output logic        iack_end,       // an interrupt acknowledge cycle ended (its
@@ -173,6 +178,7 @@ module ap68060_dmu
 
 	// store buffer (CACR.ESB, MC68060UM 5.9, 5.10, 8.4.6)
 	output logic        sb_empty,       // no buffered write left
+	output logic        sb_ne_n,        // ... and next cycle, one is left
 	output logic        sb_err,         // a buffered write or a push ended in TEA
 	output logic [31:0] sb_fslw,        // ... FSLW.SBE and/or FSLW.PBE
 	input  logic        sb_err_ack,     // ... the access error for it is taken
@@ -811,6 +817,11 @@ logic        sp_dw;               // a write to the next set while its
 wire  e_quiet = (e_st == E_IDLE) || (e_st == E_S_START) || (e_st == E_SP_W) ||
                 (e_st == E_SP_2) || (e_st == E_SP_3) || (e_st == E_SP_4) ||
                 (e_st == E_S_DONE && sp_job);
+// engine states that hold DC1 (all but the idle engine and its WB store's)
+function automatic logic e_busy(input est_t s);
+	e_busy = s != E_IDLE && s != E_W_START && s != E_W_DEC && s != E_W_PART &&
+	         s != E_W_DONE && s != E_SB;
+endfunction
 // the engine's own lookup through the stolen ports: the ATC's part (an
 // asynchronous read) registered in the clock the tag RAM takes the stolen
 // set (E_S_XLW, E_SP_W), the tags compared from the RAM the clock after
@@ -992,6 +1003,20 @@ logic st_rdy_r, st_fault_r;
 assign st_rdy   = st_rdy_r || (wb_fast && !sn_frz) || (wfs_p1 && m4.x1.hit && !sn_frz);
 assign st_fault = st_rdy_r && st_fault_r;
 
+// The holds the pipeline's stall chain reads, as registers: each formed a
+// clock ahead, for the access entering the stage and for the one staying
+// (the advance picks last), from the state as it will be.  Where the next
+// state is not known early -- a snoop starting, the engine leaving a state
+// -- the hold is assumed (a clock longer at worst).  Checked: a registered
+// hold is never off while the stage's own state holds it.
+//   hold1_q   DC1: the snoop port, a stolen port, a stale lookup, the engine
+//   dc2r_q    DC2: the access done (the fast path, a simple store, the engine)
+//   st_ok_q   WB:  the store answered without a fault
+logic hold1_q, dc2r_q, st_ok_q;
+assign dm_hold1 = hold1_q;
+assign dc2_rdy  = dc2r_q;
+assign st_ok    = st_ok_q;
+
 //--------------------------------------------------------------------------
 // store buffer: a four-entry FIFO of bus write cycles (one entry per cycle,
 // up to four bytes) for writes to write-through and noncachable imprecise
@@ -1026,6 +1051,7 @@ wire         sb_sel  = (sb_n != 3'd0) && !sb_fly;
 assign       bi_more = sb_fly && (sb_n > 3'd1 || b_req);
 wire         sb_pop  = own_sb && (bi_done || bi_err);
 assign       sb_empty = (sb_n == 3'd0);
+assign       sb_ne_n  = (sb_n > 3'd1) || (sb_n == 3'd1 && !sb_pop) || sb_push;
 // a TEA on a buffered write (SBE) or on a push (PBE): recorded, reported
 // as an access error once the buffers are empty (MC68060UM 8.4.6)
 logic        sbe_r, pbe_r;
@@ -1136,7 +1162,7 @@ end
 // sending its uop to the engine's general path: after a miss the loads
 // behind it would otherwise each take that path, every one keeping the
 // engine busy for the next)
-assign dm_hold1 = sn_frz || steal || steal_q || (m1.v && m1_stale) || tk_relook ||
+assign dm_hold1_c = sn_frz || steal || steal_q || (m1.v && m1_stale) || tk_relook ||
                   (e_st != E_IDLE && e_st != E_W_START &&
                    e_st != E_W_DEC && e_st != E_W_PART && e_st != E_W_DONE && e_st != E_SB);
 
@@ -1227,8 +1253,10 @@ always_ff @(posedge clk) begin
 		logic [3:0] vp_wm;               // ways written
 		logic       vp_lwe, vp_lv;       // valid: write, value
 		logic       vp_dwe, vp_dv;       // dirty: write, value
+		logic       m1s_n, mts_n, m2ss_n;   // m1_stale, mt_stale, m2_ss as they will be
 		vp_set = '0; vp_wm = '0; vp_lwe = 1'b0; vp_lv = 1'b0;
 		vp_dwe = 1'b0; vp_dv = 1'b0;
+		m1s_n = m1_stale; mts_n = mt_stale; m2ss_n = m2_ss;
 
 		//--------------------------------------------------------------
 		// stage records
@@ -1247,18 +1275,18 @@ always_ff @(posedge clk) begin
 			m1_tp      <= transp_of(dm_va, dm_super, dm_fc, dm_ack);
 			m1_aset    <= tc_p ? dm_va[16:13] : dm_va[15:12];
 			// (the tag read of this edge is DT's when it looks up again)
-			m1_stale   <= (dw && dw_src != 2'd0 && dw_set == dm_va[10:4]) || !e_quiet || tk_relook;
+			m1s_n      = (dw && dw_src != 2'd0 && dw_set == dm_va[10:4]) || !e_quiet || tk_relook;
 		end
 		else begin
 			if (adv_dc1) m1.v <= 1'b0;
 			m1_tp <= transp_of(m1.a, m1.smode, m1.fc, m1.ack);
 			m1_aset <= tc_p ? m1.a[16:13] : m1.a[15:12];
 			if ((dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet || tk_relook)
-				m1_stale <= 1'b1;
+				m1s_n = 1'b1;
 			// held, the RAMs and the ATC read DC1's own set again every
 			// clock (la_alt): a clock with the engine quiet and no write to
 			// that set makes the lookup good again from the next one
-			else if (!steal && !sn_rset) m1_stale <= 1'b0;
+			else if (!steal && !sn_rset) m1s_n = 1'b0;
 		end
 
 		// DC1 -> DT: the lookup registered.  DT's lookup is stale after an
@@ -1293,7 +1321,7 @@ always_ff @(posedge clk) begin
 					stl    = 1'b0;
 				end
 			end
-			mt_stale <= stl;
+			mts_n = stl;
 			tk_rdok  <= tk_relook && !steal && !sn_rset && e_quiet &&
 			            !(dw && dw_src != 2'd0 && dw_set == mt.a[10:4]);
 		end
@@ -1334,7 +1362,7 @@ always_ff @(posedge clk) begin
 			m2.fast  <= tk_fast;
 			m2.sfast <= tk_sfast;
 			m2_bsel  <= tk_bsel;
-			m2_ss    <= st_simp(mt, x_tk, tk_split);
+			m2ss_n   = st_simp(mt, x_tk, tk_split);
 		end
 		else begin
 			if (adv_dc2) m2.r.v <= 1'b0;
@@ -2709,7 +2737,7 @@ always_ff @(posedge clk) begin
 				xm = m2.x;
 				xm.hit = 1'b0;
 				m2.x.hit <= 1'b0;
-				m2_ss    <= st_simp(m2.r, xm, m2.split);
+				m2ss_n   = st_simp(m2.r, xm, m2.split);
 			end
 			else m3.x.hit <= 1'b0;
 			// (the engine taking the access this cycle copies its record)
@@ -2723,7 +2751,7 @@ always_ff @(posedge clk) begin
 						xm = m2.x;
 						xm.hit = 1'b0;
 						m2.x.hit <= 1'b0;
-						m2_ss    <= st_simp(m2.r, xm, m2.split);
+						m2ss_n   = st_simp(m2.r, xm, m2.split);
 					end
 					if (m2.x1.hit && m2.x1.pa[10:4] == vp_set && m2.x1.way == 2'(j)) m2.x1.hit <= 1'b0;
 				end
@@ -2780,8 +2808,73 @@ always_ff @(posedge clk) begin
 			dv_wm  <= vp_wm;
 			dv_lv  <= vp_lv;
 		end
+		m1_stale <= m1s_n;
+		mt_stale <= mts_n;
+		m2_ss    <= m2ss_n;
+
+		//--------------------------------------------------------------
+		// the holds a clock ahead (hold1_q, dc2r_q, st_ok_q)
+		//--------------------------------------------------------------
+		begin
+			logic frz_n, nofrz, m1v_n, mtv_n, busy_n, stl_set, r_new, r_stay, ok_new, ok_stay;
+			// the snoop port may hold the cache next cycle
+			frz_n = sn_frz || sn_req || sf_req;
+			nofrz = !frz_n;
+			// DC1: the snoop port, a port stolen now or next cycle (steal_q is
+			// steal now), the records' stale lookups, the engine's state next
+			// cycle (a state left for IDLE unconditionally is not held for)
+			m1v_n   = !kill_now && (adv_ag ? dm_req : (!adv_dc1 && m1.v));
+			mtv_n   = !kill_now && (adv_dc1 ? m1.v : (!adv_dt && mt.v));
+			stl_set = !sn_frz && (e_st == E_S_START || e_st == E_S_XL || e_st == E_S_RD ||
+			                      e_st == E_M_START || e_st == E_M_SCAN || e_st == E_FILL ||
+			                      e_st == E_PUSHV || e_st == E_TW_DESC);
+			if (sn_frz)
+				busy_n = e_busy(e_st);
+			else
+				busy_n = (e_busy(e_st) && e_st != E_S_DONE && e_st != E_I_DONE) ||
+				         (e_st == E_IDLE && !wfs_p1 &&
+				          ((mt_v && !mt_done) ||
+				           (!wb_slow && (dc2_slow || (e_job && m2.r.v && !e_dc2_done) ||
+				                         (iw_req && !iw_done && iw_ok && sb_empty))))) ||
+				         (e_st == E_W_PART && (wd_push || wd_wtp || (!wd_cb && !wd_sb)));
+			hold1_q <= frz_n || steal || stl_set || (m1v_n && m1s_n) || (mtv_n && mts_n) || busy_n;
+			// DC2: an access entering (its fast and simple-store decisions,
+			// unless the engine may own DC2); one staying (the engine
+			// finishing it, or its own decisions while the engine does not
+			// own it)
+			r_new  = !mt.v || (!e_job && e_st != E_S_START && (tk_fast || m2ss_n));
+			r_stay = !m2.r.v || e_dc2_done || (e_st == E_S_DONE && !sn_frz && !e_kill) ||
+			         (!e_job && !(e_st == E_S_START && !sn_frz) && (m2.fast || m2ss_n));
+			dc2r_q <= adv_dt ? r_new : (adv_dc2 || r_stay);
+			// WB: a store entering (the fast store: the engine idle, or
+			// finishing a job, and no snoop starting); one staying (answered
+			// now, the engine's store finishing, or the fast store as the
+			// engine finishes its job)
+			ok_new  = !m3.split && m3.x.ok && !m3.x.flt && m3.x.hit && m3.x.cm == 2'b01 &&
+			          !m3.r.lock && (m3.r.msz != SZ_Q) && dc_en && nofrz &&
+			          ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) || e_st == E_S_DONE);
+			ok_stay = (st_rdy_r && !st_fault_r) || (!sn_frz && (wb_fast || (wfs_p1 && m4.x1.hit))) ||
+			          (!sn_frz && e_st == E_W_DONE && !(bo_err && m4.r.ack != 2'd3) &&
+			           !(m4.split && !e_part)) ||
+			          (nofrz && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
+			st_ok_q <= adv_ex ? ok_new : ok_stay;
+		end
 	end
 end
+
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset) begin
+		if (dc2r_q && !dc2_rdy_c) begin
+			$display("FAIL: DMU: DC2's registered ready is ahead of its state");
+			$finish;
+		end
+		if (wb_st && st_ok_q && !(st_rdy && !st_fault)) begin
+			$display("FAIL: DMU: WB's registered store answer is ahead of its state");
+			$finish;
+		end
+	end
+// synthesis translate_on
 
 // synthesis translate_off
 always_ff @(posedge clk)
@@ -2803,7 +2896,7 @@ assign tw_busy = (e_st == E_TW_START) || (e_st == E_TW_DESC) || (e_st == E_TW_DB
 
 // DC2 answer
 // once the engine has taken the DC2 uop, only its completion releases it
-assign dc2_rdy = !m2.r.v || e_dc2_done || (!e_job && (fast_now || st_simple));
+assign dc2_rdy_c = !m2.r.v || e_dc2_done || (!e_job && (fast_now || st_simple));
 assign ldata   = e_dc2_done ? e_ldata : fast_data;
 // for AG's capture of a load into a base or index (a short path): the long
 // word of the line the address points at -- the operand itself for an

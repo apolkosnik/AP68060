@@ -159,7 +159,7 @@ localparam int NC = 2;
 logic [NC-1:0] b_req, b_gnt, b_done, b_err;
 logic          b_own;
 logic          sn_ovf, sn_busy, sn_act;
-logic          sb_empty, sb_err, sb_err_ack;     // the DMU's store buffer
+logic          sb_empty, sb_ne_n, sb_err, sb_err_ack;     // the DMU's store buffer
 logic  [31:0]  sb_fslw;
 busreq_t       b_breq [NC];
 logic [127:0]  b_wdata [NC];
@@ -244,7 +244,7 @@ logic  [2:0] sfc, dfc;
 logic        kill_now, adv_ag, lk_abandon;
 logic [31:0] dtt0, dtt1, itt0, itt1, tc;
 logic        q_odd;
-logic        dm_hold1, mt_v, mt_ng, mt_wr, mt_done;
+logic        dm_hold1, dm_hold1_c, dm_dc2_rdy_c, dm_st_ok, mt_v, mt_ng, mt_wr, mt_done;
 logic  [2:0] mt_op, mt_fc;
 logic  [1:0] mt_scope, mt_caches;
 logic [31:0] mt_addr, mt_pa, mt_fslw, urp, srp, dm_st_faddr;
@@ -288,12 +288,12 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.tw_busy(tw_busy), .pst5(pst5),
 	.irq_pending(irq_pending),
 	.adv_dc1(adv_dc1), .adv_dt(adv_dt), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
-	.dm_dc2_rdy(dm_dc2_rdy), .dm_ldata(dm_ldata), .dm_ldata_al(dm_ldata_al), .dm_ldata_alv(dm_ldata_alv), .dm_fault(dm_fault),
+	.dm_dc2_rdy(dm_dc2_rdy), .dm_dc2_rdy_c(dm_dc2_rdy_c), .dm_ldata(dm_ldata), .dm_ldata_al(dm_ldata_al), .dm_ldata_alv(dm_ldata_alv), .dm_fault(dm_fault),
 	.dm_fvec(dm_fvec), .dm_faddr(dm_faddr), .dm_fslw(dm_fslw), .if_cause(if_cause),
-	.dm_st_v(dm_st_v), .dm_st_data(dm_st_data), .dm_st_rdy(dm_st_rdy),
+	.dm_st_v(dm_st_v), .dm_st_data(dm_st_data), .dm_st_rdy(dm_st_rdy), .dm_st_ok(dm_st_ok),
 	.dm_st_fault(dm_st_fault), .dm_st_fslw(dm_st_fslw), .dm_lkend(dm_lkend), .dm_iack_end(dm_iack_end),
-	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
-	.dm_hold1(dm_hold1), .dm_hold_dt(dm_hold_dt), .mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope),
+	.sb_empty(sb_empty), .sb_ne_n(sb_ne_n), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
+	.dm_hold1(dm_hold1), .dm_hold1_c(dm_hold1_c), .dm_hold_dt(dm_hold_dt), .mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope),
 	.mt_caches(mt_caches), .mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng),
 	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
 	.dm_st_faddr(dm_st_faddr),
@@ -312,10 +312,10 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .iack_lvl(iack_lvl),
 	.dm_older(dm_older),
 	.adv_dc1(adv_dc1), .adv_dt(adv_dt), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
-	.kill_now(kill_now), .dm_hold1(dm_hold1), .hold_dt(dm_hold_dt),
-	.dc2_rdy(dm_dc2_rdy), .ldata(dm_ldata), .ldata_al(dm_ldata_al), .ldata_alv(dm_ldata_alv), .fault(dm_fault), .fvec(dm_fvec),
+	.kill_now(kill_now), .dm_hold1(dm_hold1), .dm_hold1_c(dm_hold1_c), .hold_dt(dm_hold_dt),
+	.dc2_rdy(dm_dc2_rdy), .dc2_rdy_c(dm_dc2_rdy_c), .ldata(dm_ldata), .ldata_al(dm_ldata_al), .ldata_alv(dm_ldata_alv), .fault(dm_fault), .fvec(dm_fvec),
 	.faddr(dm_faddr), .fslw(dm_fslw),
-	.st_v(dm_st_v), .st_data(dm_st_data), .st_rdy(dm_st_rdy),
+	.st_v(dm_st_v), .st_data(dm_st_data), .st_rdy(dm_st_rdy), .st_ok(dm_st_ok),
 	.st_fault(dm_st_fault), .st_fslw(dm_st_fslw), .st_faddr(dm_st_faddr), .lkend(dm_lkend), .iack_end(dm_iack_end),
 	.mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope), .mt_caches(mt_caches),
 	.mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng), .mt_wr(mt_wr),
@@ -337,7 +337,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.bi_req(b_req[0]), .bi_breq(b_breq[0]), .bi_wdata(b_wdata[0]),
 	.bi_gnt(b_gnt[0]), .bi_done(b_done[0]), .bi_err(b_err[0]), .bi_drop(b_drop), .bi_more(b_more),
 	.bi_rvalid(b_rvalid && b_rclient == 1'b0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
-	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
+	.sb_empty(sb_empty), .sb_ne_n(sb_ne_n), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
 	.b_ravec(b_ravec), .b_rtci(b_rtci),
 	.sn_req(sn_req), .sn_pa(sn_pa), .sn_look(sn_look), .sn_hit(sn_hit),
 	.sn_dirty(sn_dirty), .sn_line(sn_line), .sn_inv(sn_inv), .sn_act(sn_act), .sn_wr(sn_wr),
