@@ -186,6 +186,7 @@ endfunction
 // on F0 and the ATC from registers (the BIU holds the fetch's requests
 // while the processor is stopped, halted or resetting)
 logic        stop_q;
+(* preserve *) logic stop_f;    // (its copy for F0's go, kept apart: placed by F0)
 logic        fl_all_q, fl_pg_q, fl_ng_q;
 // the ATC's lookup address and space: fpc's copy, or a page flush's (in
 // the clock fl_pg_q acts, F0 issues nothing) -- registers, no
@@ -614,7 +615,7 @@ wire       bt_room  = ({1'b0, tq_n} + {4'd0, f1_v} + {4'd0, f2_btk} + {4'd0, |f3
                        {4'd0, |f4_b} + {4'd0, |f5_b} + {4'd0, |f6_b}) < 5'(TQN);
 // a snooped invalidation goes first (the snooper has priority, 4.5)
 // (a redirect in the same clock overrides what F0 loads: it is not here)
-wire       f0_go    = (st == S_RUN) && !odd && !stop_q && !m_setpc &&
+wire       f0_go    = (st == S_RUN) && !odd && !stop_f && !m_setpc &&
                       !iatc_flush_page && !fl_pg_q && !inv_busy && !sn_inv && room_q;
 
 // F0's next address: from the stages' registers (a redirect, F2's miss,
@@ -872,6 +873,7 @@ always_ff @(posedge clk) begin
 		fspec <= 1'b0;
 		st    <= S_RUN;
 		stop_q <= 1'b1;
+		stop_f <= 1'b1;
 		fl_all_q <= 1'b0; fl_pg_q <= 1'b0; fl_ng_q <= 1'b0;
 		f1_v  <= 1'b0; f1_pc <= '0; f1_s <= 1'b0; f1_dem <= 1'b0; f1_hit <= 1'b0;
 		f1_ea <= '0; f1_ew <= '0; f1_ah <= 1'b0;
@@ -920,6 +922,7 @@ always_ff @(posedge clk) begin
 		sn_ihit     <= 1'b0;
 		inv_hold    <= 1'b0;
 		stop_q      <= stop;
+		stop_f      <= stop;
 		// F0's address, and the ATC's (fpc's copy, or a page flush's)
 		fpc         <= f1_tg0 ? {f1_t0, 1'b0} : f1_tg1 ? {f1_t1, 1'b0} : fpc_b;
 		atc_la      <= f1_ta0 ? {f1_t0, 1'b0} : f1_ta1 ? {f1_t1, 1'b0} : atc_b;

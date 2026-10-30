@@ -184,7 +184,11 @@ logic  [4:0] t_r, t_dreg;
 logic        t_isan, t_dv, t_last;
 logic [31:0] t_off;
 logic  [7:0] t_amt;
-logic [15:0] c_kan_oh, c_kx_oh; // An's and the index's mask bits, one-hot
+logic [15:0] t_rest;            // ... the registers after this transfer
+// (whether a transfer is An's or the index's: the mask bits still below
+// theirs, counted down per transfer, and whether theirs is in the mask)
+logic  [4:0] c_ban, c_bx;
+logic        c_anin, c_xin;
 
 // the D2b build's view: the word and record (D2b's)
 dinst_t      src;
@@ -220,6 +224,11 @@ function automatic logic pcle(input logic [15:0] m, input logic [1:0] k);
 	n = '0;
 	for (int i = 0; i < 16; i++) n = n + {4'd0, m[i]};
 	pcle = (n <= {3'd0, k});
+endfunction
+// set bits
+function automatic logic [4:0] popc16(input logic [15:0] m);
+	popc16 = '0;
+	for (int i = 0; i < 16; i++) popc16 = popc16 + {4'd0, m[i]};
 endfunction
 // the lowest set bit's number
 function automatic logic [3:0] enc16(input logic [15:0] m);
@@ -1371,10 +1380,13 @@ always_ff @(posedge clk) begin
 		isan = (b_bi1 == kan);
 		isx  = (b_bi1 == kx);
 		r    = mvreg(b_bi1, pd, sp_reg);
-		c_kan_oh <= 16'd1 << kan;
-		c_kx_oh  <= 16'd1 << kx;
+		c_ban    <= popc16(rb.ext1 & ((16'd1 << kan) - 16'd1));
+		c_bx     <= popc16(rb.ext1 & ((16'd1 << kx) - 16'd1));
+		c_anin   <= rb.ext1[kan];
+		c_xin    <= rb.ext1[kx];
 		t_mask   <= rb.ext1;
 		t_low    <= b_low1;
+		t_rest   <= rb.ext1 & ~b_low1;
 		t_r      <= r;
 		t_isan   <= isan;
 		{t_dreg, t_dv} <= mvdst(r, isan, isx, b_fb_in, b_fx_in, pd, pi);
@@ -1387,13 +1399,18 @@ always_ff @(posedge clk) begin
 		logic  [3:0] bin;
 		logic        isan, isx;
 		logic  [4:0] r;
-		lown = n_mv_rest & (~n_mv_rest + 16'd1);
-		bin  = enc16(n_mv_rest);
-		isan = |(lown & c_kan_oh);
-		isx  = |(lown & c_kx_oh);
+		// (from t_rest, a register: no mask arithmetic ahead of the
+		// encoder; An's and the index's by their counts)
+		lown = t_rest & (~t_rest + 16'd1);
+		bin  = enc16(t_rest);
+		isan = (c_ban == 5'd1) && c_anin;
+		isx  = (c_bx == 5'd1) && c_xin;
 		r    = mvreg(bin, c_pd, sp_reg);
-		t_mask <= n_mv_rest;
+		c_ban  <= (c_ban != 5'd0) ? c_ban - 5'd1 : 5'd0;
+		c_bx   <= (c_bx != 5'd0) ? c_bx - 5'd1 : 5'd0;
+		t_mask <= t_rest;
 		t_low  <= lown;
+		t_rest <= t_rest & ~lown;
 		t_r    <= r;
 		t_isan <= isan;
 		{t_dreg, t_dv} <= mvdst(r, isan, isx, c_fb_in, c_fx_in, c_pd, c_pi);
@@ -1657,7 +1674,8 @@ always_ff @(posedge clk)
 			nd  = 5'd0;
 			for (int i = 0; i < 16; i++) nd = nd + {4'd0, dbg_ext1[i] && !t_mask[i]};
 			sb  = {5'd0, c_sb};
-			if (t_low != (t_mask & (~t_mask + 16'd1)) || t_r != r || t_isan != (r == c_an) ||
+			if (t_low != (t_mask & (~t_mask + 16'd1)) || t_rest != (t_mask & ~t_low) ||
+			    t_r != r || t_isan != (r == c_an) ||
 			    {t_dreg, t_dv} != dst || t_last != (mv_act ? mv_pc1 : pc1(t_mask)) ||
 			    (t_mask & ~dbg_ext1) != 16'd0 || t_amt != 8'(({3'd0, nd} + 8'd1) * sb) ||
 			    t_off != (c_pd ? -32'(({3'd0, nd} + 8'd1) * sb) : 32'(nd * sb))) begin

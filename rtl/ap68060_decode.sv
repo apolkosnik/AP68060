@@ -247,6 +247,11 @@ function automatic logic [7:0] ea_kind(input ea_t e1, input ea_t e0);
 	ea_kind[7:6] = ea_dk(e1);
 endfunction
 
+// the first n words of the window (n <= 7)
+function automatic logic [7:0] bmask(input logic [2:0] n);
+	bmask = 8'((9'd1 << n) - 9'd1);
+endfunction
+
 // effective first micro-instruction given the routine's leading jump
 function automatic logic jcond(input logic [4:0] jc, input logic [3:0] e0,
                                input logic [3:0] e1, input logic [15:0] ext1,
@@ -457,22 +462,32 @@ wire   fire    = cs_fire || cr_fire;
 logic        g_go, g_part, g_exc;
 logic  [2:0] g_use;
 ph_t         g_nph;
+// Each case's terms apart, as kept nets, and the case picks last (one-pass
+// or not -- full-format words at the EA positions -- is the deep one):
+//   EA extension at the head (a part): its length l, fits/faulted, the part's
+//   whole one-pass instruction: its length tot
+//   first part (operation word, fixed words, immediate): its length b
+(* keep *) wire       k_fast;
+(* keep *) wire       k_gop, k_flp, k_gof, k_gos, k_fls;
+(* keep *) wire [2:0] k_up, k_uf, k_us;
+assign k_fast = pd0.legal && !pd0.slow && !full0 && !full1 && (pd0.tot <= 4'd7);
+assign k_gof  = (pd0.tot <= qcnt) || q_flt;
+assign k_uf   = (pd0.tot <= qcnt) ? pd0.tot[2:0] : qcnt[2:0];      // (q_flt: what is queued)
+assign k_gos  = ({1'b0, pd0.b} <= qcnt) || q_flt;
+assign k_us   = ({1'b0, pd0.b} <= qcnt) ? pd0.b : qcnt[2:0];
+assign k_fls  = |(win_flt & bmask(pd0.b));
+wire   [2:0] p_l = ea_len((ph == PH_EA0) ? part_pd.i0 : part_pd.i1, win[0],
+                          (ph == PH_EA0) ? part_imml : 3'd0);
+assign k_gop  = ({1'b0, p_l} <= qcnt) || q_flt;
+assign k_up   = ({1'b0, p_l} <= qcnt) ? p_l : qcnt[2:0];
+assign k_flp  = |(win_flt & bmask(p_l));
 always_comb begin
-	logic [3:0] i;
-	logic [2:0] l, il;
-	logic [15:0] m;
-	logic       flt, fast;
 	g_go = 1'b0; g_part = 1'b0; g_use = 3'd0; g_nph = ph;
 	if (ph != PH_IDLE) begin
 		// slow path: the EA extension at the head
-		i  = (ph == PH_EA0) ? part_pd.i0 : part_pd.i1;
-		il = (ph == PH_EA0) ? part_imml : 3'd0;
-		l  = ea_len(i, win[0], il);
-		if ({1'b0, l} <= qcnt || q_flt) begin
-			g_use = ({1'b0, l} <= qcnt) ? l : qcnt[2:0];   // (q_flt: what is queued)
-			m     = lmask({1'b0, l});
-			flt   = |(win_flt & m[15:8]);
-			if (ph == PH_EA0 && has_ext(part_pd.i1) && !flt) begin
+		if (k_gop) begin
+			g_use = k_up;
+			if (ph == PH_EA0 && has_ext(part_pd.i1) && !k_flp) begin
 				g_part = 1'b1;
 				g_nph  = PH_EA1;
 			end
@@ -487,26 +502,23 @@ always_comb begin
 		g_go = 1'b1;
 	end
 	else if (qcnt != 4'd0) begin
-		fast = pd0.legal && !pd0.slow && !full0 && !full1 && (pd0.tot <= 4'd7);
 		if (!pd0.legal) begin
 			g_use = 3'd1;
 			g_go  = 1'b1;
 		end
-		else if (fast) begin
-			if (pd0.tot <= qcnt || q_flt) begin
+		else if (k_fast) begin
+			if (k_gof) begin
 				g_go  = 1'b1;
-				g_use = (pd0.tot <= qcnt) ? pd0.tot[2:0] : qcnt[2:0];
+				g_use = k_uf;
 			end
 		end
-		else if ({1'b0, pd0.b} <= qcnt || q_flt) begin
+		else if (k_gos) begin
 			// slow path, first part: operation word, fixed words, immediate
-			g_use = ({1'b0, pd0.b} <= qcnt) ? pd0.b : qcnt[2:0];
-			m     = lmask({1'b0, pd0.b});
-			flt   = |(win_flt & m[15:8]);
+			g_use = k_us;
 			// (stop at the faulted part; an exception needs no more parsing
 			// either: rx_q, registered alongside, turns the part into the
 			// record at the take)
-			if (flt) g_go = 1'b1;
+			if (k_fls) g_go = 1'b1;
 			else begin
 				g_part = 1'b1;
 				g_nph  = has_ext(pd0.i0) ? PH_EA0 : PH_EA1;
@@ -545,7 +557,14 @@ always_comb begin
 	else if (pd0.cls == CL_UNIMPL || ((opw[15:7] == 9'b0100_1100_0) && win[1][10]))
 		x_exc = 8'd61;
 end
-assign g_exc = (x_exc != 8'd0);
+// (whether there is one: the cases' OR, no priority -- every vector above
+// is nonzero)
+wire x_any = !pd0.legal || (pd0.cls == CL_MOVEC && !movec_ok(win[1][11:0])) ||
+             (pd0.cls == CL_LPSTOP && win[1] != 16'h01C0) || (pd0.priv && !sm_q) ||
+             ((pd0.cls == CL_STOP || pd0.cls == CL_LPSTOP) && !a_imm[13]) ||
+             pd0.cls == CL_TRAP || pd0.cls == CL_ILLEGAL || pd0.cls == CL_UNIMPL ||
+             ((opw[15:7] == 9'b0100_1100_0) && win[1][10]);
+assign g_exc = x_any;
 
 // what the fire takes: the common case's, or the decision's
 wire  [2:0] u_use  = r_v ? r_use : pd0.tot[2:0];
@@ -861,7 +880,7 @@ always_ff @(posedge clk) begin
 		end
 		else if (ph == PH_IDLE) begin
 			ir_exc  <= x_exc;
-			ir_xany <= x_exc != 8'd0;
+			ir_xany <= x_any;
 		end
 		else begin
 			ir_exc  <= 8'd0;
@@ -1319,6 +1338,31 @@ wire  pop  = rq_pop;
 // lands past the count: the kills, far or late, only touch the count)
 wire  wr   = ir_v && ir_go;
 wire  btb_ok = (ntarget[0] == 1'b0) && (nrec.exc == 8'd0);
+// the prediction for either value of Bcc's history bit (nredir's terms:
+// D1a's but the loop exit and the return stack's count), and the redirect
+// and BTB write decided from each: {bq_wv, bq_we, d_redir_v}
+wire  pred_ok = !ir_xany && ir_pd.legal && !ir_odd;
+wire  pred_h0 = pred_ok && (ir_rts ? (ras_n != 4'd0)
+                                   : ((ir_nr0 || (ir_nrb &&  ir_dsign)) && !(ir_lpb && lp_exit)));
+wire  pred_h1 = pred_ok && (ir_rts ? (ras_n != 4'd0)
+                                   : ((ir_nr0 || (ir_nrb && !ir_dsign)) && !(ir_lpb && lp_exit)));
+// (a record refetched at WB predicts nothing: nrec_q.pred)
+wire  snr_q   = ir_go && (ir_bt_restart || part_bt);
+function automatic logic [2:0] rdec(input logic pr, input logic pu, input logic idle, input logic be,
+                                    input logic te, input logic sn, input logic lo, input logic bo);
+	rdec = 3'b000;
+	if (pu && idle && be) begin
+		// the fetch already took this branch: fine if D1 agrees
+		// (a loop exit keeps the entry: the next pass takes it)
+		if (!(pr && te)) rdec = {pr && bo, !lo, 1'b1};
+	end
+	else if (pu && pr && !sn && idle)
+		rdec = {1'b1, bo, 1'b1};          // next time the fetch takes it
+endfunction
+(* keep *) wire [2:0] dr_h0;
+(* keep *) wire [2:0] dr_h1;
+assign dr_h0 = rdec(pred_h0, push, ir_ph == PH_IDLE, ir_bt_end, teq, snr_q, lp_ovr, btb_ok);
+assign dr_h1 = rdec(pred_h1, push, ir_ph == PH_IDLE, ir_bt_end, teq, snr_q, lp_ovr, btb_ok);
 // the entry's kind: a call pushes the fetch's return stack, a return pops it
 wire  [1:0] btb_kind = rcall ? 2'd1 : rret ? 2'd2 : 2'd0;
 always_comb begin
@@ -1501,12 +1545,8 @@ always_ff @(posedge clk) begin
 		if (rr_v) ras_top <= ras_f[ras_tp];
 
 		if (ir_ok) begin
-			if (ir_bt_restart) begin
-				// a flagged word inside an instruction: drop the entry (the
-				// record is refetched at WB)
-				bq_we      <= 1'b1;
-				bq_wv      <= 1'b0;
-			end
+			// (a flagged word inside an instruction drops its entry -- the
+			// record is refetched at WB: bq_we below)
 			// the flag of an earlier part stays with the instruction
 			part_bt <= ir_part && (part_bt || ir_bt_restart);
 			// a call writes the slot above the top, push or not: only the
@@ -1546,27 +1586,19 @@ always_ff @(posedge clk) begin
 		// the redirect's and the BTB write's fields, every clock (they are
 		// used only with d_redir_v / bq_we): the decision, which waits for
 		// the target compare, only sets those
-		d_redir_pc <= nrec.pred ? ntarget : ir_npc;
+		// (the decision is formed for either value of the history counter's
+		// bit, which D1b reads from its table this clock and picks last)
+		d_redir_pc <= (bht_q[1] ? pred_h1 : pred_h0) ? ntarget : ir_npc;
 		bq_wi      <= ir_bt_restart ? ir_bt_fa[BTB_AW+1:2]  : ir_lastpc[BTB_AW+1:2];
 		bq_wtag    <= ir_bt_restart ? ir_bt_fa[31:BTB_AW+2] : ir_lastpc[31:BTB_AW+2];
 		bq_wslot   <= ir_bt_restart ? ir_bt_fa[1] : ir_lastpc[1];
 		bq_wkind   <= btb_kind;
 		bq_wtgt    <= ntarget[31:1];
-		if (push && ir_ph == PH_IDLE && ir_bt_end) begin
-			// the fetch already took this branch: fine if D1 agrees
-			if (!(nrec.pred && teq)) begin
-				d_redir_v  <= 1'b1;
-				// (a loop exit keeps the entry: the next pass takes it)
-				bq_we      <= !lp_ovr;
-				bq_wv      <= nrec.pred && btb_ok;
-			end
-		end
-		else if (push && nrec_q.pred && ir_ph == PH_IDLE) begin
-			d_redir_v  <= 1'b1;
-			// next time the fetch takes it
-			bq_we      <= btb_ok;
-			bq_wv      <= 1'b1;
-		end
+		d_redir_v  <= bht_q[1] ? dr_h1[0] : dr_h0[0];
+		// (a flagged word inside an instruction drops the entry: the
+		// decision never fires with it)
+		bq_we      <= (ir_ok && ir_bt_restart) || (bht_q[1] ? dr_h1[1] : dr_h0[1]);
+		bq_wv      <= bht_q[1] ? dr_h1[2] : dr_h0[2];
 
 		// four records: D1a took this one only with room for it (the data:
 		// below, without reset)
@@ -1612,6 +1644,11 @@ always_ff @(posedge clk)
 always_ff @(posedge clk)
 	if (nrst && ir_v && ir_ph == PH_IDLE && !dbg_pred) begin
 		$display("FAIL: decode: the prediction from D1a's terms, the class's case's");
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst && ir_v && ir_ph == PH_IDLE && (bht_q[1] ? pred_h1 : pred_h0) != nrec.pred) begin
+		$display("FAIL: decode: the prediction by the history bit's two cases");
 		$finish;
 	end
 always_ff @(posedge clk)
