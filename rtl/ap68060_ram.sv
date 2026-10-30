@@ -127,8 +127,9 @@ module ap68060_rf #(
 	parameter int NR = 5,
 	parameter int NW = 3,             // write ports (2 or 3): the later wins
 	parameter logic [NR-1:0] REGSEL = '0   // read ports whose bank select is
-	                                       // registered from ran, the address
-	                                       // the port presents next clock
+	                                       // registered from next clock's
+	                                       // address: ran1 if rsel, else ran0
+	                                       // (rsel comes late: it picks last)
 )(
 	input  logic        clk,
 	input  logic  [2:0] we,
@@ -136,7 +137,9 @@ module ap68060_rf #(
 	input  logic [31:0] woh [3],      // wa one-hot (the caller's registers)
 	input  logic [31:0] wd [3],
 	input  logic  [4:0] ra [NR],
-	input  logic  [4:0] ran [NR],
+	input  logic  [4:0] ran0 [NR],
+	input  logic  [4:0] ran1 [NR],
+	input  logic [NR-1:0] rsel,
 	output logic [31:0] rd [NR]
 );
 	logic [1:0]  lvt [32];
@@ -167,14 +170,16 @@ module ap68060_rf #(
 	// a registered port's select: the table's entry for next clock's
 	// address, as this clock's writes leave it (the later port wins, as in
 	// the table) -- the table's 32:1 read is off the read path
+	function automatic logic [1:0] nsel(input logic [4:0] a);
+		logic [1:0] v;
+		v = lvt[a];
+		for (int w = 0; w < NW; w++)
+			if (we[w] && wa[w] == a) v = 2'(w);
+		nsel = v;
+	endfunction
 	always_ff @(posedge clk)
-		for (int r = 0; r < NR; r++) begin
-			logic [1:0] v;
-			v = lvt[ran[r]];
-			for (int w = 0; w < NW; w++)
-				if (we[w] && wa[w] == ran[r]) v = 2'(w);
-			sel_q[r] <= v;
-		end
+		for (int r = 0; r < NR; r++)
+			sel_q[r] <= rsel[r] ? nsel(ran1[r]) : nsel(ran0[r]);
 	// synthesis translate_off
 	always_ff @(posedge clk)
 		for (int w = 0; w < NW; w++)

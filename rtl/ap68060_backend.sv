@@ -426,21 +426,25 @@ assign ag_hold = ilk_q;
 // (ports 2-6 address registers whose next value is known: their bank
 // selects, and their front-or-back selects fsel_q, are registered from
 // next clock's address, rran; ports 0/1 address the sequencer's uop)
-logic [4:0] rran [7];
+// (two candidates each, the held address and the one loaded, the load
+// decision -- the stall chain -- picking last)
+logic [4:0] rran0 [7], rran1 [7];
+logic [6:0] rrsel;
 localparam logic [6:0] RSEL = 7'b1111100;
-ap68060_rf #(.NR(7), .REGSEL(RSEL)) rff (.clk(clk), .we(fwe), .wa(fwa), .woh(fwoh), .wd(fwd), .ra(rra), .ran(rran), .rd(frd));
-ap68060_rf #(.NR(7), .NW(2), .REGSEL(RSEL)) rfb (.clk(clk), .we(bwe), .wa(bwa), .woh(bwoh), .wd(bwd), .ra(rra), .ran(rran), .rd(brd));
+ap68060_rf #(.NR(7), .REGSEL(RSEL)) rff (.clk(clk), .we(fwe), .wa(fwa), .woh(fwoh), .wd(fwd), .ra(rra), .ran0(rran0), .ran1(rran1), .rsel(rrsel), .rd(frd));
+ap68060_rf #(.NR(7), .NW(2), .REGSEL(RSEL)) rfb (.clk(clk), .we(bwe), .wa(bwa), .woh(bwoh), .wd(bwd), .ra(rra), .ran0(rran0), .ran1(rran1), .rsel(rrsel), .rd(brd));
 // AG loads ain_u when it takes it (not under a flush); the skid loads the
 // sequencer's uop when AG does not take it
 wire ag_ld = !flush && ag_take && ain_v;
 wire sk_ld = !flush && !sk_v && SKID && in_v && in_rdy && !ag_take;
-assign rran[0] = in_u.base;
-assign rran[1] = in_u.idx;
-assign rran[2] = ag_ld ? ain_u.upd2_reg : ag_u.upd2_reg;
-assign rran[3] = ag_ld ? ain_u.a_reg    : ag_u.a_reg;
-assign rran[4] = ag_ld ? ain_u.b_reg    : ag_u.b_reg;
-assign rran[5] = sk_ld ? in_u.base : sk_u.base;
-assign rran[6] = sk_ld ? in_u.idx  : sk_u.idx;
+assign rrsel = {sk_ld, sk_ld, ag_ld, ag_ld, ag_ld, 2'b00};
+assign rran0[0] = in_u.base;        assign rran1[0] = in_u.base;
+assign rran0[1] = in_u.idx;         assign rran1[1] = in_u.idx;
+assign rran0[2] = ag_u.upd2_reg;    assign rran1[2] = ain_u.upd2_reg;
+assign rran0[3] = ag_u.a_reg;       assign rran1[3] = ain_u.a_reg;
+assign rran0[4] = ag_u.b_reg;       assign rran1[4] = ain_u.b_reg;
+assign rran0[5] = sk_u.base;        assign rran1[5] = in_u.base;
+assign rran0[6] = sk_u.idx;         assign rran1[6] = in_u.idx;
 // the front-valid bits as they will be (fv's next value), and ports 2-6's
 // front-or-back selects from them
 logic [31:0] fv_n;
@@ -456,7 +460,7 @@ always_comb begin
 	for (int b = 0; b < 4; b++) if (fv_clr[b]) fv_n[8*b +: 8] = 8'd0;
 end
 always_ff @(posedge clk)
-	for (int r = 2; r < 7; r++) fsel_q[r] <= fv_n[rran[r]];
+	for (int r = 2; r < 7; r++) fsel_q[r] <= rrsel[r] ? fv_n[rran1[r]] : fv_n[rran0[r]];
 // synthesis translate_off
 always_ff @(posedge clk)
 	for (int r = 2; r < 7; r++)
@@ -1386,7 +1390,10 @@ wire ex_odd_w = ex_br && (ex_bdb ? ex_u.target[0] :
 wire        ex_fin  = ex_v && !ex_hold;
 assign exw_v   = ex_fin && ex_d_eff;
 wire        exw_ag  = exw_v;
-wire        exw_fw  = exw_v;
+// (EX's own operands' bypass, dc2_af/dc2_bf, from a kept copy as well: an
+// unkept twin is merged into one of the kept ones and shares its fanout)
+(* keep *) wire exw_f0 = ex_v && !ex_hold && ex_d_eff;
+wire        exw_fw  = exw_f0;
 // (the stages' captures of it from their own copies, kept: one net to the
 // file, the FPU's hold inside, fanned out to three stages' operands too far)
 (* keep *) wire exw_f1 = ex_v && !ex_hold && ex_d_eff;
