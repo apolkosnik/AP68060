@@ -417,6 +417,7 @@ logic        part_fg;       // ... an FPU general instruction (opw F200-F23F)
 logic        r_v, r_go, r_part;
 logic        rx_q;          // ... the head has a decode-time exception
 logic  [2:0] r_use;
+(* preserve *) logic [2:0] r_use_f;   // (its copy for the fetch's queue: placed by it)
 ph_t         r_nph;
 
 // the record FIFO's room for what D1a takes now (D1b pushes it next
@@ -465,7 +466,7 @@ wire full1  = pd0.x1 && win[fp1][8];
 wire s_ok   = ph_idle && q_simple;
 assign cs_fire = s_ok && !r_v && !stall;      // (registers: one LUT)
 assign cr_fire = r_v && !stall;
-assign cr_use  = r_use;
+assign cr_use  = r_use_f;
 wire   fire    = cs_fire || cr_fire;
 
 // the general case (decided a clock ahead of its fire): the length of the
@@ -718,6 +719,7 @@ always_ff @(posedge clk) begin
 		r_go      <= 1'b0;
 		r_part    <= 1'b0;
 		r_use     <= '0;
+		r_use_f   <= '0;
 		r_nph     <= PH_IDLE;
 		rx_q      <= 1'b0;
 		ir_v      <= 1'b0;
@@ -750,6 +752,7 @@ always_ff @(posedge clk) begin
 			r_go   <= g_go;
 			r_part <= g_part;
 			r_use  <= g_use;
+			r_use_f <= g_use;
 			r_nph  <= g_nph;
 			rx_q   <= (ph == PH_IDLE) && g_exc;
 		end

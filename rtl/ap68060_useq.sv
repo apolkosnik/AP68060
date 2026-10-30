@@ -1163,11 +1163,14 @@ always_comb begin
 	a_base_in = a_fb_in || a_fx_in || ((ur.d == S_MVR) && pim && as.ext1[{1'b1, as.ea0.r}]);
 	a_e1pc1 = pc1(as.ext1);
 	begin
+		// (from the FIFO's record, not the exception-gated one: an exception
+		// routine's word has no mask -- the record D2c takes is gated, so its
+		// mask bits for An and the index are clear and these go unused)
 		logic [3:0] kan, kx;
-		kan   = (as.ea0.m == EM_APD) ? ~{1'b1, as.ea0.r} : {1'b1, as.ea0.r};
-		kx    = {as.ea0.xa, as.ea0.xr};
-		a_ban = popc16(as.ext1 & ((16'd1 << kan) - 16'd1));
-		a_bx  = popc16(as.ext1 & ((16'd1 << kx) - 16'd1));
+		kan   = (rq0.ea0.m == EM_APD) ? ~{1'b1, rq0.ea0.r} : {1'b1, rq0.ea0.r};
+		kx    = {rq0.ea0.xa, rq0.ea0.xr};
+		a_ban = popc16(rq0.ext1 & ((16'd1 << kan) - 16'd1));
+		a_bx  = popc16(rq0.ext1 & ((16'd1 << kx) - 16'd1));
 	end
 end
 
