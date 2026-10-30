@@ -200,10 +200,10 @@ wire  [31:0] d_pins   = !rsti_n ? {16'd0, md_cnt} : am_d_oe ? am_d : fr_doe ? fr
 `define AP_EARLY_RES 0
 `endif
 `ifndef AP_SKID
-`define AP_SKID 0
+`define AP_SKID 1
 `endif
 `ifndef AP_DC1_ATC
-`define AP_DC1_ATC 0
+`define AP_DC1_ATC 1
 `endif
 ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EARLY_RES),
           .SKID(`AP_SKID), .DC1_ATC(`AP_DC1_ATC)) dut (

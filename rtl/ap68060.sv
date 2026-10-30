@@ -24,8 +24,8 @@ module ap68060
 	parameter bit         FPU_PIPE     = 0,      // the FPU's arithmetic pipeline (0: the state machine alone)
 	parameter bit         LOOP_PRED    = 0,      // D1's loop exit predictor
 	parameter bit         EARLY_RES    = 0,      // AG's early results for younger uops' base and index
-	parameter bit         DC1_ATC      = 0,      // DC1's own ATC port and tag compare (65 MHz timing: +290 ALMs)
-	parameter bit         SKID         = 0,      // the skid register in front of AG (65 MHz timing: +400 ALMs)
+	parameter bit         DC1_ATC      = 1,      // DC1's own ATC port and tag compare (65 MHz timing: +290 ALMs)
+	parameter bit         SKID         = 1,      // the skid register in front of AG (65 MHz timing: +400 ALMs)
 	parameter logic [7:0] PCR_REV      = 8'h06   // PCR revision number
 )(
 

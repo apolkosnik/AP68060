@@ -40,6 +40,6 @@ create_clock -name clk -period $per [get_ports clk]
 derive_clock_uncertainty
 S
 cd "$d"
-quartus_sh --flow compile $top > flow.log 2>&1 || { echo "$name: FLOW FAILED"; tail -20 flow.log; exit 1; }
+{ quartus_map $top && quartus_fit $top; } > flow.log 2>&1 || { echo "$name: FLOW FAILED"; tail -20 flow.log; exit 1; }
 quartus_sta -t ../sta_report.tcl $top > sta.log 2>&1 || true
 grep -E 'Fmax|slack|WORST' sta.log | head -20
