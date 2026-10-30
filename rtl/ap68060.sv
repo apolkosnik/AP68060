@@ -23,8 +23,8 @@ module ap68060
 	// area options (doc/STATUS.md has what each costs in ALMs and cycles)
 	parameter bit         FPU_PIPE     = 0,      // the FPU's arithmetic pipeline (0: the state machine alone)
 	parameter bit         LOOP_PRED    = 0,      // D1's loop exit predictor
-	parameter bit         EARLY_RES    = 0,      // AG's early results for younger uops' base and index
-	parameter bit         DC1_ATC      = 1,      // DC1's own ATC port and tag compare (65 MHz timing: +290 ALMs)
+	parameter bit         EARLY_RES    = 0,      // (unused here: AG's early results are not built)
+	parameter bit         DC1_ATC      = 1,      // (unused here: the DMU's DT stage compares the tags)
 	parameter bit         SKID         = 1,      // the skid register in front of AG (65 MHz timing: +400 ALMs)
 	parameter logic [7:0] PCR_REV      = 8'h06   // PCR revision number
 )(
@@ -171,7 +171,7 @@ logic          b_ravec, b_rtci;
 logic  [1:0]   b_errbeat;
 logic          b_idle;
 logic          rsto_req, rsto_busy;
-logic          be_fstop;
+logic          be_fstop, be_idle;
 logic          b_drop, b_more;
 
 ap68060_biu #(.NC(NC)) biu (
@@ -252,7 +252,7 @@ logic        mt_fault, dm_lkend, dm_iack_end;
 logic  [2:0] iack_lvl;
 logic  [1:0] dm_ack;
 
-logic        dm_req, adv_dc1, adv_dc2, adv_ex, adv_wb;
+logic        dm_req, adv_dc1, adv_dt, adv_dc2, adv_ex, adv_wb, dm_hold_dt;
 logic [31:0] dm_va;
 logic  [1:0] dm_mem, dm_msz;
 logic  [2:0] dm_fc;
@@ -287,13 +287,13 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.lp_we(lp_we), .lp_wa(lp_wa), .lp_tk(lp_tk), .lp_mp(lp_mp), .sn_ihit(sn_ihit),
 	.tw_busy(tw_busy), .pst5(pst5),
 	.irq_pending(irq_pending),
-	.adv_dc1(adv_dc1), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
+	.adv_dc1(adv_dc1), .adv_dt(adv_dt), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
 	.dm_dc2_rdy(dm_dc2_rdy), .dm_ldata(dm_ldata), .dm_ldata_al(dm_ldata_al), .dm_ldata_alv(dm_ldata_alv), .dm_fault(dm_fault),
 	.dm_fvec(dm_fvec), .dm_faddr(dm_faddr), .dm_fslw(dm_fslw), .if_cause(if_cause),
 	.dm_st_v(dm_st_v), .dm_st_data(dm_st_data), .dm_st_rdy(dm_st_rdy),
 	.dm_st_fault(dm_st_fault), .dm_st_fslw(dm_st_fslw), .dm_lkend(dm_lkend), .dm_iack_end(dm_iack_end),
 	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
-	.dm_hold1(dm_hold1), .mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope),
+	.dm_hold1(dm_hold1), .dm_hold_dt(dm_hold_dt), .mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope),
 	.mt_caches(mt_caches), .mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng),
 	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
 	.dm_st_faddr(dm_st_faddr),
@@ -301,7 +301,8 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.ipl(ipl_v), .iack_lvl(iack_lvl), .rsto_req(rsto_req), .rsto_busy(rsto_busy),
 	.kill_now(kill_now), .lk_abandon(lk_abandon), .adv_ag(adv_ag),
 	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1), .tc(tc),
-	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .halted(dbg_halted), .fetch_stop(be_fstop)
+	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .halted(dbg_halted), .be_idle(be_idle),
+	.fetch_stop(be_fstop)
 );
 
 ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
@@ -310,8 +311,8 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.dm_msz(dm_msz), .dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke),
 	.dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .iack_lvl(iack_lvl),
 	.dm_older(dm_older),
-	.adv_dc1(adv_dc1), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
-	.kill_now(kill_now), .dm_hold1(dm_hold1),
+	.adv_dc1(adv_dc1), .adv_dt(adv_dt), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
+	.kill_now(kill_now), .dm_hold1(dm_hold1), .hold_dt(dm_hold_dt),
 	.dc2_rdy(dm_dc2_rdy), .ldata(dm_ldata), .ldata_al(dm_ldata_al), .ldata_alv(dm_ldata_alv), .fault(dm_fault), .fvec(dm_fvec),
 	.faddr(dm_faddr), .fslw(dm_fslw),
 	.st_v(dm_st_v), .st_data(dm_st_data), .st_rdy(dm_st_rdy),
@@ -322,7 +323,10 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.cacr(cacr), .tc(tc), .urp(urp), .srp(srp),
 	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1),
 	.cdis(cdis), .mdis(mdis), .tw_busy(tw_busy),
-	.iw_req(iw_req), .iw_va(iw_va), .iw_fc2(iw_fc2), .iw_done(iw_done), .iw_ent(iw_ent),
+	// (an instruction-side table search waits for every older instruction:
+	// the back end and the decoded/sequenced queues empty)
+	.iw_req(iw_req), .iw_ok(be_idle && rq_n == 2'd0 && uq_n == 2'd0),
+	.iw_va(iw_va), .iw_fc2(iw_fc2), .iw_done(iw_done), .iw_ent(iw_ent),
 	.iw_cause(iw_cause),
 	.ic_inv(ic_inv), .ic_inv_scope(ic_inv_scope), .ic_inv_pa(ic_inv_pa),
 	.ic_inv_done(ic_inv_done),

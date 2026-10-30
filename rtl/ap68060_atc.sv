@@ -49,6 +49,7 @@ module ap68060_atc
 	input  logic  [3:0] set_d,
 	output logic  [3:0] hv_d,
 	output logic [19:0] wpa_d [4],
+	output atce_t       ent_d [4],     // ... and every way's entry
 
 	// install (one cycle)
 	input  logic        wr,
@@ -132,6 +133,7 @@ always_comb
 	for (int i = 0; i < 4; i++) begin
 		hv_d[i]  = v[set_d][i] && tag_eq(sd[i], la_d, fc2_d, p8k);
 		wpa_d[i] = sd[i].e.pa;
+		ent_d[i] = sd[i].e;
 	end
 always_comb begin
 	for (int i = 0; i < 4; i++) hv[i] = v[lset][i] && tag_eq(s[i], la, fc2, p8k);
