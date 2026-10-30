@@ -189,10 +189,36 @@ initial begin
 	rr = 2'd0;
 end
 
+// the install's way as each set would choose it, from that set's own valid
+// bits (wway's rule): the valid and global bits are written without the
+// read of the install set's bits through the set select
+function automatic logic [3:0] pick(input logic [3:0] vv);
+	logic [3:0] p;
+	if (wsame) p = wsame_hv;
+	else begin
+		p = 4'd0;
+		if (half) p[{1'b0, rr[0]}] = 1'b1;
+		else      p[rr] = 1'b1;
+		for (int i = 3; i >= 0; i--)
+			if (!vv[i] && !(half && i >= 2)) p = 4'b0001 << i;
+	end
+	pick = p;
+endfunction
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (wr && pick(v[wset]) != (4'b0001 << wway)) begin
+		$display("FAIL: ATC: the set's own install way %b, wway %0d", pick(v[wset]), wway);
+		$finish;
+	end
+// synthesis translate_on
+
 always_ff @(posedge clk) begin
 	if (wr) begin
-		v[wset][wway] <= 1'b1;
-		g[wset][wway] <= went.g;
+		for (int k = 0; k < 16; k++)
+			if (wset == 4'(k)) begin
+				v[k] <= v[k] | pick(v[k]);
+				g[k] <= (g[k] & ~pick(v[k])) | (pick(v[k]) & {4{went.g}});
+			end
 		if (half ? (v[wset][1:0] == 2'b11) : (v[wset] == 4'hF)) rr <= rr + 2'd1;
 	end
 	if (flush_all)
