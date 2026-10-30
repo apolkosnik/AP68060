@@ -270,6 +270,7 @@ logic  [2:0] iack_lvl;
 logic  [1:0] dm_ack;
 
 logic        dm_req, adv_dc1, adv_dt, adv_dc2, adv_ex, adv_wb, dm_hold_dt;
+logic        dm_hold_dt_b, dm_hold1_b, dm_dc2_rdy_b, dm_st_ok_b;   // the DMU holds' twins for the stall chain
 logic [31:0] dm_va;
 logic  [1:0] dm_mem, dm_msz;
 logic  [2:0] dm_fc;
@@ -314,6 +315,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.dm_st_fault(dm_st_fault), .dm_st_fslw(dm_st_fslw), .dm_lkend(dm_lkend), .dm_iack_end(dm_iack_end),
 	.sb_empty(sb_empty), .sb_ne_n(sb_ne_n), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
 	.dm_hold1(dm_hold1), .dm_hold1_c(dm_hold1_c), .dm_hold_dt(dm_hold_dt), .mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope),
+	.dm_hold_dt_b(dm_hold_dt_b), .dm_hold1_b(dm_hold1_b), .dm_dc2_rdy_b(dm_dc2_rdy_b), .dm_st_ok_b(dm_st_ok_b),
 	.mt_caches(mt_caches), .mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng),
 	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
 	.dm_st_faddr(dm_st_faddr),
@@ -333,6 +335,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.dm_older(dm_older),
 	.adv_dc1(dm_adv[4]), .adv_dt(dm_adv[3]), .adv_dc2(dm_adv[2]), .adv_ex(dm_adv[1]), .adv_wb(dm_adv[0]),
 	.kill_now(dm_kill), .dm_hold1(dm_hold1), .dm_hold1_c(dm_hold1_c), .hold_dt(dm_hold_dt),
+	.hold_dt_b(dm_hold_dt_b), .hold1_b(dm_hold1_b), .dc2_rdy_b(dm_dc2_rdy_b), .st_ok_b(dm_st_ok_b),
 	.dc2_rdy(dm_dc2_rdy), .dc2_rdy_c(dm_dc2_rdy_c), .ldata(dm_ldata), .ldata_al(dm_ldata_al), .ldata_alv(dm_ldata_alv), .fault(dm_fault), .fvec(dm_fvec),
 	.faddr(dm_faddr), .fslw(dm_fslw),
 	.st_v(dm_st_v), .st_data(dm_st_data), .st_rdy(dm_st_rdy), .st_ok(dm_st_ok),

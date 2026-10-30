@@ -92,6 +92,7 @@ module ap68060_backend
 	output logic        dm_noalloc,     // exception stacking / vector fetch
 	output logic  [1:0] dm_ack,         // acknowledge cycle: 1 IACK, 2 BKPT, 3 LPSTOP
 	input  logic        dm_hold1,       // the DMU holds DC1 (a register)
+	input  logic        dm_hold1_b, dm_hold_dt_b, dm_dc2_rdy_b, dm_st_ok_b,   // the four holds' twins, for the stall chain alone
 	input  logic        dm_hold1_c,     // ... as its state gives it now (checks)
 	input  logic        dm_hold_dt,     // ... and DT (a register)
 	// WB maintenance (CINV/CPUSH/PFLUSH/PTEST) in the DMU
@@ -370,18 +371,18 @@ endfunction
 logic dc2_mx;                 // DC2's uop accesses memory, no exception (registered)
 logic ex_mdw, ex_fpw;         // EX's uop runs the multiply/divide unit, the FPU
 logic ilk_q;                  // AG's interlock
-wire  wb_hold_r = wb_v && (wbh_q || (wb_stv && !dm_st_ok));
+wire  wb_hold_r = wb_v && (wbh_q || (wb_stv && !dm_st_ok_b));
 
 // EX holds for a multicycle unit; DC2 for memory; WB for stores/serial ops
 logic md_busy;                // multiply/divide running (register)
 logic ex_md_start;
 // DC2 holds until the data memory unit has its result
-assign dc2_hold  = dc2_v && dc2_mx && !dm_dc2_rdy;
+assign dc2_hold  = dc2_v && dc2_mx && !dm_dc2_rdy_b;
 assign stall_wb  = wb_hold_r;
 assign stall_ex  = ex_v  && (ex_hold  || stall_wb);
 assign stall_dc2 = dc2_v && (dc2_hold || stall_ex);
-assign stall_dt  = dt_v  && (stall_dc2 || dm_hold_dt);
-assign stall_dc1 = dc1_v && (stall_dt  || dm_hold1);
+assign stall_dt  = dt_v  && (stall_dc2 || dm_hold_dt_b);
+assign stall_dc1 = dc1_v && (stall_dt  || dm_hold1_b);
 assign stall_ag  = ag_v  && (ag_hold  || stall_dc1);
 
 assign adv_wb  = wb_v  && !stall_wb;

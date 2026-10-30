@@ -90,6 +90,7 @@ module ap68060_dmu
 	                                    // register, formed a clock ahead, conservative
 	output logic        dm_hold1_c,     // ... as the stage's own state gives it (checks)
 	output logic        hold_dt,        // DT must hold (a register): its lookup or
+	output logic        hold_dt_b, hold1_b, dc2_rdy_b, st_ok_b,   // the back end's copies of the four holds (preserved twins)
 	                                    // data read is stale
 	output logic        dc2_rdy,        // DC2's access is done: a register, conservative
 	output logic        dc2_rdy_c,      // ... as the stage's own state gives it (checks)
@@ -1075,6 +1076,13 @@ assign st_fault = st_rdy_r && st_fault_r;
 //   dc2r_q    DC2: the access done (the fast path, a simple store, the engine)
 //   st_ok_q   WB:  the store answered without a fault
 logic hold1_q, dc2r_q, st_ok_q;
+// (twins of the four holds for the back end's stall chain alone, preserved:
+// the fitter places them by their consumers, not the DMU's)
+(* preserve *) logic hold1_b2, dc2r_b2, st_ok_b2, hold_dt_b2;
+assign hold1_b   = hold1_b2;
+assign dc2_rdy_b = dc2r_b2;
+assign st_ok_b   = st_ok_b2;
+assign hold_dt_b = hold_dt_b2;
 assign dm_hold1 = hold1_q;
 assign dc2_rdy  = dc2r_q;
 assign st_ok    = st_ok_q;
@@ -1291,7 +1299,7 @@ always_ff @(posedge clk) begin
 
 	if (!nreset) begin
 		m1 <= '0; mt <= '0; m2 <= '0; m3 <= '0; m4 <= '0;
-		mt_stale <= 1'b0; tk_rdok <= 1'b0; tk_dok <= 1'b0; hold_dt <= 1'b0;
+		mt_stale <= 1'b0; tk_rdok <= 1'b0; tk_dok <= 1'b0; hold_dt <= 1'b0; hold_dt_b2 <= 1'b0;
 		// (reset leaves the cache alone -- tags, valid and dirty state, data,
 		// 5.3: its valid and dirty bits have their power-up values from
 		// their initial blocks; CINVA clears it when the software asks)
@@ -1465,6 +1473,7 @@ always_ff @(posedge clk) begin
 			               (mt_stale && !tk_rdok));
 			tk_dok  <= adv_dc1 ? dk1 : dkt;
 			hold_dt <= adv_dc1 ? h1 : (!adv_dt && ht);
+			hold_dt_b2 <= adv_dc1 ? h1 : (!adv_dt && ht);
 		end
 
 		// DT -> DC2
@@ -3028,6 +3037,7 @@ always_ff @(posedge clk) begin
 				                         (iw_req && !iw_done && iw_ok && sb_empty))))) ||
 				         (e_st == E_W_PART && (wd_push || wd_wtp || (!wd_cb && !wd_sb)));
 			hold1_q <= frz_n || steal || stl_set || (m1v_n && m1s_n) || (mtv_n && mts_n) || busy_n;
+			hold1_b2 <= frz_n || steal || stl_set || (m1v_n && m1s_n) || (mtv_n && mts_n) || busy_n;
 			// DC2: an access entering (its fast and simple-store decisions,
 			// unless the engine may own DC2); one staying (the engine
 			// finishing it, or its own decisions while the engine does not
@@ -3036,6 +3046,7 @@ always_ff @(posedge clk) begin
 			r_stay = !m2.r.v || e_dc2_done || (e_st == E_S_DONE && !sn_frz && !e_kill) ||
 			         (!e_job && !(e_st == E_S_START && !sn_frz) && (m2.fast || m2ss_n));
 			dc2r_q <= adv_dt ? r_new : (adv_dc2 || r_stay);
+			dc2r_b2 <= adv_dt ? r_new : (adv_dc2 || r_stay);
 			// WB: a store entering (the fast store: the engine idle, or
 			// finishing a job, and no snoop starting); one staying (answered
 			// now, the engine's store finishing, or the fast store as the
@@ -3054,6 +3065,7 @@ always_ff @(posedge clk) begin
 			           !(m4.split && !e_part)) ||
 			          (nofrz && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
 			st_ok_q <= adv_ex ? ok_new : ok_stay;
+			st_ok_b2 <= adv_ex ? ok_new : ok_stay;
 		end
 	end
 end
