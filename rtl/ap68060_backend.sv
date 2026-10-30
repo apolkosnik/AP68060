@@ -634,7 +634,7 @@ ap68060_muldiv md (
 wire         ex_is_fp = (ex_u.op == OP_FPU);
 ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 	.clk(clk), .nreset(nreset),
-	.ex_v(ex_v && ex_is_fp && !ex_fault && ex_u.exc == 8'd0), .sub(ex_u.cond),
+	.ex_v(ex_v && ex_fpw), .sub(ex_u.cond),
 	.fuse(ex_u.sz == SZ_W), .eal(ex_u.sz == SZ_B),
 	.imm(ex_u.imm[7:0]), .immb(ex_u.imm_b[7:0]),
 	.av(ex_av), .bv(ex_bv), .aw(ex_a[15:0]), .bw(ex_b[15:0]),
@@ -652,10 +652,11 @@ ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 // operand stays off the stall path, and the exception goes a cycle later)
 // (multiply/divide: the result, flags and kill are registered from the
 // unit's result in its done cycle, md_q_*, and presented the cycle after)
-// (the unit each uop uses, without a fault or an exception, registered as
-// it enters: ex_mdw, ex_fpw)
-assign ex_hold = ex_v && ((ex_mdw && !md_z && !md_fin) || (ex_slow && ex_sp != ex_np) ||
-                          (ex_fpw && fp_hold));
+// (the multiply/divide unit's and the slow phases' a register formed a
+// clock ahead, exh_q; the FPU's from fpif, its uop's flag ex_fpw registered
+// as it enters)
+logic exh_q;
+assign ex_hold = exh_q || (ex_v && ex_fpw && fp_hold);
 
 // multiply/divide result and flags
 logic [31:0] md_res, md_q_res;
@@ -1624,6 +1625,22 @@ always_comb begin
 	irq_pend_n = nm || (ipl > mk) || (ipl != 3'd7 && ir && ipl >= il);
 end
 always_ff @(posedge clk) irq_pend_q <= nreset && irq_pend_n;
+// EX's own hold as it will be: the values ex_v, the unit's flags and the
+// phase counter take (their assignments below, in order)
+always_ff @(posedge clk) begin
+	logic       v_n, mdw_n, z_n, fin_n, slow_n;
+	logic [1:0] np_n, sp_n;
+	v_n    = !(flush || kill_now || !nreset) && (stall_ex ? ex_v : adv_dc2);
+	mdw_n  = adv_dc2 ? ((dc2_u.op == OP_MUL || dc2_u.op == OP_DIV) &&
+	                    !((dc2_u.mem != M_NONE) && dm_fault)) : ex_mdw;
+	z_n    = (adv_dc2 ? 1'b0 : md_z) || (ex_v && ex_div0);
+	fin_n  = adv_dc2 ? 1'b0 : (md_fin || (md_done && md_go));
+	slow_n = adv_dc2 ? (nphase(dc2_u.op) != 2'd0) : ex_slow;
+	np_n   = adv_dc2 ? nphase(dc2_u.op) : ex_np;
+	sp_n   = (adv_ex || kill_now || !nreset) ? 2'd0 :
+	         (ex_v && ex_slow && ex_sp != ex_np) ? ex_sp + 2'd1 : ex_sp;
+	exh_q <= v_n && ((mdw_n && !z_n && !fin_n) || (slow_n && sp_n != np_n));
+end
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset) begin
