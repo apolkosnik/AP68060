@@ -338,6 +338,7 @@ typedef struct packed {
 	logic  [5:0] jc0;     // the routine's first jump condition (D1 resolves it)
 	logic  [1:0] nfix;    // fixed extension words (the immediate follows them)
 	logic        bzx;     // a one-word immediate is a zero-extended byte
+	logic  [1:0] fea;     // a fixed operand form ((Ay)+,(Ax)+; -(Ay),-(Ax); MOVE16)
 	logic        simple;  // D1 takes it in one pass from this alone: legal, not
 	                      // slow, no index extension, at most seven words
 } pd_t;

@@ -128,6 +128,7 @@ always_ff @(posedge clk) begin
 	pd.jc0   <= a.jc0;
 	pd.nfix  <= a.nfix;
 	pd.bzx   <= (a.immk == 3'd2) || (a.immk == 3'd1 && sz == SZ_B);
+	pd.fea   <= a.fea;
 	// an illegal word: D1 takes one word and the exception; b, p1 and tot
 	// are not used for it
 	pd.x0    <= legal && ((i0 == EM_AX) || (i0 == EM_PCX));

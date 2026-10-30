@@ -93,6 +93,13 @@ module ap68060_decode
 	output logic  [3:0] ras_n_o
 );
 
+// (the reset, registered here: the core's is a gate on its reset counters
+// and reaches every module; the front end leaves and enters reset a clock
+// later -- the back end's reset exception reaches D2 the clock after its
+// own reset ends, a clock later still)
+logic nrst;
+always_ff @(posedge clk) nrst <= nreset;
+
 `include "gen/ap68060_dec_pla.svh"
 
 // S, registered here (it changes with a flush: D1 sees no instruction in
@@ -353,6 +360,7 @@ pd_t         part_pd;       // a multi-part instruction's first part
 logic  [3:0] part_len;      // ... words consumed so far
 logic  [2:0] part_imml;     // ... EA0 immediate length
 logic [31:0] part_pc;       // ... its address
+logic  [5:0] part_rr;       // ... its EA register fields (opw[11:9], opw[2:0])
 // a decision for the head made the clock before (anything but the common
 // case): take r_use words; a record (r_go) or a part (r_part), then r_nph
 logic        r_v, r_go, r_part;
@@ -361,14 +369,17 @@ logic  [2:0] r_use;
 ph_t         r_nph;
 
 // the record FIFO's room for what D1a takes now (D1b pushes it next
-// clock): the records held and the one in IR, from registers
+// clock): the records held and the one in IR fewer than four.  A register,
+// formed a clock ahead from the count's next value and IR's next take
+// (D2's pop, late, picks last): the take fans out over the whole queue.
 logic        ir_v, ir_go;
 logic        hold_redir;    // a predicted branch is redirecting fetch
-wire         room  = ({1'b0, rq_n} + {3'd0, ir_v && ir_go}) < 4'd4;
+logic        room_q;
+logic        ph_idle;       // ph == PH_IDLE (a register alongside)
 // (not the back end's flush, a far register: D1a may take an instruction
 // in the flush's clock -- the queue is emptied by the redirect with it, or
 // a redirect follows (an exception's) -- and IR drops it a clock later)
-wire         stall = hold_redir || d_redir_v || !room;
+wire         stall = hold_redir || d_redir_v || !room_q;
 
 // A fetch fault is raised for the lowest faulted word of the window (the
 // words before it are good, so it is the first faulted word an instruction
@@ -382,8 +393,8 @@ wire         stall = hold_redir || d_redir_v || !room;
 // faulted one, and it takes the fault.  Waiting for the rest would wait
 // forever -- an opword fault at an address with A1 set queues ONE word,
 // shorter than the two-word instruction its zero word decodes as.
-wire   [8:0] q_mask = (9'd1 << qcnt) - 9'd1;
-wire         q_flt  = |(win_flt & q_mask[7:0]);
+// (the fault flags past the queue's count are clear: no mask by the count)
+wire         q_flt  = |win_flt;
 logic  [7:0] f_code;
 logic [31:0] f_addr;
 always_comb begin
@@ -400,8 +411,8 @@ end
 // index EA's instruction is taken by the general case.
 wire full0  = pd0.x0 && win[fb][8];
 wire full1  = pd0.x1 && win[fp1][8];
-wire s_ok   = (ph == PH_IDLE) && q_simple;
-assign cs_fire = s_ok && !r_v && !stall;
+wire s_ok   = ph_idle && q_simple;
+assign cs_fire = s_ok && !r_v && !stall;      // (registers: one LUT)
 assign cr_fire = r_v && !stall;
 assign cr_use  = r_use;
 wire   fire    = cs_fire || cr_fire;
@@ -513,16 +524,13 @@ wire [15:0] umask  = lmask({1'b0, u_use});
 ph_t         ir_ph;         // the part it is
 logic        ir_part;       // a part (a record follows later)
 logic        ir_odd;        // the odd-address record
-logic        ir_fast;       // a one-pass instruction (brief extensions)
 logic        ir_flt;        // a fault in the words taken
 logic [15:0] ir_w [5];      // the words at the head
-logic [15:0] ir_e0 [2];     // EA0's extension words (one-pass instruction)
-logic [15:0] ir_e1 [2];     // EA1's
+ea_t         ir_ea0, ir_ea1; // the EAs, formed in D1a (a part's: its own)
+logic        ir_epc;        // ... EA0's (a part's) displacement is the PC sum
 pd_t         ir_pd;         // the instruction's predecode (its first part's)
 logic [31:0] ir_pc;         // the part's address
-logic  [3:0] ir_plen;       // words of the instruction before this part
 logic  [3:0] ir_len;        // ... and with it
-logic  [2:0] ir_il;         // EA0 immediate length (slow path)
 logic [31:0] ir_npc;        // the address after it
 logic [31:0] ir_pcb0;       // EA0's extension word's address (or the part's)
 logic [31:0] ir_pcs0;       // ... plus its PC-relative displacement (EA1 has none)
@@ -567,7 +575,7 @@ always_comb
 logic        a_dsign, a_jtake;
 always_comb begin
 	logic [2:0]  pi, nimm;
-	logic [31:0] base, disp;
+	logic [31:0] disp;
 	// the immediate: after the operation word and the fixed words
 	pi   = 3'd1 + {1'b0, pd0.nfix};
 	nimm = pd0.b - pi;
@@ -577,23 +585,35 @@ always_comb begin
 		default: a_imm = 32'd0;
 	endcase
 	// the branch displacement and target (JSR/JMP: the absolute address,
-	// or the PC-relative one)
-	base = qpc + 32'd2;
-	case (pd0.cls)
-		CL_BCC, CL_BSR:
-			disp = (opw[7:0] == 8'h00) ? sx16(win[1]) :
-			       (opw[7:0] == 8'hFF) ? {win[1], win[2]} : sx8(opw[7:0]);
-		CL_FBCC:
-			disp = opw[6] ? {win[1], win[2]} : sx16(win[1]);
-		CL_FDBCC: begin
-			disp = sx16(win[2]);
-			base = qpc + 32'd4;
-		end
-		default:                        // DBcc, JSR/JMP (d16,PC)
-			disp = sx16(win[1]);
-	endcase
+	// or the PC-relative one): the sums for each displacement form side by
+	// side, from the registers, and the form picks one
+	begin
+		logic [31:0] t8, t16, t32, tfd;
+		t8  = qpc + 32'd2 + sx8(opw[7:0]);
+		t16 = qpc + 32'd2 + sx16(win[1]);
+		t32 = qpc + 32'd2 + {win[1], win[2]};
+		tfd = qpc + 32'd4 + sx16(win[2]);
+		case (pd0.cls)
+			CL_BCC, CL_BSR: begin
+				disp   = (opw[7:0] == 8'h00) ? sx16(win[1]) :
+				         (opw[7:0] == 8'hFF) ? {win[1], win[2]} : sx8(opw[7:0]);
+				a_ntgt = (opw[7:0] == 8'h00) ? t16 : (opw[7:0] == 8'hFF) ? t32 : t8;
+			end
+			CL_FBCC: begin
+				disp   = opw[6] ? {win[1], win[2]} : sx16(win[1]);
+				a_ntgt = opw[6] ? t32 : t16;
+			end
+			CL_FDBCC: begin
+				disp   = sx16(win[2]);
+				a_ntgt = tfd;
+			end
+			default: begin                  // DBcc, JSR/JMP (d16,PC)
+				disp   = sx16(win[1]);
+				a_ntgt = t16;
+			end
+		endcase
+	end
 	a_dsign = disp[31];
-	a_ntgt  = base + disp;
 	if ((pd0.cls == CL_JSR || pd0.cls == CL_JMP) && pd0.i0 == EM_ABSW) a_ntgt = sx16(win[1]);
 	if ((pd0.cls == CL_JSR || pd0.cls == CL_JMP) && pd0.i0 == EM_ABSL) a_ntgt = {win[1], win[2]};
 	a_jtake = jcond(pd0.jc0, pd0.i0, pd0.i1, win[1], pd0.sz, opw[2:0]);
@@ -610,12 +630,13 @@ always_comb begin
 end
 
 always_ff @(posedge clk) begin
-	if (!nreset) begin
+	if (!nrst) begin
 		ph        <= PH_IDLE;
 		part_pd   <= '0;
 		part_len  <= '0;
 		part_imml <= '0;
 		part_pc   <= '0;
+		part_rr   <= '0;
 		r_v       <= 1'b0;
 		r_go      <= 1'b0;
 		r_part    <= 1'b0;
@@ -623,12 +644,14 @@ always_ff @(posedge clk) begin
 		r_nph     <= PH_IDLE;
 		rx_q      <= 1'b0;
 		ir_v      <= 1'b0;
+		ph_idle   <= 1'b1;
 	end
 	else begin
 		ir_v <= fire;
 		if (fire) begin
 			// the parse
-			ph <= (r_v && !(r_part && rx_q)) ? r_nph : PH_IDLE;
+			ph      <= (r_v && !(r_part && rx_q)) ? r_nph : PH_IDLE;
+			ph_idle <= !(r_v && !(r_part && rx_q)) || (r_nph == PH_IDLE);
 			if (u_part) begin
 				if (ph == PH_IDLE) begin
 					part_pd   <= pd0;
@@ -636,6 +659,7 @@ always_ff @(posedge clk) begin
 					part_imml <= (pd0.cls == CL_FPU_GEN) ? fp_immlen(win[1]) :
 					             (pd0.sz == SZ_L) ? 3'd2 : 3'd1;
 					part_pc   <= qpc;
+					part_rr   <= {win[0][11:9], win[0][2:0]};
 				end
 				else
 					part_len <= part_len + {1'b0, u_use};
@@ -654,8 +678,9 @@ always_ff @(posedge clk) begin
 		r_v <= r_v ? !fire : (!fire && !s_ok && (g_go || g_part));
 		// a redirect drops the head and what D1a took meanwhile
 		if (flush || d_redir_v) begin
-			ph  <= PH_IDLE;
-			r_v <= 1'b0;
+			ph      <= PH_IDLE;
+			ph_idle <= 1'b1;
+			r_v     <= 1'b0;
 		end
 	end
 end
@@ -669,18 +694,74 @@ always_ff @(posedge clk) begin
 		ir_part  <= u_part;
 		ir_ph    <= ph;
 		ir_odd   <= (ph == PH_IDLE) && q_odd && qcnt == 4'd0;
-		ir_fast  <= pd0.legal && !pd0.slow && !full0 && !full1 && (pd0.tot <= 4'd7);
 		ir_flt   <= (win_flt & umask[15:8]) != 8'd0;
 		for (int i = 0; i < 5; i++) ir_w[i] <= win[i];
-		ir_e0[0] <= win[fb];
-		ir_e0[1] <= win[3'(fb + 3'd1)];
-		ir_e1[0] <= win[fp1];
-		ir_e1[1] <= win[3'(fp1 + 3'd1)];
 		ir_pd    <= (ph == PH_IDLE) ? pd0 : part_pd;
+		begin
+			// the EAs, from the words at the head: a one-pass instruction's
+			// both (its extension words at b and p1), a first part's those
+			// without extension words, a part's own with its extension at
+			// 0; the fixed operand forms.  (A PC-relative displacement is
+			// the PC sum D1b adds in: ir_epc.)
+			ea_t        e0, e1, ep;
+			logic       fast, pc0;
+			logic [3:0] ip;
+			fast = pd0.legal && !pd0.slow && !full0 && !full1 && (pd0.tot <= 4'd7);
+			ip   = (ph == PH_EA0) ? part_pd.i0 : part_pd.i1;
+			ep   = mk_ea(ip, (ph == PH_EA0) ? part_rr[2:0] : part_rr[5:3], part_len,
+			             (ph == PH_EA0) ? part_imml : 3'd0, 32'd0,
+			             win[0], win[1], win[2], win[3], win[4]);
+			e0   = '0;
+			e1   = '0;
+			pc0  = 1'b0;
+			if (!(q_odd && qcnt == 4'd0)) begin
+				e0.m = EM_NONE;
+				e1.m = EM_NONE;
+				if (pd0.legal) begin
+					if (fast) begin
+						e0  = mk_ea(pd0.i0, win[0][2:0], {1'b0, pd0.b},
+						            (pd0.sz == SZ_L) ? 3'd2 : 3'd1, 32'd0,
+						            win[fb], win[3'(fb + 3'd1)], 16'd0, 16'd0, 16'd0);
+						e1  = mk_ea(pd0.i1, win[0][11:9], {1'b0, pd0.p1}, 3'd0, 32'd0,
+						            win[fp1], win[3'(fp1 + 3'd1)], 16'd0, 16'd0, 16'd0);
+						pc0 = (pd0.i0 == EM_PC16) || (pd0.i0 == EM_PCX && !e0.bs);
+					end
+					else begin
+						e0 = mk_ea(pd0.i0, win[0][2:0], 4'd0, 3'd0, 32'd0,
+						           16'd0, 16'd0, 16'd0, 16'd0, 16'd0);
+						e1 = mk_ea(pd0.i1, win[0][11:9], 4'd0, 3'd0, 32'd0,
+						           16'd0, 16'd0, 16'd0, 16'd0, 16'd0);
+					end
+					// fixed operand forms: (Ay)+,(Ax)+ and -(Ay),-(Ax); MOVE16
+					if (pd0.fea == 2'd3) begin
+						pc0 = 1'b0;
+						if (win[0][5]) begin
+							e0.m = EM_AIP; e0.r = win[0][2:0];
+							e1.m = EM_AIP; e1.r = win[1][14:12];
+						end
+						else begin
+							ea_t ra, aa;
+							ra = '0; aa = '0;
+							ra.m = win[0][4] ? EM_AI : EM_AIP; ra.r = win[0][2:0];
+							aa.m = EM_ABSL; aa.bd = {win[1], win[2]};
+							e0 = win[0][3] ? aa : ra;
+							e1 = win[0][3] ? ra : aa;
+						end
+					end
+					else if (pd0.fea != 2'd0) begin
+						e0.m = (pd0.fea == 2'd1) ? EM_AIP : EM_APD;
+						e1.m = (pd0.fea == 2'd1) ? EM_AIP : EM_APD;
+						e0.r = win[0][2:0];
+						e1.r = win[0][11:9];
+					end
+				end
+			end
+			ir_ea0 <= (ph == PH_IDLE) ? e0 : ep;
+			ir_ea1 <= (ph == PH_IDLE) ? e1 : ep;
+			ir_epc <= (ph == PH_IDLE) ? pc0 : ((ip == EM_PC16) || (ip == EM_PCX && !ep.bs));
+		end
 		ir_pc    <= qpc;
-		ir_plen  <= (ph == PH_IDLE) ? 4'd0 : part_len;
 		ir_len   <= ((ph == PH_IDLE) ? 4'd0 : part_len) + {1'b0, u_use};
-		ir_il    <= (ph == PH_EA0) ? part_imml : 3'd0;
 		ir_npc   <= ((ph == PH_IDLE) ? qpc : part_pc) +
 		            {27'd0, ((ph == PH_IDLE) ? 4'd0 : part_len) + {1'b0, u_use}, 1'b0};
 		ir_pcb0  <= ((ph == PH_IDLE) ? qpc : part_pc) +
@@ -753,7 +834,7 @@ pla_t attr_q_p;                  // (ungated: the routine of an illegal word is 
 assign attr_q_p = pla_t'(attr_q);
 // synthesis translate_off
 always_ff @(posedge clk)
-	if (nreset && ir_v && ir_ph == PH_IDLE && a0 != ent_attr(ir_pd.ent, ir_pd.legal)) begin
+	if (nrst && ir_v && ir_ph == PH_IDLE && a0 != ent_attr(ir_pd.ent, ir_pd.legal)) begin
 		$display("FAIL: decode: the attribute ROM's %h, the table's %h (entry %0d)",
 		         a0, ent_attr(ir_pd.ent, ir_pd.legal), ir_pd.ent);
 		$finish;
@@ -777,6 +858,7 @@ logic [18:0] part_fpkk;
 // a back-end redirect (copy ras_f)
 logic [31:0] ras_top;
 wire  [31:0] ras_m1 = ras[ras_tp - 3'd1];
+logic        rr_v;              // a back-end restore: the top is read a clock on
 logic  [2:0] ras_tp;           // the top entry
 logic  [3:0] ras_n;            // entries held (0..8)
 
@@ -813,7 +895,7 @@ assign bw_we  = tr_v;
 assign bw_wa  = tr_a;
 assign bw_wd  = bht_nd;
 always_ff @(posedge clk) begin
-	tr_v   <= nreset && bht_we;
+	tr_v   <= nrst && bht_we;
 	tr_a   <= bht_wa;
 	tr_dis <= bht_dis;
 	wq_v   <= bw_we;
@@ -872,9 +954,8 @@ always_comb begin
 		// slow path: the EA extension
 		ea_t e;
 		nrec = part;
-		e = mk_ea((ir_ph == PH_EA0) ? ir_pd.i0 : ir_pd.i1,
-		          (ir_ph == PH_EA0) ? part.opw[2:0] : part.opw[11:9], ir_plen, ir_il,
-		          ir_pcs0, ir_w[0], ir_w[1], ir_w[2], ir_w[3], ir_w[4]);
+		e = (ir_ph == PH_EA0) ? ir_ea0 : ir_ea1;
+		if (ir_epc) e.bd = ir_pcs0;
 		if (ir_ph == PH_EA0) nrec.ea0 = e; else nrec.ea1 = e;
 		// an FPU immediate is read from the instruction stream by the
 		// microcode: its address follows the extension word (the
@@ -893,9 +974,11 @@ always_comb begin
 		nrec.pc    = ir_pc;
 		nrec.ilen  = ir_len;
 		nrec.exc   = ir_exc;
+		// (the EAs: D1a's)
+		nrec.ea0 = ir_ea0;
+		if (ir_epc) nrec.ea0.bd = ir_pcs0;
+		nrec.ea1 = ir_ea1;
 		if (!ir_odd) begin
-			nrec.ea0   = '0; nrec.ea0.m = EM_NONE;
-			nrec.ea1   = '0; nrec.ea1.m = EM_NONE;
 			nrec.opw   = ir_w[0];
 			nrec.ext1  = ir_w[1];
 			nrec.ext2  = ir_w[2];
@@ -905,22 +988,6 @@ always_comb begin
 			nrec.ccr   = a0.ccr;
 			nrec.imm   = ir_imm;
 			if (ir_pd.legal) begin
-				if (ir_fast) begin
-					// a one-pass instruction: both EAs from their words
-					nrec.ea0 = mk_ea(ir_pd.i0, ir_w[0][2:0], {1'b0, ir_pd.b},
-					                 (ir_pd.sz == SZ_L) ? 3'd2 : 3'd1, ir_pcs0,
-					                 ir_e0[0], ir_e0[1], 16'd0, 16'd0, 16'd0);
-					nrec.ea1 = mk_ea(ir_pd.i1, ir_w[0][11:9], {1'b0, ir_pd.p1}, 3'd0, 32'd0,
-					                 ir_e1[0], ir_e1[1], 16'd0, 16'd0, 16'd0);
-				end
-				else begin
-					// the first part: the EAs without extension words are
-					// complete already
-					nrec.ea0 = mk_ea(ir_pd.i0, ir_w[0][2:0], 4'd0, 3'd0, 32'd0,
-					                 16'd0, 16'd0, 16'd0, 16'd0, 16'd0);
-					nrec.ea1 = mk_ea(ir_pd.i1, ir_w[0][11:9], 4'd0, 3'd0, 32'd0,
-					                 16'd0, 16'd0, 16'd0, 16'd0, 16'd0);
-				end
 				if (ir_jtake) begin
 					nrec.rt = a0.jt0;
 					nrec.k0 = a0.kj;
@@ -928,27 +995,6 @@ always_comb begin
 				else begin
 					nrec.rt = a0.rtn;
 					nrec.k0 = (a0.jc0 != JC_NEVER) ? a0.kn : a0.k0;
-				end
-				// fixed operand forms: (Ay)+,(Ax)+ and -(Ay),-(Ax); MOVE16
-				if (a0.fea == 2'd3) begin
-					if (ir_w[0][5]) begin
-						nrec.ea0.m = EM_AIP; nrec.ea0.r = ir_w[0][2:0];
-						nrec.ea1.m = EM_AIP; nrec.ea1.r = ir_w[1][14:12];
-					end
-					else begin
-						ea_t ra, aa;
-						ra = '0; aa = '0;
-						ra.m = ir_w[0][4] ? EM_AI : EM_AIP; ra.r = ir_w[0][2:0];
-						aa.m = EM_ABSL; aa.bd = {ir_w[1], ir_w[2]};
-						nrec.ea0 = ir_w[0][3] ? aa : ra;
-						nrec.ea1 = ir_w[0][3] ? ra : aa;
-					end
-				end
-				else if (a0.fea != 2'd0) begin
-					nrec.ea0.m = (a0.fea == 2'd1) ? EM_AIP : EM_APD;
-					nrec.ea1.m = (a0.fea == 2'd1) ? EM_AIP : EM_APD;
-					nrec.ea0.r = ir_w[0][2:0];
-					nrec.ea1.r = ir_w[0][11:9];
 				end
 			end
 		end
@@ -1010,6 +1056,83 @@ always_comb begin
 	end
 end
 
+// synthesis translate_off
+// the EAs D1a formed against the one-clock form from IR's words
+logic        ir_fast;
+logic [15:0] ir_e0 [2], ir_e1 [2];
+logic  [3:0] ir_plen;
+logic  [2:0] ir_il;
+always_ff @(posedge clk) begin
+	ir_fast  <= pd0.legal && !pd0.slow && !full0 && !full1 && (pd0.tot <= 4'd7);
+	ir_e0[0] <= win[fb];
+	ir_e0[1] <= win[3'(fb + 3'd1)];
+	ir_e1[0] <= win[fp1];
+	ir_e1[1] <= win[3'(fp1 + 3'd1)];
+	ir_plen  <= (ph == PH_IDLE) ? 4'd0 : part_len;
+	ir_il    <= (ph == PH_EA0) ? part_imml : 3'd0;
+end
+always_ff @(posedge clk)
+	if (nrst && ir_v) begin
+		ea_t r0, r1;
+		r0 = '0; r1 = '0;
+		if (ir_ph != PH_IDLE) begin
+			ea_t e;
+			e = mk_ea((ir_ph == PH_EA0) ? ir_pd.i0 : ir_pd.i1,
+			          (ir_ph == PH_EA0) ? part.opw[2:0] : part.opw[11:9], ir_plen, ir_il,
+			          ir_pcs0, ir_w[0], ir_w[1], ir_w[2], ir_w[3], ir_w[4]);
+			r0 = (ir_ph == PH_EA0) ? e : nrec.ea0;
+			r1 = (ir_ph == PH_EA1) ? e : nrec.ea1;
+			if (ir_ph == PH_EA0 && r0.m == EM_IMM && part.opw[15:6] == 10'b1111_0010_00)
+				r0.bd = ir_pcb0;
+		end
+		else if (!ir_odd) begin
+			r0 = '0; r0.m = EM_NONE;
+			r1 = '0; r1.m = EM_NONE;
+			if (ir_pd.legal) begin
+				if (ir_fast) begin
+					r0 = mk_ea(ir_pd.i0, ir_w[0][2:0], {1'b0, ir_pd.b},
+					           (ir_pd.sz == SZ_L) ? 3'd2 : 3'd1, ir_pcs0,
+					           ir_e0[0], ir_e0[1], 16'd0, 16'd0, 16'd0);
+					r1 = mk_ea(ir_pd.i1, ir_w[0][11:9], {1'b0, ir_pd.p1}, 3'd0, 32'd0,
+					           ir_e1[0], ir_e1[1], 16'd0, 16'd0, 16'd0);
+				end
+				else begin
+					r0 = mk_ea(ir_pd.i0, ir_w[0][2:0], 4'd0, 3'd0, 32'd0,
+					           16'd0, 16'd0, 16'd0, 16'd0, 16'd0);
+					r1 = mk_ea(ir_pd.i1, ir_w[0][11:9], 4'd0, 3'd0, 32'd0,
+					           16'd0, 16'd0, 16'd0, 16'd0, 16'd0);
+				end
+				if (a0.fea == 2'd3) begin
+					if (ir_w[0][5]) begin
+						r0.m = EM_AIP; r0.r = ir_w[0][2:0];
+						r1.m = EM_AIP; r1.r = ir_w[1][14:12];
+					end
+					else begin
+						ea_t ra, aa;
+						ra = '0; aa = '0;
+						ra.m = ir_w[0][4] ? EM_AI : EM_AIP; ra.r = ir_w[0][2:0];
+						aa.m = EM_ABSL; aa.bd = {ir_w[1], ir_w[2]};
+						r0 = ir_w[0][3] ? aa : ra;
+						r1 = ir_w[0][3] ? ra : aa;
+					end
+				end
+				else if (a0.fea != 2'd0) begin
+					r0.m = (a0.fea == 2'd1) ? EM_AIP : EM_APD;
+					r1.m = (a0.fea == 2'd1) ? EM_AIP : EM_APD;
+					r0.r = ir_w[0][2:0];
+					r1.r = ir_w[0][11:9];
+				end
+			end
+			if (fpg && r0.m == EM_IMM) r0.bd = ir_pcb0;
+		end
+		if (r0 != nrec.ea0 || r1 != nrec.ea1) begin
+			$display("FAIL: decode: the EAs D1a formed (ph %0d): %h %h, the one-clock form's %h %h",
+			         ir_ph, nrec.ea0, nrec.ea1, r0, r1);
+			$finish;
+		end
+	end
+// synthesis translate_on
+
 // the record as it enters the FIFO: refetched at WB if a BTB flag was
 // inside the instruction (now, or in an earlier part).  Its routine and
 // that routine's first word's kind are chosen by flags from IR, the
@@ -1069,19 +1192,19 @@ always_comb begin
 end
 // synthesis translate_off
 always_ff @(posedge clk)
-	if (nreset && push && nrec_q.k0 != kind_fix(nrec_q.rt, (nrec_q.rt == nrec.rt) ? nrec.k0 : 19'h7FFFF)) begin
+	if (nrst && push && nrec_q.k0 != kind_fix(nrec_q.rt, (nrec_q.rt == nrec.rt) ? nrec.k0 : 19'h7FFFF)) begin
 		$display("FAIL: decode: the record's routine %0d and its first word's kind %h", nrec_q.rt, nrec_q.k0);
 		$finish;
 	end
 // synthesis translate_on
 // synthesis translate_off
 always @(posedge clk)
-	if (nreset && ir_ok && ir_ph == PH_IDLE && nrec.target != (ir_flt ? ir_faddr : ntarget)) begin
+	if (nrst && ir_ok && ir_ph == PH_IDLE && nrec.target != (ir_flt ? ir_faddr : ntarget)) begin
 		$display("FAIL: decode: the record's target %h, the prediction's %h", nrec.target, ntarget);
 		$finish;
 	end
 always @(posedge clk)
-	if (nreset && ir_ok && ir_ph == PH_IDLE && ir_pd.legal && !ir_odd && !ir_part &&
+	if (nrst && ir_ok && ir_ph == PH_IDLE && ir_pd.legal && !ir_odd && !ir_part &&
 	    ir_go && ir_exc == 8'd0 && !ir_pd.slow &&
 	    (ir_pd.cls == CL_JSR || ir_pd.cls == CL_JMP) &&
 	    (ir_pd.i0 == EM_ABSW || ir_pd.i0 == EM_ABSL || ir_pd.i0 == EM_PC16) &&
@@ -1102,9 +1225,12 @@ wire  [1:0] btb_kind = rcall ? 2'd1 : rret ? 2'd2 : 2'd0;
 always_comb begin
 	// a back-end redirect resynchronizes the fetch's stack from the
 	// restored pointer (its pointer and the top entry)
-	ras_tp_o = ras_rv ? ras_rtp : ras_tp;
-	ras_n_o  = ras_rv ? ras_rn  : ras_n;
-	ras_o    = ras_f[ras_tp_o][31:1];
+	// (D1b's own registers: the fetch samples them two clocks after any
+	// redirect, when a back-end restore has settled -- D1b takes nothing
+	// in those clocks)
+	ras_tp_o = ras_tp;
+	ras_n_o  = ras_n;
+	ras_o    = ras_top[31:1];
 end
 
 // loop exit table updates.  EX's training a clock late: registered here
@@ -1116,7 +1242,7 @@ logic [LPN-1:0] lpt_hit;         // the entries holding the trained branch
 wire         lpt_whit = |lpt_hit;
 wire         lpt_alloc = lpt_we && !lpt_tk && lpt_mp && !lpt_whit;   // it takes lp_rr
 always_ff @(posedge clk) begin
-	lpt_we <= nreset && lp_we;
+	lpt_we <= nrst && lp_we;
 	lpt_wa <= lp_wa;
 	lpt_tk <= lp_tk;
 	lpt_mp <= lp_mp;
@@ -1126,7 +1252,7 @@ always_ff @(posedge clk) begin
 end
 wire lp_push = push && (ir_ph == PH_IDLE) && lp_br && (nrec.exc == 8'd0);
 always_ff @(posedge clk) begin
-	if (!nreset) begin
+	if (!nrst) begin
 		lp_rr   <= '0;
 		lp_sync <= 1'b0;
 		for (int i = 0; i < LPN; i++) begin
@@ -1235,7 +1361,7 @@ logic [BTB_TW-1:0] bq_wtag;
 logic  [1:0] bq_wkind;
 logic [30:0] bq_wtgt;
 always_ff @(posedge clk) begin
-	btb_we    <= nreset && bq_we;
+	btb_we    <= nrst && bq_we;
 	btb_wv    <= bq_wv;
 	btb_wi    <= bq_wi;
 	btb_wtag  <= bq_wtag;
@@ -1244,8 +1370,9 @@ always_ff @(posedge clk) begin
 	btb_wtgt  <= bq_wtgt;
 end
 always_ff @(posedge clk) begin
-	if (!nreset) begin
+	if (!nrst) begin
 		rq_n       <= 3'd0;
+		room_q     <= 1'b1;
 		d_redir_v  <= 1'b0;
 		d_redir_pc <= '0;
 		hold_redir <= 1'b0;
@@ -1265,11 +1392,14 @@ always_ff @(posedge clk) begin
 		ras_tp     <= '0;
 		ras_n      <= '0;
 		ras_top    <= '0;
+		rr_v       <= 1'b0;
 	end
 	else begin
 		d_redir_v  <= 1'b0;
 		hold_redir <= d_redir_v;
 		bq_we      <= 1'b0;
+		rr_v       <= flush && ras_rv;
+		if (rr_v) ras_top <= ras_f[ras_tp];
 
 		if (ir_ok) begin
 			if (ir_bt_restart) begin
@@ -1277,9 +1407,6 @@ always_ff @(posedge clk) begin
 				// record is refetched at WB)
 				bq_we      <= 1'b1;
 				bq_wv      <= 1'b0;
-				bq_wi      <= ir_bt_fa[BTB_AW+1:2];
-				bq_wtag    <= ir_bt_fa[31:BTB_AW+2];
-				bq_wslot   <= ir_bt_fa[1];
 			end
 			// the flag of an earlier part stays with the instruction
 			part_bt <= ir_part && (part_bt || ir_bt_restart);
@@ -1317,44 +1444,49 @@ always_ff @(posedge clk) begin
 			end
 		end
 
+		// the redirect's and the BTB write's fields, every clock (they are
+		// used only with d_redir_v / bq_we): the decision, which waits for
+		// the target compare, only sets those
+		d_redir_pc <= nrec.pred ? ntarget : ir_npc;
+		bq_wi      <= ir_bt_restart ? ir_bt_fa[BTB_AW+1:2]  : ir_lastpc[BTB_AW+1:2];
+		bq_wtag    <= ir_bt_restart ? ir_bt_fa[31:BTB_AW+2] : ir_lastpc[31:BTB_AW+2];
+		bq_wslot   <= ir_bt_restart ? ir_bt_fa[1] : ir_lastpc[1];
+		bq_wkind   <= btb_kind;
+		bq_wtgt    <= ntarget[31:1];
 		if (push && ir_ph == PH_IDLE && ir_bt_end) begin
 			// the fetch already took this branch: fine if D1 agrees
 			if (!(nrec.pred && teq)) begin
 				d_redir_v  <= 1'b1;
-				d_redir_pc <= nrec.pred ? ntarget : ir_npc;
 				// (a loop exit keeps the entry: the next pass takes it)
 				bq_we      <= !lp_ovr;
 				bq_wv      <= nrec.pred && btb_ok;
-				bq_wi      <= ir_lastpc[BTB_AW+1:2];
-				bq_wtag    <= ir_lastpc[31:BTB_AW+2];
-				bq_wslot   <= ir_lastpc[1];
-				bq_wkind   <= btb_kind;
-				bq_wtgt    <= ntarget[31:1];
 			end
 		end
 		else if (push && nrec_q.pred && ir_ph == PH_IDLE) begin
 			d_redir_v  <= 1'b1;
-			d_redir_pc <= ntarget;
 			// next time the fetch takes it
 			bq_we      <= btb_ok;
 			bq_wv      <= 1'b1;
-			bq_wi      <= ir_lastpc[BTB_AW+1:2];
-			bq_wtag    <= ir_lastpc[31:BTB_AW+2];
-			bq_wslot   <= ir_lastpc[1];
-			bq_wkind   <= btb_kind;
-			bq_wtgt    <= ntarget[31:1];
 		end
 
 		// four records: D1a took this one only with room for it (the data:
 		// below, without reset)
 		rq_n <= rq_n + {2'd0, push} - {2'd0, pop};
+		// the room D1a sees next clock: the count after this clock's push
+		// and pop, and the record IR then holds (this clock's take)
+		begin
+			logic [3:0] rn;
+			rn = {1'b0, rq_n} + {3'd0, push} +
+			     {3'd0, cs_fire || (cr_fire && (r_go || (r_part && rx_q)))};
+			room_q <= pop ? (rn <= 4'd4) : (rn < 4'd4);
+		end
 
 		if (flush) begin
 			rq_n       <= 3'd0;
+			room_q     <= 1'b1;
 			if (ras_rv) begin
 				ras_tp  <= ras_rtp;
 				ras_n   <= ras_rn;
-				ras_top <= ras_f[ras_rtp];
 			end
 			d_redir_v  <= 1'b0;
 			hold_redir <= 1'b0;
@@ -1363,12 +1495,28 @@ always_ff @(posedge clk) begin
 end
 // synthesis translate_off
 always_ff @(posedge clk)
-	if (nreset && ras_n != 4'd0 && ras_top != ras[ras_tp]) begin
+	if (nrst && !rr_v && ras_n != 4'd0 && ras_top != ras[ras_tp]) begin
 		$display("FAIL: decode: the return stack's top register %h, the stack's %h", ras_top, ras[ras_tp]);
 		$finish;
 	end
 always_ff @(posedge clk)
-	if (nreset && push && !pop && rq_n == 3'd4) begin
+	if (nrst && room_q != (({1'b0, rq_n} + {3'd0, ir_v && ir_go}) < 4'd4)) begin
+		$display("FAIL: decode: the registered room %b, the count %0d", room_q, rq_n);
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst && !flush && !flush_q && !hold_redir && !d_redir_v &&
+	    q_flt != |(win_flt & 8'((9'd1 << qcnt) - 9'd1))) begin
+		$display("FAIL: decode: a fault flag past the queue's count");
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst && ph_idle != (ph == PH_IDLE)) begin
+		$display("FAIL: decode: ph_idle");
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst && push && !pop && rq_n == 3'd4) begin
 		$display("FAIL: decode: a record into a full FIFO");
 		$finish;
 	end
