@@ -698,6 +698,36 @@ wire f1_tg0_l = f1_qg && btb_hit0 && !(bk0 == 2'd2 && fras_e);
 wire f1_tg1_l = f1_qg && !btb_hit0 && btb_hit1 && !(bk1 == 2'd2 && fras_e);
 wire f1_ta0_l = f1_qa && btb_hit0 && !(bk0 == 2'd2 && fras_e);
 wire f1_ta1_l = f1_qa && !btb_hit0 && btb_hit1 && !(bk1 == 2'd2 && fras_e);
+// F0's next address and the ATC's as one AND-OR each: every source's
+// select is one function of the stage registers, F2's hit and the BTB's
+// takes, so the chain fpc_o -> fpc_b -> atc_b -> the register is not walked
+(* keep *) wire        f1_tkq = f1_v && f1_btok && (tk0 || tk1);
+(* keep *) wire [31:0] fpc_p4 = {fpc[31:2], 2'b00} + 32'd4;
+wire n_rd = redir_any;
+wire n_ms = !redir_any && f2_miss;
+wire n_ml = !redir_any && !f2_miss && !f1_tkq && m_setpc;
+wire n_sq = !redir_any && !f2_miss && !f1_tkq && f0_go;
+wire n_pc = !redir_any && !f2_miss && !f1_tkq && !f0_go && !m_setpc;
+wire [31:0] fpc_nv = ({32{f1_tg0_l}} & {f1_t0, 1'b0}) | ({32{f1_tg1_l}} & {f1_t1, 1'b0}) |
+                     ({32{n_rd}} & {redir_npc[31:1], 1'b0}) | ({32{n_ms}} & f2_pc) |
+                     ({32{n_ml}} & m_la) | ({32{n_sq}} & fpc_p4) | ({32{n_pc}} & fpc);
+wire [31:0] atc_nv = ({32{f1_ta0_l}} & {f1_t0, 1'b0}) | ({32{f1_ta1_l}} & {f1_t1, 1'b0}) |
+                     ({32{iatc_flush_page}} & iatc_flush_la) |
+                     ({32{!iatc_flush_page && n_rd}} & {redir_npc[31:1], 1'b0}) |
+                     ({32{!iatc_flush_page && n_ms}} & f2_pc) |
+                     ({32{!iatc_flush_page && n_ml}} & m_la) |
+                     ({32{!iatc_flush_page && n_sq}} & fpc_p4) |
+                     ({32{!iatc_flush_page && n_pc}} & fpc);
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && (fpc_nv !== (f1_tg0 ? {f1_t0, 1'b0} : f1_tg1 ? {f1_t1, 1'b0} : fpc_b) ||
+	               atc_nv !== (f1_ta0 ? {f1_t0, 1'b0} : f1_ta1 ? {f1_t1, 1'b0} : atc_b))) begin
+		$display("FAIL: fetch: the next addresses %h %h differ from the chain's %h %h", fpc_nv, atc_nv,
+		         (f1_tg0 ? {f1_t0, 1'b0} : f1_tg1 ? {f1_t1, 1'b0} : fpc_b),
+		         (f1_ta0 ? {f1_t0, 1'b0} : f1_ta1 ? {f1_t1, 1'b0} : atc_b));
+		$finish;
+	end
+// synthesis translate_on
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (f1_tg0_l !== f1_tg0 || f1_tg1_l !== f1_tg1 || f1_ta0_l !== f1_ta0 || f1_ta1_l !== f1_ta1) begin
@@ -990,10 +1020,9 @@ always_ff @(posedge clk) begin
 		stop_q      <= stop;
 		stop_f      <= stop;
 		// F0's address, and the ATC's (fpc's copy, or a page flush's)
-		fpc         <= f1_tg0_l ? {f1_t0, 1'b0} : f1_tg1_l ? {f1_t1, 1'b0} : fpc_b;
-		atc_la      <= f1_ta0_l ? {f1_t0, 1'b0} : f1_ta1_l ? {f1_t1, 1'b0} : atc_b;
-		atc_set     <= f1_ta0_l ? atc_sx({f1_t0, 1'b0}, tc_p) : f1_ta1_l ? atc_sx({f1_t1, 1'b0}, tc_p) :
-		               atc_sx(atc_b, tc_p);
+		fpc         <= fpc_nv;
+		atc_la      <= atc_nv;
+		atc_set     <= atc_sx(atc_nv, tc_p);
 		atc_fc2     <= smode;
 		fl_all_q    <= iatc_flush_all;
 		fl_pg_q     <= iatc_flush_page;
