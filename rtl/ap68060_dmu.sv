@@ -924,9 +924,18 @@ endfunction
 // WB fast store: a copyback store that hit, within one line
 //--------------------------------------------------------------------------
 wire wb_st   = m4.r.v && st_v && (m4.r.mem == M_ST || m4.r.mem == M_RMW);
-wire wb_fast = wb_st && !m4.split && m4.x.ok && !m4.x.flt && m4.x.hit &&
-               m4.x.cm == 2'b01 && dc_en && !m4.r.lock && (m4.r.msz != SZ_Q) &&
-               (e_st == E_IDLE) && !e_wst_done;
+// (whether WB's access can be a fast store at all: registered as it
+// enters WB, cleared with its hit)
+logic m4_fq;
+wire wb_fast = wb_st && m4_fq && dc_en && (e_st == E_IDLE) && !e_wst_done;
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && m4.r.v && m4_fq != (!m4.split && m4.x.ok && !m4.x.flt && m4.x.hit &&
+	                                 m4.x.cm == 2'b01 && !m4.r.lock && (m4.r.msz != SZ_Q))) begin
+		$display("FAIL: DMU: WB's fast-store qualification %b disagrees", m4_fq);
+		$finish;
+	end
+// synthesis translate_on
 wire  [31:0] wbf_word = lanes32(lalign(st_data, m4.r.msz), m4.r.a[1:0]);
 wire  [15:0] wbf_be   = bmask(m4.r.a[3:0], nbytes(m4.r.msz));
 assign wfm      = wb_fast && !sn_frz;
@@ -1306,7 +1315,11 @@ always_ff @(posedge clk) begin
 		end
 		else if (adv_ex) m3.r.v <= 1'b0;
 
-		if (adv_ex) m4 <= m3;
+		if (adv_ex) begin
+			m4    <= m3;
+			m4_fq <= !m3.split && m3.x.ok && !m3.x.flt && m3.x.hit && m3.x.cm == 2'b01 &&
+			         !m3.r.lock && (m3.r.msz != SZ_Q);
+		end
 		else if (adv_wb) m4.r.v <= 1'b0;
 
 		if (adv_wb) e_wst_done <= 1'b0;
@@ -2616,11 +2629,17 @@ always_ff @(posedge clk) begin
 					if (m3.x1.hit && m3.x1.pa[10:4] == vp_set && m3.x1.way == 2'(j)) m3.x1.hit <= 1'b0;
 				end
 				if (adv_ex) begin
-					if (m3.x.hit && m3.x.pa[10:4] == vp_set && m3.x.way == 2'(j)) m4.x.hit <= 1'b0;
+					if (m3.x.hit && m3.x.pa[10:4] == vp_set && m3.x.way == 2'(j)) begin
+						m4.x.hit <= 1'b0;
+						m4_fq    <= 1'b0;
+					end
 					if (m3.x1.hit && m3.x1.pa[10:4] == vp_set && m3.x1.way == 2'(j)) m4.x1.hit <= 1'b0;
 				end
 				else begin
-					if (m4.x.hit && m4.x.pa[10:4] == vp_set && m4.x.way == 2'(j)) m4.x.hit <= 1'b0;
+					if (m4.x.hit && m4.x.pa[10:4] == vp_set && m4.x.way == 2'(j)) begin
+						m4.x.hit <= 1'b0;
+						m4_fq    <= 1'b0;
+					end
 					if (m4.x1.hit && m4.x1.pa[10:4] == vp_set && m4.x1.way == 2'(j)) m4.x1.hit <= 1'b0;
 				end
 				if (e_x.hit && e_x.pa[10:4] == vp_set && e_x.way == 2'(j)) e_x.hit <= 1'b0;

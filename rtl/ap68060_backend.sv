@@ -1221,7 +1221,12 @@ logic  [2:0] irq_lvl_r;       // level being acknowledged
 // the request is held at that level or above.
 logic        ipend_r;
 logic  [2:0] ipend_lvl;
-wire  [2:0]  irq_mask = (wb_v && wb_sr_we && wb_ok) ? wb_sr_new[10:8] : sr_r[10:8];
+// (registered: the instruction writing SR waits a clock in WB, wb_srw, so
+// the mask its own boundary decides with is its new one)
+logic  [2:0] irq_mask;
+logic        wb_srw;          // WB's SR-writing uop has waited its clock
+always_ff @(posedge clk)
+	irq_mask <= (wb_v && wb_sr_we && wb_ok) ? wb_sr_new[10:8] : sr_r[10:8];
 // level 7 is also recognised by level comparison whenever the mask is
 // below 7 (MC68060UM 8.2.9, figure 8-3: RTE or MOVE to SR lowering the
 // mask with IPL still at 7 takes it again); at mask 7 only its edge
@@ -1251,7 +1256,7 @@ wire [31:0] wb_next = wb_redir_pc;
 // instruction started with (sr_r before its own SR write); a traced STOP
 // or LPSTOP loads SR, takes the trace and never stops (MC68060UM 8.2.6)
 wire tr_now      = sr_r[15];
-wire wb_is_stop  = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd2 || wb_u.cond == 4'd8);
+logic wb_is_stop;            // (decoded as the uop enters WB)
 wire stop_traced = wb_is_stop && sr_r[15];
 wire trace_due   = wb_bound && tr_now;
 // 68060 priorities (MC68060UM 8.3): a trace goes before an interrupt due at
@@ -1350,8 +1355,8 @@ end
 
 
 // WB holds: store not accepted yet; RESET until RSTO is done
-wire wb_reset    = (wb_u.op == OP_MISC) && (wb_u.cond == 4'd1);
-wire wb_mt       = (wb_u.op == OP_MISC) && (wb_u.cond >= 4'd3) && (wb_u.cond <= 4'd5);
+// (decoded as the uop enters WB)
+logic wb_reset, wb_mt;
 logic mt_seen;                // the DMU finished this WB uop's maintenance
 // the store buffer empties before exception processing and before a
 // synchronizing instruction (MC68060UM 5.10, 8.4.6): WB waits with an
@@ -1365,7 +1370,7 @@ wire sb_wait = !sb_empty && (wb_is_exc || wb_u.ser || (wb_u.last && (irq_pend ||
 assign wb_hold = wb_v && (halted || (!wb_is_exc &&
                  ((wb_st && !dm_st_rdy) || (wb_st && dm_st_fault) ||
                   (wb_reset && (!rst_issued || rsto_busy)) ||
-                  (wb_mt && !mt_seen))) || sb_wait);
+                  (wb_mt && !mt_seen) || (wb_sr_we && !wb_srw))) || sb_wait);
 
 assign mt_v      = wb_v && wb_mt && !wb_is_exc && !mt_seen;
 assign mt_op     = (wb_u.cond == 4'd3) ? (wb_u.imm_b[5] ? 3'd2 : 3'd1) :
@@ -1734,6 +1739,9 @@ always_ff @(posedge clk) begin
 			// where execution continues, predicted correctly or not
 			wb_redir_pc <= ex_br ? ex_next : ex_npc;
 			wb_sr_we    <= ex_sr_we;
+			wb_reset    <= (ex_u.op == OP_MISC) && (ex_u.cond == 4'd1);
+			wb_mt       <= (ex_u.op == OP_MISC) && (ex_u.cond >= 4'd3) && (ex_u.cond <= 4'd5);
+			wb_is_stop  <= (ex_u.op == OP_MISC) && (ex_u.cond == 4'd2 || ex_u.cond == 4'd8);
 			wb_cof      <= ex_br && ex_taken;
 			wb_sr_new   <= ex_sr_new;
 			if (ex_u.exc == EXC_SNR || ex_snw) begin
@@ -1845,6 +1853,9 @@ always_ff @(posedge clk) begin
 		// overflow of the uop leaving EX (word forms check 16 bits)
 		if (adv_ex && (ex_u.op == OP_DIV || ex_u.op == OP_MUL)) md_ovfl <= (ex_u.op == OP_DIV) && md_q_dkill;
 		if (!stall_wb) wb_v <= adv_ex;
+		// an SR-writing uop's first clock in WB has passed
+		if (!stall_wb) wb_srw <= 1'b0;
+		else if (wb_v && wb_sr_we) wb_srw <= 1'b1;
 
 		//------------------------------------------------------------------
 		// WB commit
