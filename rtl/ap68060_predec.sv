@@ -53,10 +53,10 @@ endfunction
 //--------------------------------------------------------------------------
 logic [NENT-1:0] s1;
 logic     [15:0] op1;
-logic            m1;           // some pattern matches (not the OR of s1: P2's)
+logic  [NMG-1:0] m1;           // some pattern matches, by group (not the OR of s1)
 always_ff @(posedge clk) begin
 	s1  <= dec_sel(op);
-	m1  <= dec_match(op);
+	m1  <= dec_mgrp(op);
 	op1 <= op;
 end
 
@@ -72,7 +72,7 @@ logic  [2:0] nim5, nim6, nim7; // the immediate lengths that depend on the word
 always_ff @(posedge clk) begin
 	logic [3:0] i0, i1;
 	a2   <= ent_attr_oh(s1);
-	m2   <= m1;
+	m2   <= |m1;
 	op2  <= op1;
 	i0    = ea_idx(op1[5:3], op1[2:0]);
 	i1    = ea_idx(op1[8:6], op1[11:9]);

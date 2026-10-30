@@ -61,6 +61,7 @@ module ap68060_useq
 
 	// uop FIFO towards the back end: uq0 is the head
 	output logic  [1:0] uq_n,
+	output logic        uq_e,           // ... none (uq_n == 0), a register
 	output uop_t        uq0,
 	input  logic        uq_pop      // the back end takes uq0 this cycle
 );
@@ -184,7 +185,12 @@ logic  [4:0] t_r, t_dreg;
 logic        t_isan, t_dv, t_last;
 logic [31:0] t_off;
 logic  [7:0] t_amt;
-logic [15:0] c_kan_oh, c_kx_oh; // An's and the index's mask bits, one-hot
+logic [15:0] t_rest;            // ... the registers after this transfer
+// (whether a transfer is An's or the index's: the mask bits still below
+// theirs, counted down per transfer, and whether theirs is in the mask)
+logic  [4:0] c_ban, c_bx;
+logic  [4:0] b_ban, b_bx;
+logic        c_anin, c_xin;
 
 // the D2b build's view: the word and record (D2b's)
 dinst_t      src;
@@ -197,16 +203,33 @@ assign uw = ub;
 // the words are written at the write pointer by D2c's emit, from registers
 (* ramstyle = "logic" *) uop_t ue [2];
 logic        uq_rp, uq_wp;
-// ... but the register numbers the back end reads its register file with
-// at once (A, B, the AG's base and index) are the head's own flip-flops,
-// the pop the last select (few of them: the late pop fans out little)
-logic  [4:0] h_areg, h_breg, h_base, h_idx;
+// ... but what the back end reads its register file with and interlocks
+// AG on at once (A, B, the AG's base and index and their valid bits, its
+// updates) are the head's own flip-flops, the pop the last select (few of
+// them: the late pop fans out little)
+typedef struct packed {
+	logic [4:0] a_reg, b_reg;
+	logic       base_v, idx_v;
+	logic [4:0] base, idx;
+	logic       upd_v, upd2_v;
+	logic [4:0] upd_reg, upd2_reg;
+} uhd_t;
+function automatic uhd_t uhd(input uop_t u);
+	uhd = {u.a_reg, u.b_reg, u.base_v, u.idx_v, u.base, u.idx, u.upd_v, u.upd2_v, u.upd_reg, u.upd2_reg};
+endfunction
+uhd_t        hd;
 always_comb begin
-	uq0        = uq_rp ? ue[1] : ue[0];
-	uq0.a_reg  = h_areg;
-	uq0.b_reg  = h_breg;
-	uq0.base   = h_base;
-	uq0.idx    = h_idx;
+	uq0          = uq_rp ? ue[1] : ue[0];
+	uq0.a_reg    = hd.a_reg;
+	uq0.b_reg    = hd.b_reg;
+	uq0.base_v   = hd.base_v;
+	uq0.idx_v    = hd.idx_v;
+	uq0.base     = hd.base;
+	uq0.idx      = hd.idx;
+	uq0.upd_v    = hd.upd_v;
+	uq0.upd2_v   = hd.upd2_v;
+	uq0.upd_reg  = hd.upd_reg;
+	uq0.upd2_reg = hd.upd2_reg;
 end
 wire         room_out = (uq_n != 2'd2);
 
@@ -220,6 +243,11 @@ function automatic logic pcle(input logic [15:0] m, input logic [1:0] k);
 	n = '0;
 	for (int i = 0; i < 16; i++) n = n + {4'd0, m[i]};
 	pcle = (n <= {3'd0, k});
+endfunction
+// set bits
+function automatic logic [4:0] popc16(input logic [15:0] m);
+	popc16 = '0;
+	for (int i = 0; i < 16; i++) popc16 = popc16 + {4'd0, m[i]};
 endfunction
 // the lowest set bit's number
 function automatic logic [3:0] enc16(input logic [15:0] m);
@@ -257,6 +285,20 @@ endfunction
 // an operand selector's register terms (valid, source kind, register):
 // D2a forms them from the word and the record, D2b takes them as they are
 // (its immediates come by class: imm_cls)
+// an EA as an operand: its register, the immediate, the uop's memory
+// access, or (a register-only selector) none
+function automatic osel_t ea_os(input ea_t e, input logic [4:0] spr, input logic ronly);
+	osel_t o;
+	o     = '0;
+	o.v   = 1'b1;
+	o.src = OS_REG;
+	if (e.m == EM_DN) o.r = dreg(e.r);
+	else if (e.m == EM_AN) o.r = areg(e.r, spr);
+	else if (e.m == EM_IMM) o.src = OS_IMM;
+	else if (ronly) o.v = 1'b0;
+	else o.src = OS_MEM;
+	ea_os = o;
+endfunction
 function automatic osel_t osel(input logic [5:0] s, input dinst_t rc, input logic [4:0] spr,
                                input logic [4:0] sspr);
 	osel_t o;
@@ -265,15 +307,11 @@ function automatic osel_t osel(input logic [5:0] s, input dinst_t rc, input logi
 	o.src = OS_REG;
 	if (s >= 6'd40) o.r = 5'(s - 6'd25);
 	else case (s)
-		S_EA0, S_EA0R, S_EA1, S_EA1R: begin
-			ea_t e;
-			e = (s == S_EA0 || s == S_EA0R) ? rc.ea0 : rc.ea1;
-			if (e.m == EM_DN) o.r = dreg(e.r);
-			else if (e.m == EM_AN) o.r = areg(e.r, spr);
-			else if (e.m == EM_IMM) o.src = OS_IMM;
-			else if (s == S_EA0R || s == S_EA1R) o.v = 1'b0;
-			else o.src = OS_MEM;
-		end
+		// (each EA's terms from the record alone: the selector picks last)
+		S_EA0:   o = ea_os(rc.ea0, spr, 1'b0);
+		S_EA0R:  o = ea_os(rc.ea0, spr, 1'b1);
+		S_EA1:   o = ea_os(rc.ea1, spr, 1'b0);
+		S_EA1R:  o = ea_os(rc.ea1, spr, 1'b1);
 		S_DX:    o.r = dreg(rc.opw[11:9]);
 		S_DY:    o.r = dreg(rc.opw[2:0]);
 		S_AX:    o.r = areg(rc.opw[11:9], spr);
@@ -1022,6 +1060,7 @@ logic        a_dov;
 osel_t       a_oa, a_ob, a_od;
 logic  [4:0] a_amt0, a_amt1;
 logic [15:0] a_low1;
+logic  [4:0] a_ban, a_bx;      // MOVEM: the mask bits below An's / the index's
 logic  [3:0] a_bi1;
 always_comb begin
 	logic ma, mb, md, ea, eb, ed, mv, e1, agin, c;
@@ -1123,6 +1162,13 @@ always_comb begin
 	          !as.ea0.is && as.ext1[{as.ea0.xa, as.ea0.xr}] && !(a_fb_in && xreg == an);
 	a_base_in = a_fb_in || a_fx_in || ((ur.d == S_MVR) && pim && as.ext1[{1'b1, as.ea0.r}]);
 	a_e1pc1 = pc1(as.ext1);
+	begin
+		logic [3:0] kan, kx;
+		kan   = (as.ea0.m == EM_APD) ? ~{1'b1, as.ea0.r} : {1'b1, as.ea0.r};
+		kx    = {as.ea0.xa, as.ea0.xr};
+		a_ban = popc16(as.ext1 & ((16'd1 << kan) - 16'd1));
+		a_bx  = popc16(as.ext1 & ((16'd1 << kx) - 16'd1));
+	end
 end
 
 // the next instruction's address, for S_NPC (D2a: an adder off the uop)
@@ -1296,6 +1342,8 @@ always_ff @(posedge clk) begin
 		b_fb_in  <= a_fb_in;
 		b_fx_in  <= a_fx_in;
 		b_e1pc1  <= a_e1pc1;
+		b_ban    <= a_ban;
+		b_bx     <= a_bx;
 		b_mev    <= a_mev;
 		b_me1    <= a_me1;
 		b_agin   <= a_agin;
@@ -1371,10 +1419,13 @@ always_ff @(posedge clk) begin
 		isan = (b_bi1 == kan);
 		isx  = (b_bi1 == kx);
 		r    = mvreg(b_bi1, pd, sp_reg);
-		c_kan_oh <= 16'd1 << kan;
-		c_kx_oh  <= 16'd1 << kx;
+		c_ban    <= b_ban;                 // (D2a's counts)
+		c_bx     <= b_bx;
+		c_anin   <= rb.ext1[kan];
+		c_xin    <= rb.ext1[kx];
 		t_mask   <= rb.ext1;
 		t_low    <= b_low1;
+		t_rest   <= rb.ext1 & ~b_low1;
 		t_r      <= r;
 		t_isan   <= isan;
 		{t_dreg, t_dv} <= mvdst(r, isan, isx, b_fb_in, b_fx_in, pd, pi);
@@ -1387,13 +1438,18 @@ always_ff @(posedge clk) begin
 		logic  [3:0] bin;
 		logic        isan, isx;
 		logic  [4:0] r;
-		lown = n_mv_rest & (~n_mv_rest + 16'd1);
-		bin  = enc16(n_mv_rest);
-		isan = |(lown & c_kan_oh);
-		isx  = |(lown & c_kx_oh);
+		// (from t_rest, a register: no mask arithmetic ahead of the
+		// encoder; An's and the index's by their counts)
+		lown = t_rest & (~t_rest + 16'd1);
+		bin  = enc16(t_rest);
+		isan = (c_ban == 5'd1) && c_anin;
+		isx  = (c_bx == 5'd1) && c_xin;
 		r    = mvreg(bin, c_pd, sp_reg);
-		t_mask <= n_mv_rest;
+		c_ban  <= (c_ban != 5'd0) ? c_ban - 5'd1 : 5'd0;
+		c_bx   <= (c_bx != 5'd0) ? c_bx - 5'd1 : 5'd0;
+		t_mask <= t_rest;
 		t_low  <= lown;
+		t_rest <= t_rest & ~lown;
 		t_r    <= r;
 		t_isan <= isan;
 		{t_dreg, t_dv} <= mvdst(r, isan, isx, c_fb_in, c_fx_in, c_pd, c_pi);
@@ -1408,10 +1464,10 @@ always_ff @(posedge clk) begin
 		uop_t nh;
 		nh = (uq_n == 2'd2) ? (uq_rp ? ue[0] : ue[1]) : nu;
 		if (uq_pop && uq_n != 2'd0) begin
-			h_areg <= nh.a_reg; h_breg <= nh.b_reg; h_base <= nh.base; h_idx <= nh.idx;
+			hd <= uhd(nh);
 		end
 		else if (uq_n == 2'd0) begin
-			h_areg <= nu.a_reg; h_breg <= nu.b_reg; h_base <= nu.base; h_idx <= nu.idx;
+			hd <= uhd(nu);
 		end
 	end
 end
@@ -1438,6 +1494,7 @@ always_ff @(posedge clk) begin
 		mv_t11   <= 1'b0;
 		mv_fix   <= 2'd0;
 		uq_n     <= 2'd0;
+		uq_e     <= 1'b1;
 		uq_rp    <= 1'b0;
 		uq_wp    <= 1'b0;
 	end
@@ -1487,6 +1544,7 @@ always_ff @(posedge clk) begin
 		// stall, a late signal), which selects between them last
 		if (uq_pop && uq_n != 2'd0) uq_n <= emit ? uq_n : uq_n - 2'd1;
 		else                        uq_n <= emit ? uq_n + 2'd1 : uq_n;
+		uq_e <= (uq_pop && uq_n != 2'd0) ? (!emit && uq_n == 2'd1) : (!emit && uq_n == 2'd0);
 		if (emit) uq_wp <= !uq_wp;
 		if (uq_pop && uq_n != 2'd0) uq_rp <= !uq_rp;
 
@@ -1537,6 +1595,7 @@ always_ff @(posedge clk) begin
 			mv_t11 <= 1'b0;
 			mv_fix <= 2'd0;
 			uq_n  <= 2'd0;
+			uq_e  <= 1'b1;
 			uq_rp <= 1'b0;
 			uq_wp <= 1'b0;
 		end
@@ -1544,6 +1603,7 @@ always_ff @(posedge clk) begin
 			first    <= 1'b1;
 			ssp      <= exc_ssp;
 			uq_n     <= 2'd0;
+			uq_e     <= 1'b1;
 			uq_rp    <= 1'b0;
 			uq_wp    <= 1'b0;
 		end
@@ -1564,12 +1624,17 @@ always_ff @(posedge clk)
 		$display("FAIL: useq: a merged uop's displacement %h changed from %h", nu.disp, dbg_dpre);
 		$finish;
 	end
+always_ff @(posedge clk)
+	if (nrst && uq_e != (uq_n == 2'd0)) begin
+		$display("FAIL: useq: the uop FIFO's empty flag");
+		$finish;
+	end
 // the head's register numbers against the ring's word
 always_ff @(posedge clk) begin
 	uop_t h;
 	h = uq_rp ? ue[1] : ue[0];
-	if (nrst && uq_n != 2'd0 && {h_areg, h_breg, h_base, h_idx} != {h.a_reg, h.b_reg, h.base, h.idx}) begin
-		$display("FAIL: useq: the uop FIFO head's register numbers");
+	if (nrst && uq_n != 2'd0 && hd != uhd(h)) begin
+		$display("FAIL: useq: the uop FIFO head's own fields");
 		$finish;
 	end
 end
@@ -1657,7 +1722,8 @@ always_ff @(posedge clk)
 			nd  = 5'd0;
 			for (int i = 0; i < 16; i++) nd = nd + {4'd0, dbg_ext1[i] && !t_mask[i]};
 			sb  = {5'd0, c_sb};
-			if (t_low != (t_mask & (~t_mask + 16'd1)) || t_r != r || t_isan != (r == c_an) ||
+			if (t_low != (t_mask & (~t_mask + 16'd1)) || t_rest != (t_mask & ~t_low) ||
+			    t_r != r || t_isan != (r == c_an) ||
 			    {t_dreg, t_dv} != dst || t_last != (mv_act ? mv_pc1 : pc1(t_mask)) ||
 			    (t_mask & ~dbg_ext1) != 16'd0 || t_amt != 8'(({3'd0, nd} + 8'd1) * sb) ||
 			    t_off != (c_pd ? -32'(({3'd0, nd} + 8'd1) * sb) : 32'(nd * sb))) begin
