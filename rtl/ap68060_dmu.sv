@@ -769,7 +769,7 @@ typedef enum logic [5:0] {
 	E_IDLE,
 	E_S_START, E_S_XL, E_S_XLW, E_S_XL2, E_S_ACT, E_S_RD, E_S_RDW, E_S_RD2, E_S_BUSD,
 	E_S_NEXT, E_S_DONE, E_SP_W, E_SP_2, E_SP_3,
-	E_W_START, E_W_PART, E_W_DONE, E_SB,
+	E_W_START, E_W_DEC, E_W_PART, E_W_DONE, E_SB,
 	E_M_START, E_M_PG, E_M_SCAN, E_M_SCANW, E_M_SCAN2, E_M_IC, E_M_DONE, E_M_CLR,
 	E_M_PLW, E_M_PL2, E_M_PLD,
 	E_FILL, E_FILLW, E_FILL_W, E_FILL_INS, E_PUSHV, E_PUSHVW, E_PUSHV_W, E_PUSHV_B,
@@ -793,6 +793,8 @@ logic  [2:0] e_n;                 // bytes in the current part
 logic [31:0] e_acc;               // load: assembled operand; store: left aligned data
 logic        e_fromline;          // the operand comes from bo_line (inhibited fill)
 logic        e_fillhit;           // ... from the line a load's own fill just installed
+logic        wd_push, wd_wtp, wd_upd, wd_cb, wd_sb;   // E_W_DEC's decisions
+logic [15:0] wd_be;
 logic        e_falloc;            // a store's part has been allocated once: if a snoop
                                   // takes the line before the lookup after the fill
                                   // finds it, the part stays a miss (WB writes
@@ -1134,7 +1136,7 @@ end
 // engine busy for the next)
 assign dm_hold1 = sn_frz || steal || steal_q || (m1.v && m1_stale) || tk_relook ||
                   (e_st != E_IDLE && e_st != E_W_START &&
-                   e_st != E_W_PART && e_st != E_W_DONE && e_st != E_SB);
+                   e_st != E_W_DEC && e_st != E_W_PART && e_st != E_W_DONE && e_st != E_SB);
 
 // the engine's operand bytes, one extractor for its states: E_SP_3 the
 // rest of a split load from the stolen read, E_S_ACT from the line a fill
@@ -1396,7 +1398,7 @@ always_ff @(posedge clk) begin
 				e_n    <= nbytes(m4.r.msz) - wfs_n0;
 				e_acc  <= wfs_acc << (8 * wfs_n0);
 				bo_err <= 1'b0;
-				e_st   <= E_W_PART;
+				e_st   <= E_W_DEC;
 			end
 		end
 
@@ -1777,13 +1779,29 @@ always_ff @(posedge clk) begin
 			e_x    <= m4.x;
 			e_n    <= m4.split ? 3'(5'd16 - {1'b0, m4.r.a[3:0]}) : nbytes(m4.r.msz);
 			bo_err <= 1'b0;
-			e_st   <= E_W_PART;
+			e_st   <= E_W_DEC;
+		end
+		E_W_DEC: begin
+			// the part's decisions, registered for E_W_PART: push the line
+			// it hits first (locked, cache-inhibited: invalidated; a dirty
+			// line under write-through: kept), update the line, a copyback
+			// write (no bus write), through the store buffer
+			logic upd;
+			upd     = e_x.hit && dc_en && !e_x.cm[1] && !m4.r.lock && (m4.r.msz != SZ_Q);
+			wd_push <= e_x.hit && dc_en && (m4.r.lock || e_x.cm[1]);
+			wd_wtp  <= upd && e_x.cm == 2'b00 && ld_q[e_x.way];
+			wd_upd  <= upd;
+			wd_cb   <= upd && e_x.cm == 2'b01;
+			wd_sb   <= cacr[29] && !m4.r.lock && (m4.r.msz != SZ_Q) && (m4.r.ack == 2'd0) &&
+			           (e_x.cm == 2'b00 || e_x.cm == 2'b11);
+			wd_be   <= bmask(e_va[3:0], e_n);
+			e_st    <= E_W_PART;
 		end
 		E_W_PART: begin
 			logic [15:0] be; logic upd;
-			be  = bmask(e_va[3:0], e_n);
-			upd = e_x.hit && dc_en && !e_x.cm[1] && !m4.r.lock && (m4.r.msz != SZ_Q);
-			if (e_x.hit && dc_en && (m4.r.lock || e_x.cm[1])) begin
+			be  = wd_be;
+			upd = wd_upd;
+			if (wd_push) begin
 				// a locked write bypasses the cache (5.2), a cache-inhibited
 				// one too (5.4.2, 5.7.2): a line it hits is pushed if dirty
 				// and invalidated before the bus write -- unless the data
@@ -1792,16 +1810,16 @@ always_ff @(posedge clk) begin
 				f_way   <= e_x.way;
 				pv_keep <= 1'b0;
 				e_x.hit <= 1'b0;
-				e_sret  <= E_W_PART;
+				e_sret  <= E_W_DEC;
 				e_st    <= E_PUSHV;
 			end
-			else if (upd && e_x.cm == 2'b00 && ld_q[e_x.way]) begin
+			else if (wd_wtp) begin
 				// a write-through write hit on a dirty line: the line is
 				// pushed first, staying valid (MC68060UM 5.5.4)
 				f_set   <= e_va[10:4];
 				f_way   <= e_x.way;
 				pv_keep <= 1'b1;
-				e_sret  <= E_W_PART;
+				e_sret  <= E_W_DEC;
 				e_st    <= E_PUSHV;
 			end
 			else begin
@@ -1817,7 +1835,7 @@ always_ff @(posedge clk) begin
 						vp_set = e_va[10:4]; vp_wm[e_x.way] = 1'b1; vp_dwe = 1'b1; vp_dv = 1'b1;
 					end
 			end
-			if (upd && e_x.cm == 2'b01) begin
+			if (wd_cb) begin
 				e_st <= E_W_DONE;            // copyback: no bus write
 			end
 			else begin
@@ -1839,8 +1857,7 @@ always_ff @(posedge clk) begin
 				// write-through and noncachable imprecise writes go through
 				// the store buffer when it is enabled (5.9); locked ones,
 				// MOVE16 and acknowledge cycles never do
-				e_st     <= (cacr[29] && !m4.r.lock && (m4.r.msz != SZ_Q) && (m4.r.ack == 2'd0) &&
-				             (e_x.cm == 2'b00 || e_x.cm == 2'b11)) ? E_SB : E_BUS;
+				e_st     <= wd_sb ? E_SB : E_BUS;
 			end
 			end
 		end
@@ -1872,7 +1889,7 @@ always_ff @(posedge clk) begin
 				e_va   <= {m4.r.a[31:4] + 28'd1, 4'd0};
 				e_x    <= m4.x1;
 				e_n    <= nbytes(m4.r.msz) - e_n;
-				e_st   <= E_W_PART;
+				e_st   <= E_W_DEC;
 			end
 			else begin
 				st_rdy_r     <= 1'b1;
@@ -2784,7 +2801,7 @@ always_comb
 	lv_ra = (sn_ph == SN_B)                            ? sn_pa[10:4] :
 	        (e_st == E_SP_2)                           ? m2.r.a[10:4] + 7'd1 :
 	        (e_st == E_S_XL2 || e_st == E_S_ACT ||
-	         e_st == E_W_PART)                         ? e_va[10:4] :
+	         e_st == E_W_DEC)                          ? e_va[10:4] :
 	        (e_st == E_M_SCANW || e_st == E_M_SCAN2)   ? sc_set : f_set;
 initial for (int i = 0; i < 128; i++) begin
 	lsd[i] = 8'd0; lse[i] = 8'd0; lsw[i] = 8'd0;

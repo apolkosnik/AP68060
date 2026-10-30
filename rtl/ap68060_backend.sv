@@ -2131,8 +2131,13 @@ always_ff @(posedge clk)
 	if (!nreset) lps_wake <= 1'b0;
 	else if (x_go) lps_wake <= stopped && lpstopped;
 	else if (!xstk) lps_wake <= 1'b0;
-assign fetch_stop  = stopped || halted || lps_out || lps_wake || (ag_v && ag_u.mfc == MFC_LPS) ||
-                     (wb_v && (wb_is_stop || wb_reset));
+// (registered: the BIU's arbitration starts from a flip-flop.  A clock
+// later is still well before what it holds the fetch for: the LPSTOP
+// broadcast leaves from AG through the DMU, RSTO waits for the transfer in
+// progress)
+always_ff @(posedge clk)
+	fetch_stop <= stopped || halted || lps_out || lps_wake || (ag_v && ag_u.mfc == MFC_LPS) ||
+	              (wb_v && (wb_is_stop || wb_reset));
 always_comb begin
 	logic s, br, tk;
 	s  = sr_r[13];
