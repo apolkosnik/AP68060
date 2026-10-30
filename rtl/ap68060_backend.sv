@@ -246,6 +246,38 @@ logic  [2:0] ex_kx;           // EX's uop is FPU, DIV, TRAPcc (registered as it 
 wire wb_fpchk = wb_v && !wb_u.last && wb_ok &&
                 (wb_u.mem == M_NONE || wb_u.mem == M_LD) &&
                 ex_v && ex_kx[2] && ew_same;     // (ex_kx[2]: EX's uop is FPU, registered)
+// The FPU interface's safe (no older uop in flight: !wb_v || wb_fpchk) as
+// a register formed a clock ahead, so its hold is one LUT of flip-flops
+// and not the root of the stall chain.  Exact from the registers in every
+// case but one: a uop leaving EX as the FPU's enters, where WB's next
+// exception decision is EX's of this cycle -- there a sufficient condition
+// (a plain uop, no unit, no branch) stands in, and safe may be a clock
+// late (conservative: checked below as safe_q implies safe).
+logic safe_q;
+function automatic logic memok(input uop_t u);
+	memok = (u.mem == M_NONE || u.mem == M_LD);
+endfunction
+wire ex_okc   = (ex_u.exc == 8'd0) && !ex_snw && !ex_fault && (ex_kx == 3'd0) && !ex_br;
+wire dc2_fpu  = (dc2_u.op == OP_FPU);
+always_ff @(posedge clk) begin
+	logic nv;
+	if (flush || kill_now || !nreset) nv = 1'b1;
+	else if (stall_wb)
+		nv = !wb_v || (!wb_u.last && wb_ok && memok(wb_u) &&
+		               (ex_v ? (ex_kx[2] && ew_same)
+		                     : (adv_dc2 && dc2_fpu && (dc2_u.pc == wb_u.pc))));
+	else if (adv_ex)
+		nv = !ex_u.last && ex_okc && memok(ex_u) && adv_dc2 && dc2_fpu && (dc2_u.pc == ex_u.pc);
+	else nv = 1'b1;
+	safe_q <= nv;
+end
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && safe_q && !(!wb_v || wb_fpchk)) begin
+		$display("FAIL: the FPU interface's safe register %b, the check %b (wb_v %b fpchk %b)", safe_q, !wb_v || wb_fpchk, wb_v, wb_fpchk);
+		$finish;
+	end
+// synthesis translate_on
 // FPU interface outputs (ap68060_fpif)
 logic        fp_hold, fp_dkill, fp_taken, fp_xnext, fp_xcommit, fp_stkill;
 logic [31:0] fp_res, fp_xaddr;
@@ -752,7 +784,7 @@ ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 	.dw_a(dc2_a[15:0]), .dw_b(dc2_b[15:0]), .dw_ld(!stall_ex), .latch(ex_latch), .ea(ex_ea), .pc(ex_u.pc),
 	.dw1_a(dt_a[15:0]), .dw1_b(dt_b[15:0]), .dw1_ld(adv_dt),
 	.target(ex_u.target),
-	.safe(!wb_v || wb_fpchk), .adv(adv_ex), .kill(kill_now),
+	.safe(safe_q), .adv(adv_ex), .kill(kill_now),
 	.n_sub(dc2_u.cond), .n_fuse(dc2_u.sz == SZ_W), .n_eal(dc2_u.sz == SZ_B),
 	.n_imm(dc2_u.imm[7:0]), .n_ea(dc2_ea), .n_pc(dc2_u.pc), .n_target(dc2_u.target),
 	.hold(fp_hold), .res(fp_res), .dkill(fp_dkill), .taken(fp_taken),
