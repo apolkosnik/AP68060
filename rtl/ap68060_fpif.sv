@@ -401,6 +401,7 @@ logic [95:0] fmr_q;            // a flip-flop, not the register file's read path
 logic        st_q;             // the latched instruction is a store (ext_q opclass 011)
 logic        q_bcc, q_fdbcc;   // ... FBcc, FDBcc
 logic        q_fsccm;          // ... FScc of a memory operand (its frame address)
+logic        q_x8, q_xim;      // ... its EA 8 bytes too big, immediate (cqx[1], cqx[2])
 logic  [2:0] q_dsrc;           // ... its DISP's source register (a store's FPn)
 logic        crr_wait;         // CRR: the control register read's cycle
 logic [95:0] get_q;            // the long words GET returns
@@ -727,7 +728,7 @@ typedef struct packed {
 	logic [31:0] lst_q;
 	logic [95:0] get_q;
 	logic [31:0] eaa;
-	logic        eav, mv_rev, q_bcc, q_fdbcc, q_fsccm;
+	logic        eav, mv_rev, q_bcc, q_fdbcc, q_fsccm, q_x8, q_xim;
 	logic  [1:0] sv_kind;
 	logic  [2:0] sv_v;
 	logic  [6:0] cq;
@@ -741,6 +742,8 @@ typedef struct packed {
 	logic [15:0] opw, ext;          // CHK's words
 	pst_t        r;                 // this module's state
 	logic        go_d, fresh_d;     // go and fresh of the FPU outputs' cycle
+	logic        pchg;              // pend, pend_vec written in that cycle (r has
+	                                // the values before)
 	// the FPU's outputs as EX sees them (a cycle after they form)
 	logic        unimp, unsupp, accepted, done, pdone, excreq, endok, pbusy;
 	logic [95:0] dout, xop;
@@ -1099,7 +1102,7 @@ end
 always_ff @(posedge clk) begin : dat
 	if (!nreset) begin
 		opw_q <= '0; ext_q <= '0; fsr_q <= 1'b0; lst_q <= '0; st_q <= 1'b0;
-		q_bcc <= 1'b0; q_fdbcc <= 1'b0; q_fsccm <= 1'b0; q_dsrc <= '0;
+		q_bcc <= 1'b0; q_fdbcc <= 1'b0; q_fsccm <= 1'b0; q_dsrc <= '0; q_x8 <= 1'b0; q_xim <= 1'b0;
 		eaa <= '0; eav <= 1'b0;
 		f_din <= '0; f_dnice <= 1'b0; f_dcf <= '0; f_iapc <= '0; f_fmsel <= '0;
 		f_crsel <= '0; f_crwd <= '0; get_q <= '0;
@@ -1120,6 +1123,8 @@ always_ff @(posedge clk) begin : dat
 			q_bcc   <= is_bcc;
 			q_fdbcc <= is_fdbcc;
 			q_fsccm <= is_cc && eam >= 3'd2 && !(eam == 3'd7 && ear >= 3'd2);
+			q_x8    <= cqx[1];
+			q_xim   <= cqx[2];
 			eav    <= eal && !ea_imm;
 			if (eal) eaa <= ea;
 			f_iapc <= pc;
@@ -1181,6 +1186,20 @@ end
 // This module's state next cycle (the blocks above, the registers EX's
 // outputs read), the uop in EX staying (a = 0, ac = act) or leaving (a = 1,
 // ac = ex_v: an FPU uop leaves only once it may act)
+// pend or pend_vec is written this cycle (the sequencer's writes; a
+// conservative flag: an FSAVE or FRESTORE END counts whatever it writes)
+function automatic logic pchg_f(input logic a, input logic ac);
+	logic we;
+	we = 1'b0;
+	case (sub)
+		FC_CHK:  we = fuse && go && (f_unsupp || f_excreq);
+		FC_DISP: we = go && (f_unsupp || f_excreq);
+		FC_COND, FC_DBCC: we = a && is_bcc_l && opw_q[4] && f_cc[0] && f_bsun_en;
+		FC_END:  we = a && (is_fsave_l || is_frest_l);
+		default: ;
+	endcase
+	pchg_f = (bg && f_excreq) || (ac && we);
+endfunction
 function automatic pst_t pred_f(input logic a, input logic ac);
 	pst_t r;
 	logic pn, we;
@@ -1191,7 +1210,7 @@ function automatic pst_t pred_f(input logic a, input logic ac);
 	r.crr_wait = crr_wait; r.crr_w2 = crr_w2; r.mvr_ok = mvr_ok; r.fmr_q = fmr_q;
 	r.opw_q = opw_q; r.ext_q = ext_q; r.fsr_q = fsr_q; r.st_q = st_q; r.lst_q = lst_q;
 	r.get_q = get_q; r.eaa = eaa; r.eav = eav; r.mv_rev = mv_rev;
-	r.q_bcc = q_bcc; r.q_fdbcc = q_fdbcc; r.q_fsccm = q_fsccm;
+	r.q_bcc = q_bcc; r.q_fdbcc = q_fdbcc; r.q_fsccm = q_fsccm; r.q_x8 = q_x8; r.q_xim = q_xim;
 	r.sv_kind = sv_kind; r.sv_v = sv_v;
 	pn = pend;
 	if (bg && f_done) r.bg = 1'b0;
@@ -1313,6 +1332,8 @@ function automatic pst_t pred_f(input logic a, input logic ac);
 			r.q_bcc   = is_bcc;
 			r.q_fdbcc = is_fdbcc;
 			r.q_fsccm = is_cc && eam >= 3'd2 && !(eam == 3'd7 && ear >= 3'd2);
+			r.q_x8    = cqx[1];
+			r.q_xim   = cqx[2];
 			r.eav   = eal && !ea_imm;
 			if (eal) r.eaa = ea;
 		end
@@ -1360,9 +1381,8 @@ function automatic fout_t out_f(input fview_t v);
 	is_cc_l_    = (v.r.opw_q[15:6] == 10'b1111_0010_01);
 	is_bcc_l_   = (v.r.opw_q[15:7] == 9'b1111_0010_1);
 	is_fdbcc_l_ = is_cc_l_ && (eam_l == 3'd1);
-	eaf_l_ = ea_imm_l_ ? 32'd0 :
-	         (ea_pd_l_ && is_gen_l_ && (ocl_l_ == 3'b000 || ocl_l_ == 3'b010 || ocl_l_ == 3'b011) &&
-	          (fmt_l_ == 3'd2 || fmt_l_ == 3'd3 || fmt_l_ == 3'd7)) ? ea8_ : v.ea;
+	// (the latched words' adjustments: q_xim, q_x8 -- CHK's cqx)
+	eaf_l_ = v.r.q_xim ? 32'd0 : v.r.q_x8 ? ea8_ : v.ea;
 	chk_k_    = v.r.cq[6:3];
 	chk_pend_ = v.r.pend && !v.r.cq[1];
 	// The request was out in the FPU outputs' cycle (go_d; a uop entering
@@ -1462,6 +1482,9 @@ function automatic fout_t out_f(input fview_t v);
 				else if (!(v.accepted || v.done || v.pdone || v.excreq)) o.hs = 1'b1;
 			end
 			else if (v.r.bg && !v.endok) o.hs = 1'b1;
+			// (the pending exception just written: a cycle more, then from
+			// the flip-flops)
+			else if (v.pchg) o.hs = 1'b1;
 			else if (chk_pend_) o.xvec = v.r.pend_vec;
 			else case (chk_k_)
 				K_FLINE, K_FLCR: o.xvec = VEC_FLINE;
@@ -1552,6 +1575,9 @@ always_comb begin
 	v1.opw = dw_b;  v1.ext = dw_a;
 	v0.r = p0; v1.r = p1;
 	v0.go_d = go; v0.fresh_d = fresh; v1.go_d = go; v1.fresh_d = fresh;
+	// (the pending exception: the values before, and whether it is written)
+	v0.r.pend = pend; v0.r.pend_vec = pend_vec; v0.pchg = pchg_f(1'b0, act);
+	v1.r.pend = pend; v1.r.pend_vec = pend_vec; v1.pchg = pchg_f(1'b1, ex_v);
 	v0.unimp = f_unimp; v0.unsupp = f_unsupp; v0.accepted = f_accepted; v0.done = f_done;
 	v0.pdone = f_pdone; v0.excreq = f_excreq; v0.endok = f_endok;
 	// (pipelined operations next cycle: those in flight, or one issued now)
@@ -1590,7 +1616,8 @@ assign st_kill = sx_kill;
 // (pred_f's next values), the uop's fields (DC2's), and the outputs formed
 // from them with the FPU's outputs of the cycle before.
 pst_t   pq;
-logic   pq_v, ent_q, go_dq, fresh_dq, dfp_q;
+logic   pq_v, ent_q, go_dq, fresh_dq, dfp_q, pchg_q, pend_dq;
+logic [7:0] pend_vec_dq;
 logic   s_unimp, s_unsupp, s_acc, s_done, s_pdone, s_exc, s_endok, s_pbusy, s_bsun;
 logic [95:0] s_dout, s_xop;
 logic [31:0] s_crrd, n_pc_q, n_target_q, n_ea_q;
@@ -1602,6 +1629,8 @@ always_ff @(posedge clk) begin
 	pq_v  <= nreset && !kill;
 	ent_q <= !(ex_v && !adv);
 	go_dq <= go; fresh_dq <= fresh; dfp_q <= dfp;
+	pchg_q <= (ex_v && !adv) ? pchg_f(1'b0, act) : pchg_f(1'b1, ex_v);
+	pend_dq <= pend; pend_vec_dq <= pend_vec;
 	s_unimp <= f_unimp; s_unsupp <= f_unsupp; s_acc <= f_accepted; s_done <= f_done;
 	s_pdone <= f_pdone; s_exc <= f_excreq; s_endok <= f_endok; s_pbusy <= f_pbusy || f_pdone;
 	s_dout <= f_dout; s_xop <= f_xop; s_crrd <= f_crrd; s_cc <= f_cc; s_bsun <= f_bsun_en;
@@ -1619,10 +1648,10 @@ always_comb begin
 	pr.opw_q = opw_q; pr.ext_q = ext_q; pr.fsr_q = fsr_q; pr.st_q = st_q; pr.lst_q = lst_q;
 	pr.get_q = get_q; pr.eaa = eaa; pr.eav = eav; pr.mv_rev = mv_rev;
 	pr.sv_kind = sv_kind; pr.sv_v = sv_v; pr.cq = cq; pr.cqx = cqx;
-	pr.q_bcc = q_bcc; pr.q_fdbcc = q_fdbcc; pr.q_fsccm = q_fsccm;
+	pr.q_bcc = q_bcc; pr.q_fdbcc = q_fdbcc; pr.q_fsccm = q_fsccm; pr.q_x8 = q_x8; pr.q_xim = q_xim;
 	vr.sub = sub; vr.fuse = fuse; vr.eal = eal; vr.ent = ent_q; vr.dfp = dfp;
 	vr.imm = imm; vr.pc = pc; vr.target = target; vr.ea = ea; vr.av = av; vr.bv = bv;
-	vr.opw = bw; vr.ext = aw; vr.r = pr; vr.go_d = go_dq; vr.fresh_d = fresh_dq;
+	vr.opw = bw; vr.ext = aw; vr.r = pr; vr.go_d = go_dq; vr.fresh_d = fresh_dq; vr.pchg = pchg_q;
 	vr.unimp = s_unimp; vr.unsupp = s_unsupp; vr.accepted = s_acc; vr.done = s_done;
 	vr.pdone = s_pdone; vr.excreq = s_exc; vr.endok = s_endok; vr.pbusy = s_pbusy;
 	vr.dout = s_dout; vr.xop = s_xop; vr.crrd = s_crrd; vr.cc = s_cc; vr.bsun_en = s_bsun;
@@ -1637,6 +1666,7 @@ always_comb begin
 		pqm.lst_q = pr.lst_q; pqm.eaa = pr.eaa; pqm.eav = pr.eav; pqm.get_q = pr.get_q;
 		pqm.mv_rev = pr.mv_rev; pqm.sv_kind = pr.sv_kind; pqm.sv_v = pr.sv_v;
 		pqm.q_bcc = pr.q_bcc; pqm.q_fdbcc = pr.q_fdbcc; pqm.q_fsccm = pr.q_fsccm;
+		pqm.q_x8 = pr.q_x8; pqm.q_xim = pr.q_xim;
 	end
 end
 always_ff @(posedge clk)
@@ -1649,6 +1679,11 @@ always_ff @(posedge clk)
 	    (n_sub_q != sub || n_fuse_q != fuse || n_eal_q != eal || n_imm_q != imm ||
 	     n_pc_q != pc || n_target_q != target || n_ea_q != ea)) begin
 		$display("FAIL: fpif: the entering uop's fields (DC2's) are not EX's (sub %0d, %0d)", n_sub_q, sub);
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nreset && pq_v && ex_v && !pchg_q && (pend != pend_dq || pend_vec != pend_vec_dq)) begin
+		$display("FAIL: fpif: the pending exception changed unflagged (pchg)");
 		$finish;
 	end
 always_ff @(posedge clk)
