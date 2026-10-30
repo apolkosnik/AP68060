@@ -2206,7 +2206,7 @@ always_ff @(posedge clk) begin
 					wb_exc_addr <= ex_u.pc;
 					wb_exc_fslw <= FSLW_IO | ((ex_u.target != ex_u.pc) ? FSLW_MA : 32'd0) |
 					               FSLW_R | {13'd0, sr_r[13], 2'b10, 16'd0} |
-					               (ifa ? if_cause : FSLW_RE);
+					               (ifa ? if_cause : (FSLW_RE | (if_cause & FSLW_TTR)));
 				end
 				else begin
 					wb_exc_addr <= ex_u.pc;
