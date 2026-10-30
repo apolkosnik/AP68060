@@ -626,6 +626,7 @@ logic [19:0] mt_wpa [4];
 atce_t       mt_ent [4];
 logic [20:0] mt_tq [4];
 logic        mt_tp;
+logic        mt_tt0, mt_tt1;      // DT's address's TTR matches, registered the same way
 logic        mt_stale;            // the registered lookup may be stale
 logic        tk_rdok;             // the ports read DT's address at the last edge, quiet
 logic        tk_dok;              // the data RAM's output this clock is DT's set, fresh
@@ -646,8 +647,8 @@ end
 // the translation (xlate: its attributes; its hit is replaced by the
 // parallel compare below)
 xres_t      x_tkr;
-always_comb x_tkr = xlate(mt.a, mt.smode, tk_wr, fc_tt(mt.fc) == TT_ALT, tk_ahit, tk_ae,
-                          mt_tq[0], mt_tq[1], mt_tq[2], mt_tq[3], lvd_q);
+always_comb x_tkr = xlate_t(mt.a, mt.smode, tk_wr, fc_tt(mt.fc) == TT_ALT, mt_tt0, mt_tt1,
+                            tk_ahit, tk_ae, mt_tq[0], mt_tq[1], mt_tq[2], mt_tq[3], lvd_q);
 // the cache tag compare in parallel with the translation: each way's tag
 // against the untranslated address and against the physical page of each
 // of the ATC's four ways; the ATC's hit vector, not its selected entry,
@@ -1334,12 +1335,16 @@ always_ff @(posedge clk) begin
 				// (formed again, from the pins and registers as they will be
 				// in DT's clock: m1_tp is DC1's)
 				mt_tp   <= transp_of(m1.a, m1.smode, m1.fc, m1.ack);
+				mt_tt0  <= ttr_hit(dtt0, m1.a, m1.smode);
+				mt_tt1  <= ttr_hit(dtt1, m1.a, m1.smode);
 				mt_aset <= m1_aset;
 				stl = (dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet;
 			end
 			else begin
 				if (adv_dt) mt.v <= 1'b0;
 				mt_tp   <= transp_of(mt.a, mt.smode, mt.fc, mt.ack);
+				mt_tt0  <= ttr_hit(dtt0, mt.a, mt.smode);
+				mt_tt1  <= ttr_hit(dtt1, mt.a, mt.smode);
 				mt_aset <= tc_p ? mt.a[16:13] : mt.a[15:12];
 				stl = mt_stale;
 				if ((dw && dw_src != 2'd0 && dw_set == mt.a[10:4]) || !e_quiet) stl = 1'b1;
@@ -2921,6 +2926,11 @@ end
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset) begin
+		if (mt.v && (mt_tt0 != ttr_hit(dtt0, mt.a, mt.smode) || mt_tt1 != ttr_hit(dtt1, mt.a, mt.smode)) &&
+		    !kill_now) begin
+			$display("FAIL: DMU: DT's registered TTR matches disagree");
+			$finish;
+		end
 		if (!e_kill && ((e_st == E_S_XL2 && (lk_tt0 != ttr_hit(dtt0, e_va, m2.r.smode) ||
 		                                     lk_tt1 != ttr_hit(dtt1, e_va, m2.r.smode))) ||
 		                (e_st == E_SP_2 &&
