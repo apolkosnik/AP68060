@@ -470,6 +470,8 @@ reg  [2:0] r_dcls;
 function [63:0] unp_of;
 	input [95:0] d;
 	input  [2:0] f;
+	input  [2:0] c;      // din's class (din_class): a single's or double's
+	                     // integer bit is set for a normal number
 	reg   [31:0] im;
 	reg          hs, hd;
 	begin
@@ -478,8 +480,8 @@ function [63:0] unp_of;
 		im = (f == 3'd0) ? (d[95] ? (32'd0 - d[95:64]) : d[95:64]) :
 		     (f == 3'd4) ? {(d[95] ? (16'd0 - d[95:80]) : d[95:80]), 16'd0} :
 		                   {(d[95] ? (8'd0 - d[95:88]) : d[95:88]), 24'd0};
-		hs = (d[94:87] != 8'd0) && (d[94:87] != 8'hFF);
-		hd = (d[94:84] != 11'd0) && (d[94:84] != 11'h7FF);
+		hs = (c == {1'b0, T_NUM});
+		hd = (c == {1'b0, T_NUM});
 		unp_of = (f == 3'd1) ? {hs, d[86:64], 40'd0} :
 		         (f == 3'd5) ? {hd, d[83:32], 11'd0} :
 		         (f == 3'd0 || f == 3'd4 || f == 3'd6) ? {im, 32'd0} : d[63:0];
@@ -522,6 +524,12 @@ reg   [1:0] a_t;
 // writeback reads w_m after rounding, z_m after FINT's normalization, a_m
 // otherwise (wsrc).
 reg  [63:0] z_m, w_m;
+// F_RND2's overflow choice, formed the cycle before (F_ROUND, which
+// changes neither the sign nor the rounding controls): tmx_q says an
+// overflow gives the largest number (else an infinity), ovv is the
+// significand it writes
+reg         tmx_q;
+reg  [63:0] ovv;
 reg         zr;
 reg   [1:0] wsrc;
 // The arithmetic units' result as the significand and GRS of a value to
@@ -1748,6 +1756,17 @@ always @(posedge clk)
 		         unsupported_x(b_e[14:0], b_m));
 		$finish;
 	end
+// F_RND2's overflow choice formed the cycle before must be this cycle's
+always @(posedge clk)
+	if (nreset && ce && fst == F_RND2 &&
+	    (tmx_q != ((rnd_mode == 2'b01) || (rnd_mode == 2'b10 && !a_s) || (rnd_mode == 2'b11 && a_s)) ||
+	     ovv != (!tmx_q ? 64'd0 : r_sgl ? 64'hFFFF_FFFF_FFFF_FFFF :
+	             (r_prec == 2'd1) ? 64'hFFFF_FF00_0000_0000 :
+	             (r_prec == 2'd2) ? 64'hFFFF_FFFF_FFFF_F800 : 64'hFFFF_FFFF_FFFF_FFFF))) begin
+		$display("FAIL: FPU F_RND2 overflow choice %b %h, the sign and controls give otherwise",
+		         tmx_q, ovv);
+		$finish;
+	end
 // synthesis translate_on
 
 // the registers' flags one cycle on: valid (a write; FRESTORE NULL clears
@@ -2086,7 +2105,7 @@ always @(posedge clk) begin : fsm
 				r_icnt <= 7'd62 - fr_src_e[6:0];
 				n_wk = 1'b0;
 				r_din  <= din;
-				unp_m  <= unp_of(din, src_fmt);
+				unp_m  <= unp_of(din, src_fmt, sel_x ? din_cls : din_class(din, src_fmt));
 				r_lde  <= lde_of(din, src_fmt, sel_x ? din_cls : din_class(din, src_fmt));
 				r_dcls <= sel_x ? din_cls : din_class(din, src_fmt);
 				r_bin  <= bin_op(opmode);
@@ -2726,9 +2745,7 @@ always @(posedge clk) begin : fsm
 				mr  = carry ? 64'h8000_0000_0000_0000 : rn_up ? rn_mi[63:0] : (rin & rmask);
 				er  = carry ? rn_e1 : e_w;
 				ovf = carry ? rn_ge : rn_gt;
-				tomax = (rnd_mode == 2'b01) ||
-				        (rnd_mode == 2'b10 && !a_s) ||
-				        (rnd_mode == 2'b11 && a_s);
+				tomax = tmx_q;
 				// the result, written whatever the range check decides (an
 				// underflow keeps the destination: x_kill), and the
 				// underflow's denormalizing shift set up beside it
@@ -3123,6 +3140,7 @@ always @(posedge clk) begin : loops
 	if (!nreset) begin
 		acc_hi <= 0; qv <= 0; qr <= 0; srem <= 0; srad <= 0; loop_n <= 0; lpf <= 1'b0;
 		w_m <= 0; pk_mg <= 0; pk_lo <= 0; pk_ovf <= 0; int_z <= 0;
+		tmx_q <= 1'b0; ovv <= 64'd0;
 	end
 	else if (ce) begin
 		if (fst1h[F_BIN]) begin
@@ -3157,8 +3175,11 @@ always @(posedge clk) begin : loops
 		carry = rn_up && rn_one;
 		mr    = carry ? 64'h8000_0000_0000_0000 : rn_up ? rn_mi[63:0] : (rin & rmask);
 		ovf   = carry ? rn_ge : rn_gt;
+		w_m   <= !ovf ? mr : ovv;
+		// the next cycle's overflow choice (used when it is F_RND2)
 		tomax = (rnd_mode == 2'b01) || (rnd_mode == 2'b10 && !a_s) || (rnd_mode == 2'b11 && a_s);
-		w_m   <= !ovf ? mr : !tomax ? 64'd0 :
+		tmx_q <= tomax;
+		ovv   <= !tomax ? 64'd0 :
 		         r_sgl ? 64'hFFFF_FFFF_FFFF_FFFF :
 		         (r_prec == 2'd1) ? 64'hFFFF_FF00_0000_0000 :
 		         (r_prec == 2'd2) ? 64'hFFFF_FFFF_FFFF_F800 :
