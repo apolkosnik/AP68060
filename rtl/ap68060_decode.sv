@@ -165,15 +165,25 @@ function automatic logic [31:0] ea_pcd(input logic [3:0] idx, input logic [15:0]
 	ea_pcd = (idx == EM_PC16) ? sx16(w0) : ea_bdx(w0, w1, w2);
 endfunction
 // a one-pass instruction's EA displacement from its two words (mk_ea's,
-// brief extensions; the PC-relative modes' is the PC sum, added apart)
-function automatic logic [31:0] ea_fbd(input logic [3:0] idx, input logic [2:0] immlen,
-                                       input logic [15:0] w0, input logic [15:0] w1);
+// brief extensions; the PC-relative modes' is the PC sum, added apart):
+// D1a's form, D1b's words (an #imm: long, or the word zero-extended)
+function automatic logic ea_hasbd(input logic [3:0] idx);
+	ea_hasbd = (idx == EM_AD16 || idx == EM_ABSW || idx == EM_ABSL || idx == EM_IMM || idx == EM_AX);
+endfunction
+function automatic logic [1:0] ea_bdf(input logic [3:0] idx, input logic lng);
 	case (idx)
-		EM_AD16, EM_ABSW: ea_fbd = sx16(w0);
-		EM_ABSL:          ea_fbd = {w0, w1};
-		EM_IMM:           ea_fbd = (immlen == 3'd1) ? {16'd0, w0} : {w0, w1};
-		EM_AX:            ea_fbd = {{24{w0[7]}}, w0[7:0]};
-		default:          ea_fbd = 32'd0;
+		EM_ABSL: ea_bdf = 2'd1;
+		EM_IMM:  ea_bdf = lng ? 2'd1 : 2'd2;
+		EM_AX:   ea_bdf = 2'd3;
+		default: ea_bdf = 2'd0;            // (AD16, ABSW)
+	endcase
+endfunction
+function automatic logic [31:0] ea_bdw(input logic [1:0] f, input logic [15:0] w0, input logic [15:0] w1);
+	case (f)
+		2'd1:    ea_bdw = {w0, w1};
+		2'd2:    ea_bdw = {16'd0, w0};
+		2'd3:    ea_bdw = {{24{w0[7]}}, w0[7:0]};
+		default: ea_bdw = sx16(w0);
 	endcase
 endfunction
 
@@ -585,8 +595,9 @@ logic        ir_epc;        // ... EA0's (a part's) displacement is the PC sum
 logic        ir_fimm;       // ... EA0 is an FPU instruction's immediate: its
                             // displacement is its address (ir_pcb0)
 logic        ir_e0f, ir_e1f; // ... a one-pass instruction's displacement is
-logic [15:0] ir_e0 [2];     // formed in D1b from its EA's two words
-logic [15:0] ir_e1 [2];
+logic [15:0] ir_e0 [2];     // formed in D1b from its EA's two words, by the
+logic [15:0] ir_e1 [2];     // form D1a picked (ea_bdf: no mode decode there)
+logic  [1:0] ir_e0fm, ir_e1fm;
 pd_t         ir_pd;         // the instruction's predecode (its first part's)
 logic [31:0] ir_pc;         // the part's address
 logic  [3:0] ir_len;        // ... and with it
@@ -837,11 +848,13 @@ always_ff @(posedge clk) begin
 			ir_ea0 <= (ph == PH_IDLE) ? e0 : ep;
 			ir_ea1 <= (ph == PH_IDLE) ? e1 : ep;
 			ir_epc <= (ph == PH_IDLE) ? pc0 : ((ip == EM_PC16) || (ip == EM_PCX && !ep.bs));
-			ir_e0f <= (ph == PH_IDLE) && f0 && !pc0;
+			ir_e0f  <= (ph == PH_IDLE) && f0 && !pc0 && ea_hasbd(pd0.i0);
+			ir_e0fm <= ea_bdf(pd0.i0, pd0.sz == SZ_L);
 			ir_fimm <= (ph == PH_IDLE) ? (pd0.legal && !(q_odd && qcnt == 4'd0) &&
 			                              pd0.cls == CL_FPU_GEN && e0.m == EM_IMM)
 			                           : (ph == PH_EA0 && ep.m == EM_IMM && part_fg);
-			ir_e1f <= (ph == PH_IDLE) && f1;
+			ir_e1f  <= (ph == PH_IDLE) && f1 && ea_hasbd(pd0.i1);
+			ir_e1fm <= ea_bdf(pd0.i1, 1'b0);
 			ir_e0[0] <= win[fb];
 			ir_e0[1] <= win[3'(fb + 3'd1)];
 			ir_e1[0] <= win[fp1];
@@ -1097,9 +1110,9 @@ always_comb begin
 		// (the EAs: D1a's; a one-pass instruction's displacements here)
 		nrec.ea0 = ir_ea0;
 		if (ir_epc) nrec.ea0.bd = ir_pcs0;
-		if (ir_e0f) nrec.ea0.bd = ea_fbd(ir_pd.i0, (ir_pd.sz == SZ_L) ? 3'd2 : 3'd1, ir_e0[0], ir_e0[1]);
+		if (ir_e0f) nrec.ea0.bd = ea_bdw(ir_e0fm, ir_e0[0], ir_e0[1]);
 		nrec.ea1 = ir_ea1;
-		if (ir_e1f) nrec.ea1.bd = ea_fbd(ir_pd.i1, 3'd0, ir_e1[0], ir_e1[1]);
+		if (ir_e1f) nrec.ea1.bd = ea_bdw(ir_e1fm, ir_e1[0], ir_e1[1]);
 		if (!ir_odd) begin
 			nrec.opw   = ir_w[0];
 			nrec.ext1  = ir_w[1];

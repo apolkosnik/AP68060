@@ -188,6 +188,7 @@ logic [15:0] t_rest;            // ... the registers after this transfer
 // (whether a transfer is An's or the index's: the mask bits still below
 // theirs, counted down per transfer, and whether theirs is in the mask)
 logic  [4:0] c_ban, c_bx;
+logic  [4:0] b_ban, b_bx;
 logic        c_anin, c_xin;
 
 // the D2b build's view: the word and record (D2b's)
@@ -1041,6 +1042,7 @@ logic        a_dov;
 osel_t       a_oa, a_ob, a_od;
 logic  [4:0] a_amt0, a_amt1;
 logic [15:0] a_low1;
+logic  [4:0] a_ban, a_bx;      // MOVEM: the mask bits below An's / the index's
 logic  [3:0] a_bi1;
 always_comb begin
 	logic ma, mb, md, ea, eb, ed, mv, e1, agin, c;
@@ -1142,6 +1144,13 @@ always_comb begin
 	          !as.ea0.is && as.ext1[{as.ea0.xa, as.ea0.xr}] && !(a_fb_in && xreg == an);
 	a_base_in = a_fb_in || a_fx_in || ((ur.d == S_MVR) && pim && as.ext1[{1'b1, as.ea0.r}]);
 	a_e1pc1 = pc1(as.ext1);
+	begin
+		logic [3:0] kan, kx;
+		kan   = (as.ea0.m == EM_APD) ? ~{1'b1, as.ea0.r} : {1'b1, as.ea0.r};
+		kx    = {as.ea0.xa, as.ea0.xr};
+		a_ban = popc16(as.ext1 & ((16'd1 << kan) - 16'd1));
+		a_bx  = popc16(as.ext1 & ((16'd1 << kx) - 16'd1));
+	end
 end
 
 // the next instruction's address, for S_NPC (D2a: an adder off the uop)
@@ -1315,6 +1324,8 @@ always_ff @(posedge clk) begin
 		b_fb_in  <= a_fb_in;
 		b_fx_in  <= a_fx_in;
 		b_e1pc1  <= a_e1pc1;
+		b_ban    <= a_ban;
+		b_bx     <= a_bx;
 		b_mev    <= a_mev;
 		b_me1    <= a_me1;
 		b_agin   <= a_agin;
@@ -1390,8 +1401,8 @@ always_ff @(posedge clk) begin
 		isan = (b_bi1 == kan);
 		isx  = (b_bi1 == kx);
 		r    = mvreg(b_bi1, pd, sp_reg);
-		c_ban    <= popc16(rb.ext1 & ((16'd1 << kan) - 16'd1));
-		c_bx     <= popc16(rb.ext1 & ((16'd1 << kx) - 16'd1));
+		c_ban    <= b_ban;                 // (D2a's counts)
+		c_bx     <= b_bx;
 		c_anin   <= rb.ext1[kan];
 		c_xin    <= rb.ext1[kx];
 		t_mask   <= rb.ext1;

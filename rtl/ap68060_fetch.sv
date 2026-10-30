@@ -328,7 +328,9 @@ wire btb_hit1 = btb_on && !btb_cf && bvq1 && btb_q1[BTB_DW-2 -: BTB_TW] == f1_pc
 // redirect -- and the top read; the entries below the top are the fetch's
 // own: only predictions, EX checks every return)
 (* ramstyle = "MLAB, no_rw_check" *) logic [30:0] fras [8];
-logic  [2:0] fras_tp;
+// (the top's pointer a flip-flop of its own: not absorbed into the stack's
+// read-address register, with the BTB's take ahead of it)
+(* preserve *) logic [2:0] fras_tp;
 logic  [3:0] fras_n;
 logic        rs_p1, rs_p2;      // a redirect's resynchronization, two clocks on
 logic        frw_q;             // the return stack's write, registered
@@ -336,7 +338,9 @@ logic  [2:0] frwa_q;
 logic [30:0] frwd_q;
 logic  [3:0] atc_hv;            // the lookup: each way's hit and entry
 atce_t       atc_went [4];
-logic  [3:0] atc_set;           // atc_la's set (TC.P picks the bits), registered
+// (a flip-flop of its own: not absorbed into the ATC's read-address
+// register, with the BTB target select ahead of it)
+(* preserve *) logic [3:0] atc_set;   // atc_la's set (TC.P picks the bits), registered
 logic        atc_hit1;          // (simulation: the first port's lookup, the
 atce_t       atc_e1;            // reference for the pipelined one)
 // the set of an address
@@ -732,9 +736,10 @@ wire         qfany = (|qf) || (f6_n != 2'd0 && f6_f);
 // the count as a thermometer (bit j: j < cnt; a register, kept with the
 // count), and the count with F6's words (j < cnt + f6_n), to 31
 logic [QN-1:0] cth_q;
+logic [QN+1:0] cthf_q;         // ... with F6's words: registered (F5's count)
 logic   [31:0] cth, cthf;
 assign cth  = {{(32 - QN){1'b0}}, cth_q};
-assign cthf = (f6_n == 2'd2) ? {cth[29:0], 2'b11} : (f6_n == 2'd1) ? {cth[30:0], 1'b1} : cth;
+assign cthf = {{(30 - QN){1'b0}}, cthf_q};
 logic  [2:0] tk [3];
 assign tk[0] = 3'd0;
 assign tk[1] = qp0.tot[2:0];
@@ -818,6 +823,7 @@ typedef struct packed {
 	logic          [1:0] room;
 	logic          [3:0] qcnt;
 	logic       [QN-1:0] cth;
+	logic       [QN+1:0] cthf;
 } qc_t;
 qc_t qc [3];
 always_comb
@@ -829,6 +835,7 @@ always_comb
 		qc[c].room   = room_n[c];
 		qc[c].qcnt   = (qs_n[c].cnt > 5'd8) ? 4'd8 : qs_n[c].cnt[3:0];
 		for (int j = 0; j < QN; j++) qc[c].cth[j] = (5'(j) < qs_n[c].cnt);
+		for (int j = 0; j < QN + 2; j++) qc[c].cthf[j] = (6'(j) < {1'b0, qs_n[c].cnt} + {4'd0, f5_n});
 	end
 (* keep *) wire [$bits(qc_t)-1:0] qk0;
 (* keep *) wire [$bits(qc_t)-1:0] qk1;
@@ -946,6 +953,7 @@ always_ff @(posedge clk) begin
 		qsimp_q <= 1'b0;
 		qcnt_q  <= '0;
 		cth_q   <= '0;
+		cthf_q  <= '0;
 		room_q  <= 1'b1;
 		m_setpc <= 1'b0;
 	end
@@ -991,6 +999,7 @@ always_ff @(posedge clk) begin
 		qsimp_q <= qn.simple;
 		qcnt_q  <= qn.qcnt;
 		cth_q   <= qn.cth;
+		cthf_q  <= qn.cthf;
 		room_q  <= qn.room[f0_go && !(f1_v && !f2_miss && f1_bt) && !f2_miss];
 		tq_n    <= qn.s.tq_n;
 		tq_h    <= tq_h + {2'b00, qn.s.tq_sh};
@@ -1344,6 +1353,7 @@ always_ff @(posedge clk) begin
 			qsimp_q <= 1'b0;
 			qcnt_q  <= '0;
 			cth_q   <= '0;
+		cthf_q  <= '0;
 			room_q  <= 1'b1;
 			m_setpc <= 1'b0;
 			f3_n  <= '0;
@@ -1517,6 +1527,11 @@ always_ff @(posedge clk)
 	if (nreset && q_simple && !(qp0.legal && !qp0.slow && !qp0.x0 && !qp0.x1 && qp0.tot <= 4'd7 &&
 	                            {1'b0, qp0.tot} <= cnt && qf[7:0] == 8'd0)) begin
 		$display("FAIL: fetch: the head's one-pass flag");
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst) for (int j = 0; j < QN + 2; j++) if (cthf_q[j] != (6'(j) < {1'b0, cnt} + {4'd0, f6_n})) begin
+		$display("FAIL: fetch: the count-with-F6 thermometer %b, the count %0d + %0d", cthf_q, cnt, f6_n);
 		$finish;
 	end
 always_ff @(posedge clk)
