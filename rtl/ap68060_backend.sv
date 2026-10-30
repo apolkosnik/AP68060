@@ -443,21 +443,22 @@ wire [31:0] ag_pinc = ag_base + {{24{ag_u.upd_amt[7]}}, ag_u.upd_amt};
 wire [31:0] ag_updv = ag_u.pinc ? ag_pinc : ag_ea;
 wire [31:0] ag_u2v  = rrd[2] + {{24{ag_u.upd2_amt[7]}}, ag_u.upd2_amt};
 // bit field memory transfers sized by the field (see ucode.py _bf_mem_load)
-wire        ag_bfh    = (ag_u.mem != M_NONE) && (ag_u.op == OP_MOV) && (ag_u.cond == 4'hE);
-wire        ag_bft    = (ag_u.mem != M_NONE) && (ag_u.op == OP_MOV) && (ag_u.cond == 4'hD);
+// (the bit-field accesses' kinds registered as the uop enters AG, the
+// field's byte count's cases as EX forms it: bf_n*)
+logic       ag_bfh, ag_bft;
+logic       bf_n1, bf_nle3, bf_n3, bf_n35;
 // FPU transfers cancelled by run-time state: FMOVEM slots (dyn; the FPU
 // interface latched the list in EX before these uops' addresses could be
 // formed)
 wire        ag_dyncan = (ag_u.dyn == 3'd1 && !fp_mvslots[ag_u.dynk[2:0]]);
-wire        ag_cancel = (ag_bft && !(bf_nb == 3'd3 || bf_nb == 3'd5)) || ag_dyncan;
-wire  [1:0] ag_msz    = ag_bfh ? ((bf_nb == 3'd1) ? SZ_B : (bf_nb <= 3'd3) ? SZ_W : SZ_L)
-                               : ag_u.msz;
+wire        ag_cancel = (ag_bft && !bf_n35) || ag_dyncan;
+wire  [1:0] ag_msz    = ag_bfh ? (bf_n1 ? SZ_B : bf_nle3 ? SZ_W : SZ_L) : ag_u.msz;
 // the memory address: the cases are folded into the adder's operands
 // (their selects are registers), so nothing follows the sum on its way
 // to the data cache's set index
 // (disp - 2 formed as the uop enters AG: ag_dm2)
 logic [31:0] ag_dm2;
-wire [31:0] ag_mdisp  = (ag_bft && bf_nb == 3'd3) ? ag_dm2 : ag_u.disp;
+wire [31:0] ag_mdisp  = (ag_bft && bf_n3) ? ag_dm2 : ag_u.disp;
 wire [31:0] ag_maddr  = add3(ag_base, ag_ix, ag_mdisp);
 
 // operand read with the EX broadcast of this cycle (see the snoop below)
@@ -617,10 +618,12 @@ assign ex_md_start = ex_v && ex_is_md && !md_go && !ex_div0 && !md_busy && !ex_f
 
 // word forms: DIVU.W/DIVS.W divide the 32-bit Dn by a 16-bit source;
 // MULU.W/MULS.W multiply the low words
+// (the word forms' selects registered as the uop enters EX: ex_mw)
 wire        md_sign = ex_u.cond[0];
-wire [31:0] md_a    = (ex_u.sz == SZ_W) ?
+logic [1:0] ex_mw;            // {the word form, a word multiply}
+wire [31:0] md_a    = ex_mw[1] ?
                       (md_sign ? {{16{ex_av[15]}}, ex_av[15:0]} : {16'd0, ex_av[15:0]}) : ex_av;
-wire [31:0] md_blo  = (ex_u.op == OP_MUL && ex_u.sz == SZ_W) ?
+wire [31:0] md_blo  = ex_mw[0] ?
                       (md_sign ? {{16{ex_bv[15]}}, ex_bv[15:0]} : {16'd0, ex_bv[15:0]}) : ex_bv;
 
 ap68060_muldiv md (
@@ -1167,8 +1170,7 @@ ap68060_alu cas_alu (
 );
 wire cas_eq = cas_flags[2];
 
-wire  [31:0] ex_szm = (ex_u.sz == SZ_B) ? 32'h0000_00FF :
-                      (ex_u.sz == SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
+logic [31:0] ex_szm;          // EX's size mask, registered as the uop enters
 
 // store data, and stores the EX op cancels
 logic ex_stkill;
@@ -1644,6 +1646,19 @@ end
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset) begin
+		if (ex_v && (ex_szm != ((ex_u.sz == SZ_B) ? 32'h0000_00FF : (ex_u.sz == SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF) ||
+		             ex_mw != {ex_u.sz == SZ_W, ex_u.op == OP_MUL && ex_u.sz == SZ_W})) begin
+			$display("FAIL: EX's registered size selects disagree (pc %h)", ex_u.pc);
+			$finish;
+		end
+		if (ag_v && (ag_bfh != ((ag_u.mem != M_NONE) && (ag_u.op == OP_MOV) && (ag_u.cond == 4'hE)) ||
+		             ag_bft != ((ag_u.mem != M_NONE) && (ag_u.op == OP_MOV) && (ag_u.cond == 4'hD)) ||
+		             ((ag_bfh || ag_bft) && (bf_n1 != (bf_nb == 3'd1) || bf_nle3 != (bf_nb <= 3'd3) ||
+		                                     bf_n3 != (bf_nb == 3'd3) ||
+		                                     bf_n35 != (bf_nb == 3'd3 || bf_nb == 3'd5))))) begin
+			$display("FAIL: AG's registered bit-field selects disagree (pc %h)", ag_u.pc);
+			$finish;
+		end
 		if (wb_v && wb_crs != cr_sel(wb_u)) begin
 			$display("FAIL: WB's control register select %b disagrees (pc %h)", wb_crs, wb_u.pc);
 			$finish;
@@ -1963,6 +1978,9 @@ always_ff @(posedge clk) begin
 			ex_npc   <= dc2_u.pc + {27'd0, dc2_u.ilen, 1'b0};
 			ex_rs    <= rsel(dc2_u);
 			ex_ac    <= alu_ctl(dc2_u.op);
+			ex_szm   <= (dc2_u.sz == SZ_B) ? 32'h0000_00FF :
+			            (dc2_u.sz == SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
+			ex_mw    <= {dc2_u.sz == SZ_W, dc2_u.op == OP_MUL && dc2_u.sz == SZ_W};
 			ex_kx    <= {dc2_u.op == OP_FPU, dc2_u.op == OP_DIV, dc2_u.op == OP_TRAPCC};
 			ex_sk    <= (rsel(dc2_u) & 11'd1 << RS_SUM) != 11'd0 ?
 			            ((dc2_u.sz == SZ_B) ? 32'h0000_00FF : (dc2_u.sz == SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF) :
@@ -2166,6 +2184,10 @@ always_ff @(posedge clk) begin
 				bf_top <= ~(32'hFFFF_FFFF >> w);      // (a shift by 32 gives 0)
 				bf_sx  <= 32'hFFFF_FFFF << w;
 				bf_nb  <= e[5:3];
+				bf_n1  <= e[5:3] == 3'd1;
+				bf_nle3 <= e[5:3] <= 3'd3;
+				bf_n3  <= e[5:3] == 3'd3;
+				bf_n35 <= e[5:3] == 3'd3 || e[5:3] == 3'd5;
 			end
 			if (ex_u.op == OP_BF) bf_lonew <= bf_lo_out;
 		end
@@ -2377,6 +2399,8 @@ always_ff @(posedge clk) begin
 			if (ag_take && ain_v) begin
 				ag_u      <= ain_u;
 				ag_u.disp <= ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp;
+				ag_bfh    <= (ain_u.mem != M_NONE) && (ain_u.op == OP_MOV) && (ain_u.cond == 4'hE);
+				ag_bft    <= (ain_u.mem != M_NONE) && (ain_u.op == OP_MOV) && (ain_u.cond == 4'hD);
 				ag_dm2    <= (ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp) - 32'd2;
 			end
 			// the skid: emptied when AG takes it; filled by a popped uop AG
