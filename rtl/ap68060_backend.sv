@@ -589,10 +589,10 @@ end
 //--------------------------------------------------------------------------
 // EX
 //--------------------------------------------------------------------------
-// operand values entering EX: A or B may be the load data
-wire [31:0] ex_av0 = (ex_u.a_src == OS_MEM) ? ex_ld : ex_a;
-wire [31:0] ex_av  = ex_u.a_sxw ? {{16{ex_av0[15]}}, ex_av0[15:0]} : ex_av0;
-wire [31:0] ex_bv  = (ex_u.b_src == OS_MEM) ? ex_ld : ex_b;
+// EX's operand values: the load data (A or B may be it) and A's word sign
+// extension are merged in as the uop enters EX, so EX starts from
+// flip-flops (ex_a/ex_b keep the register operands as they were)
+logic [31:0] ex_av, ex_bv;
 
 logic [31:0] alu_res;
 logic  [4:0] alu_flags;
@@ -657,7 +657,7 @@ ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 // (a divide by zero holds its first cycle too: the zero test of the
 // operand stays off the stall path, and the exception goes a cycle later)
 assign ex_hold = (ex_v && ex_is_md && !md_z && !ex_fault && !md_done && !md_fin) ||
-                 (ex_v && ex_slow && !ex_ph) ||
+                 (ex_v && ex_slow && ex_sp != ex_np) ||
                  (ex_v && ex_is_fp && !ex_fault && ex_u.exc == 8'd0 && fp_hold);
 
 // multiply/divide result and flags
@@ -746,25 +746,46 @@ endfunction
 logic  [7:0] bf_lonew;          // memory form: the new byte after the long
 logic [31:0] bf_res;
 logic  [7:0] bf_lo_out;
-// BFINS takes a cycle more: its source left-aligned to the field width
-// (ins_top) is registered first (bf_ins_q, in ex_pb's cycle), so the field
-// merge starts from flip-flops -- three variable shifts in a row do not
-// close at 60 MHz without register retiming
-// Every bit field operation takes that cycle: the rotated operand is
-// registered (bf_rot_q), and the extraction, flags and merge start from it
+// A bit field operation runs in four EX cycles, each from registers:
+//   0  the operand rotated to the field (bf_rot_q) and the BFINS source
+//      left aligned to the field width (bf_ins_q)
+//   1  the field extracted, the changed operand, the leading zeros and the
+//      flags (bf_*_q)
+//   2  the changed operand rotated back, the result (xs, into xs_q)
+//   3  the result
 // (a rotate and a second variable shift in one cycle do not close at 65 MHz)
-logic        ex_pb;
 logic [31:0] bf_ins_q, bf_rot, bf_rot_q;
 logic  [5:0] rox_nx, rox_nx_q;  // ROXL/ROXR: their count mod (size + 1), the same way
-wire         ex_pre = (ex_u.op == OP_BF) || (ex_u.op == OP_ROXL) || (ex_u.op == OP_ROXR);
-wire         ex_bfins = (ex_u.op == OP_BF) && (ex_u.cond[2:0] == 3'd7);
+logic [31:0] bf_fld_q, bf_nrot_q;
+logic [39:0] bf_nwin_q;
+logic  [5:0] bf_lz_q;
+logic        bf_nf_q, bf_zf_q, bf_r31_q;
+logic [31:0] bf_fld, bf_nrot;
+logic [39:0] bf_nwin;
+logic  [5:0] bf_lz;
+logic        bf_nf, bf_zf;
 logic  [4:0] bf_flags;
+// leading zero count of a nonzero 32-bit value: each nibble's count beside
+// whether it is zero, then the first nonzero nibble picks (a tree, not a
+// chain of shifts)
+function automatic logic [4:0] lz32(input logic [31:0] v);
+	logic [7:0] nz;
+	logic [1:0] c [8];
+	logic [2:0] k;
+	for (int i = 0; i < 8; i++) begin
+		logic [3:0] d;
+		d = v[31 - 4*i -: 4];
+		nz[i] = (d != 4'd0);
+		c[i]  = d[3] ? 2'd0 : d[2] ? 2'd1 : d[1] ? 2'd2 : 2'd3;
+	end
+	k = 3'd7;
+	for (int i = 7; i >= 0; i--) if (nz[i]) k = 3'(i);
+	lz32 = {k, c[k]};
+endfunction
 always_comb begin
 	logic [4:0]  o;
 	logic [31:0] top, rot, fld, ins_top, nrot, nreg, zf;
 	logic [39:0] win, mask40, ins40, nwin;
-	logic [5:0]  lz;
-	logic        nflag, zflag;
 	logic [2:0]  t;
 	t   = ex_u.cond[2:0];
 	top = bf_top;
@@ -790,46 +811,49 @@ always_comb begin
 		mask40 = {top, 8'h00} >> o;
 		ins40  = {ins_top, 8'h00} >> o;
 	end
+	// cycle 0
 	bf_rot = rot;
+	// cycle 1, from bf_rot_q and bf_ins_q
 	rot    = bf_rot_q;
-	fld = rot >> bf_wn;
+	bf_fld = rot >> bf_wn;
 	case (t)
-		3'd2: nrot = rot ^ top;                     // BFCHG
-		3'd4: nrot = rot & ~top;                    // BFCLR
-		3'd6: nrot = rot | top;                     // BFSET
-		default: nrot = (rot & ~top) | (ins_top & top);   // BFINS
+		3'd2: bf_nrot = rot ^ top;                     // BFCHG
+		3'd4: bf_nrot = rot & ~top;                    // BFCLR
+		3'd6: bf_nrot = rot | top;                     // BFSET
+		default: bf_nrot = (rot & ~top) | (ins_top & top);   // BFINS
 	endcase
-	nreg = 32'({nrot, nrot} >> o);
 	case (t)
-		3'd2: nwin = win ^ mask40;
-		3'd4: nwin = win & ~mask40;
-		3'd6: nwin = win | mask40;
-		default: nwin = (win & ~mask40) | (ins40 & mask40);
+		3'd2: bf_nwin = win ^ mask40;
+		3'd4: bf_nwin = win & ~mask40;
+		3'd6: bf_nwin = win | mask40;
+		default: bf_nwin = (win & ~mask40) | (ins40 & mask40);
 	endcase
-	// leading zeros of the field (FFO): a log-depth count over the top-
-	// aligned field; a zero field gives the width
-	zf = rot & top;
-	lz = (zf == 32'd0) ? bf_w : {1'b0, clz32(zf)};
+	// leading zeros of the field (FFO) over the top-aligned field; a zero
+	// field gives the width
+	zf    = rot & top;
+	bf_lz = (zf == 32'd0) ? bf_w : {1'b0, lz32(zf)};
 	if (t == 3'd7) begin
-		nflag = ins_top[31];
-		zflag = (ins_top & top) == 32'd0;
+		bf_nf = ins_top[31];
+		bf_zf = (ins_top & top) == 32'd0;
 	end
 	else begin
-		nflag = rot[31];
-		zflag = zf == 32'd0;
+		bf_nf = rot[31];
+		bf_zf = zf == 32'd0;
 	end
-	bf_flags = {ccr_f[4], nflag, zflag, 1'b0, 1'b0};
+	// cycle 2, from the bf_*_q registers
+	nreg = 32'({bf_nrot_q, bf_nrot_q} >> o);
+	bf_flags = {ccr_f[4], bf_nf_q, bf_zf_q, 1'b0, 1'b0};
 	// the bytes written back: the head right justified, the tail byte
-	bf_lo_out = (bf_nb == 3'd3) ? nwin[23:16] : nwin[7:0];
+	bf_lo_out = (bf_nb == 3'd3) ? bf_nwin_q[23:16] : bf_nwin_q[7:0];
 	case (t)
-		3'd1: bf_res = fld;                                            // BFEXTU
-		3'd3: bf_res = fld | (rot[31] ? bf_sx : 32'd0);                  // BFEXTS
-		3'd5: bf_res = bf_off + {26'd0, lz};                           // BFFFO
-		3'd0: bf_res = ex_bv;                                          // BFTST
+		3'd1: bf_res = bf_fld_q;                                         // BFEXTU
+		3'd3: bf_res = bf_fld_q | (bf_r31_q ? bf_sx : 32'd0);              // BFEXTS
+		3'd5: bf_res = bf_off + {26'd0, bf_lz_q};                         // BFFFO
+		3'd0: bf_res = ex_bv;                                            // BFTST
 		default: bf_res = !ex_u.cond[3] ? nreg :
-		                  (bf_nb == 3'd1) ? {24'd0, nwin[39:32]} :
-		                  (bf_nb == 3'd2 || bf_nb == 3'd3) ? {16'd0, nwin[39:24]} :
-		                  nwin[39:8];
+		                  (bf_nb == 3'd1) ? {24'd0, bf_nwin_q[39:32]} :
+		                  (bf_nb == 3'd2 || bf_nb == 3'd3) ? {16'd0, bf_nwin_q[39:24]} :
+		                  bf_nwin_q[39:8];
 	endcase
 end
 
@@ -879,14 +903,20 @@ function automatic logic [31:0] spr_read(input logic [7:0] n);
 	endcase
 endfunction
 
-// slow (two-cycle) operations: computed in EX's first cycle, registered,
-// used in the second, so their logic never reaches the result path
-function automatic logic is_slow(input logic [6:0] op);
+// slow (multi-cycle) operations: EX holds them for their phases; the
+// result is formed into xs, registered (xs_q) in the next-to-last phase and
+// presented in the last, so their logic never reaches the result path.
+// The last phase: 2 for most (the shifter's first stage, then the shift;
+// the others' xs just has the time), 3 for the bit fields (above) and for
+// ROXL/ROXR (their count reduced mod size + 1 first).  CHK is one: its
+// bound compare and the trap stay off the result and exception paths.
+function automatic logic [1:0] nphase(input logic [6:0] op);
 	case (op)
-		OP_ASL, OP_ASR, OP_LSL, OP_LSR, OP_ROL, OP_ROR, OP_ROXL, OP_ROXR,
-		OP_ABCD, OP_SBCD, OP_NBCD, OP_PACK, OP_UNPK, OP_BF,
-		OP_SPR, OP_SRLOG, OP_RTE, OP_RTEF, OP_IACKV, OP_MISC: is_slow = 1'b1;
-		default: is_slow = 1'b0;
+		OP_ROXL, OP_ROXR, OP_BF: nphase = 2'd3;
+		OP_ASL, OP_ASR, OP_LSL, OP_LSR, OP_ROL, OP_ROR,
+		OP_ABCD, OP_SBCD, OP_NBCD, OP_PACK, OP_UNPK, OP_CHK,
+		OP_SPR, OP_SRLOG, OP_RTE, OP_RTEF, OP_IACKV, OP_MISC: nphase = 2'd2;
+		default: nphase = 2'd0;
 	endcase
 endfunction
 
@@ -901,20 +931,24 @@ typedef struct packed {
 	logic [15:0] sr_new;
 } exo_t;
 
-wire  ex_slow = is_slow(ex_u.op);
+logic [1:0] ex_np;              // the EX uop's last phase (0: a fast op)
+logic [1:0] ex_sp;              // ... and its phase now
+logic       ex_slow;            // ex_np != 0, registered with it
+logic       ex_shq;             // a shift or rotate, registered with it
 // shifts and rotates: N and Z are the result's sign and zero test at the
 // size, taken in the second cycle from the registered result (the barrel
 // shift and a 32-bit zero test do not fit one cycle with the count logic)
-wire  ex_shift = (ex_u.op == OP_ASL) || (ex_u.op == OP_ASR) || (ex_u.op == OP_LSL) ||
-                 (ex_u.op == OP_LSR) || (ex_u.op == OP_ROL) || (ex_u.op == OP_ROR) ||
-                 (ex_u.op == OP_ROXL) || (ex_u.op == OP_ROXR);
-logic ex_ph;                    // second cycle of a slow op
+function automatic logic is_shift(input logic [6:0] op);
+	is_shift = (op == OP_ASL) || (op == OP_ASR) || (op == OP_LSL) || (op == OP_LSR) ||
+	           (op == OP_ROL) || (op == OP_ROR) || (op == OP_ROXL) || (op == OP_ROXR);
+endfunction
+wire  ex_shift = ex_shq;
 exo_t xf, xs, xs_q;
 
 logic [31:0] sl_res;
 logic  [4:0] sl_flags;
 ap68060_alu_slow alu_s (
-	.op(ex_u.op), .sz(ex_u.sz), .a(ex_av), .b(ex_bv), .cnt(ex_a[5:0]), .flags_in(ccr_f),
+	.clk(clk), .op(ex_u.op), .sz(ex_u.sz), .a(ex_av), .b(ex_bv), .cnt(ex_a[5:0]), .flags_in(ccr_f),
 	.nx_q(rox_nx_q), .nx(rox_nx),
 	.res(sl_res), .flags_out(sl_flags)
 );
@@ -976,7 +1010,6 @@ always_comb begin
 			xf.dkill = alu_cc;
 		end
 		OP_TRAPCC: if (alu_trap) xf.xvec = 8'd7;
-		OP_CHK:    if (alu_trap) xf.xvec = 8'd6;
 		OP_CCRLOG: xf.res = ex_bv;
 		OP_SPW:    xf.res = ex_av;
 		OP_LATCH:  xf.res = ex_av;
@@ -1083,6 +1116,11 @@ always_comb begin
 			xs.res   = bf_res;
 			xs.flags = bf_flags;
 		end
+		OP_CHK: begin
+			xs.res   = alu_res;
+			xs.flags = alu_flags;
+			if (alu_trap) xs.xvec = 8'd6;
+		end
 		default: ;
 	endcase
 end
@@ -1155,14 +1193,27 @@ wire        ex_br      = (ex_u.br != BR_NONE) || (ex_u.op == OP_RTE);
 wire [31:0] ex_next    = ex_taken ? ex_target : ex_npc;
 wire        ex_mispred = ex_br && ((ex_taken != ex_u.pred) ||
                                    (ex_taken && ex_u.pred && ex_target != ex_u.target));
-// a mispredicted branch that WB will redirect for no other reason turns
-// the front end round as it leaves EX, a cycle early; the stages behind it
-// still go at WB (the front end is not flushed again), and AG takes
-// nothing in between
+// a mispredicted Bcc or DBcc that WB will redirect for no other reason
+// turns the front end round as it leaves EX, a cycle early; the stages
+// behind it still go at WB (the front end is not flushed again), and AG
+// takes nothing in between.  Only those: their target is the decoded one,
+// so whether they mispredicted is the condition alone (no target compare),
+// and where they go is a choice of two registers.
 logic       eredir_pend, wb_eredir;
-wire        ex_early = ex_mispred && !ex_u.ser && !ex_sr_we &&
-                       !(ex_u.last && (smc_pend || ex_smc)) && (ex_u.exc == 8'd0) &&
-                       !ex_fault && (ex_xvec == 8'd0) && !ex_odd && !kill_now && !flush;
+wire        ex_bdb_tk = (ex_u.op == OP_BCC) ? alu_cc : (!alu_cc && (ex_bv[15:0] != 16'd0));
+wire [31:0] ex_bdb_nx = ex_bdb_tk ? ex_u.target : ex_npc;
+wire        ex_early = ((ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC)) && (ex_u.br != BR_NONE) && (ex_bdb_tk != ex_u.pred) &&
+                       !ex_u.ser && !(ex_u.last && smc_pend) && (ex_u.exc == 8'd0) &&
+                       !ex_fault && !ex_u.target[0] && !kill_now && !flush;
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && ex_v && ((ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC)) && (ex_u.br != BR_NONE) &&
+	    (ex_bdb_tk != ex_taken || (ex_early && !ex_mispred) || (ex_taken && ex_target != ex_u.target))) begin
+		$display("FAIL: Bcc/DBcc early redirect: taken %b/%b mispred %b (pc %h)",
+		         ex_bdb_tk, ex_taken, ex_mispred, ex_u.pc);
+		$finish;
+	end
+// synthesis translate_on
 
 // a change of flow to an odd address is an address error at the
 // instruction (format $2, the address with A0 cleared), before any of its
@@ -1209,16 +1260,22 @@ wire ex_d_eff = ex_u.d_v && !ex_dkill;
 // operand forwarding -- the FPU's own taken, not EX's selected one)
 wire ex_odd_w = ex_br && (ex_bdb ? ex_u.target[0] :
                           (ex_u.op == OP_FPU) && fp_taken && ex_target[0]);
-assign exw_v   = adv_ex && ex_d_eff && !ex_fault && (ex_xvec == 8'd0) && !ex_odd_w &&
-                 (ex_u.exc == 8'd0);
-// the same for AG's base/index loads: without EX's exception decision (a
-// late signal) -- a uop that takes an exception flushes AG with the rest
-wire        exw_ag  = adv_ex && ex_d_eff;
-// ... and for the operands of the uops in DC1 and DC2: a uop that takes an
-// exception flushes them too, and the flush clears the front file (fv), so
-// the forwarding needs only whether EX writes the register (the timing path)
-wire        exw_fw  = exw_ag;
+// EX's result is final once its own unit is done (ex_hold, without WB's
+// stall): the front file is written, and the younger uops capture it, from
+// then on -- every cycle EX holds it, the same value -- so neither waits
+// for the stall chain (adv_ex).  Without EX's exception decision: a uop
+// that takes an exception, or whose instruction is refetched, flushes every
+// younger uop, and the flush clears the front file (fv) in the same cycle.
+wire        ex_fin  = ex_v && !ex_hold;
+assign exw_v   = ex_fin && ex_d_eff;
+wire        exw_ag  = exw_v;
+wire        exw_fw  = exw_v;
 assign exw_reg = ex_u.d_reg;
+// DC2's operands as they enter EX: EX's broadcast of this cycle, then the
+// load data and A's sign extension (ex_av, ex_bv)
+wire [31:0] dc2_af  = (exw_fw && dc2_u.a_src == OS_REG && dc2_u.a_reg == exw_reg) ? exw_val : dc2_a;
+wire [31:0] dc2_bf  = (exw_fw && dc2_u.b_src == OS_REG && dc2_u.b_reg == exw_reg) ? exw_val : dc2_b;
+wire [31:0] dc2_av0 = (dc2_u.a_src == OS_MEM) ? dm_ldata : dc2_af;
 assign exw_val = (ex_u.op == OP_CAS) ? ((ex_bv & ex_szm) | (ex_latch & ~ex_szm)) : ex_res;
 // synthesis translate_off
 always @(posedge clk)
@@ -1529,8 +1586,7 @@ always_ff @(posedge clk) begin
 		md_go   <= 1'b0;
 		md_fin  <= 1'b0;
 		md_z    <= 1'b0;
-		ex_ph   <= 1'b0;
-		ex_pb   <= 1'b0;
+		ex_sp   <= 2'd0;
 		xs_q    <= '0;
 		md_rem  <= 32'd0;
 		md_lol  <= 32'd0;
@@ -1661,8 +1717,13 @@ always_ff @(posedge clk) begin
 			             dc2_u.op == OP_FPU};
 			ex_ee    <= dc2_ee;
 			ex_er    <= dc2_er;
-			ex_a     <= (exw_v && dc2_u.a_src == OS_REG && dc2_u.a_reg == exw_reg) ? exw_val : dc2_a;
-			ex_b     <= (exw_v && dc2_u.b_src == OS_REG && dc2_u.b_reg == exw_reg) ? exw_val : dc2_b;
+			ex_a     <= dc2_af;
+			ex_b     <= dc2_bf;
+			ex_av    <= dc2_u.a_sxw ? {{16{dc2_av0[15]}}, dc2_av0[15:0]} : dc2_av0;
+			ex_bv    <= (dc2_u.b_src == OS_MEM) ? dm_ldata : dc2_bf;
+			ex_np    <= nphase(dc2_u.op);
+			ex_slow  <= nphase(dc2_u.op) != 2'd0;
+			ex_shq   <= is_shift(dc2_u.op);
 			ex_ea    <= dc2_ea;
 			ex_ld    <= dm_ldata;
 			ex_upd   <= dc2_upd;
@@ -1681,17 +1742,26 @@ always_ff @(posedge clk) begin
 		else if (adv_ex) ew_same <= 1'b1;
 		if (ex_md_start) md_go <= 1'b1;
 		if (ex_v && ex_div0) md_z <= 1'b1;
-		if (ex_v && ex_pre && !ex_pb) begin
-			ex_pb    <= 1'b1;
+		// multi-cycle operations: phase 0's registers (the bit fields',
+		// ROXL/ROXR's count), phase 1's (the bit fields'), the result in
+		// the next-to-last phase
+		if (ex_sp == 2'd0) begin
 			bf_ins_q <= ex_av << bf_wn;
 			bf_rot_q <= bf_rot;
 			rox_nx_q <= rox_nx;
 		end
-		else if (ex_v && ex_slow && !ex_ph) begin
-			ex_ph <= 1'b1;
-			xs_q  <= xs;
+		if (ex_sp == 2'd1) begin
+			bf_fld_q  <= bf_fld;
+			bf_nrot_q <= bf_nrot;
+			bf_nwin_q <= bf_nwin;
+			bf_lz_q   <= bf_lz;
+			bf_nf_q   <= bf_nf;
+			bf_zf_q   <= bf_zf;
+			bf_r31_q  <= bf_rot_q[31];
 		end
-		if (adv_ex || kill_now) begin ex_ph <= 1'b0; ex_pb <= 1'b0; end
+		if (ex_v && ex_slow && ex_sp == ex_np - 2'd1) xs_q <= xs;
+		if (ex_v && ex_slow && ex_sp != ex_np) ex_sp <= ex_sp + 2'd1;
+		if (adv_ex || kill_now) ex_sp <= 2'd0;
 
 		//------------------------------------------------------------------
 		// EX -> WB
@@ -1723,7 +1793,7 @@ always_ff @(posedge clk) begin
 			if (ex_early) begin
 				fe_flush    <= 1'b1;
 				redir_v     <= 1'b1;
-				redir_pc    <= ex_next;
+				redir_pc    <= ex_bdb_nx;
 				ras_rv      <= ex_u.ras.v;
 				{ras_rtp, ras_rn} <= ras_after(ex_u.ras);
 				eredir_pend <= 1'b1;
