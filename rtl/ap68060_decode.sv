@@ -49,6 +49,8 @@ module ap68060_decode
 	input  logic  [7:0] win_bt,       // the word ends a branch the fetch BTB took
 	input  logic [31:0] bt_tgt,       // its target (the first flagged word's)
 	input  pd_t         pd0,          // predecode of win[0]
+	input  logic        q_simple,     // ... a one-pass instruction, all in the queue,
+	                                  // no word D1 sees faulted (registers)
 	input  logic  [3:0] qcnt,
 	input  logic [31:0] qpc,
 	input  logic        q_odd,
@@ -393,13 +395,12 @@ always_comb begin
 	                      : (win_fatc[fi] ? EXC_IFSA : EXC_IFS);
 end
 
-// the common case: a whole one-pass instruction, no fault in its words
+// the common case, from registers: a whole one-pass instruction (no index
+// extension), no fault in the words D1 sees (the fetch's q_simple).  An
+// index EA's instruction is taken by the general case.
 wire full0  = pd0.x0 && win[fb][8];
 wire full1  = pd0.x1 && win[fp1][8];
-wire [15:0] tmask = lmask(pd0.tot);
-wire s_ok   = (ph == PH_IDLE) && (qcnt != 4'd0) && pd0.legal && !pd0.slow &&
-              !full0 && !full1 && (pd0.tot <= 4'd7) && (pd0.tot <= qcnt) &&
-              ((win_flt & tmask[15:8]) == 8'd0);
+wire s_ok   = (ph == PH_IDLE) && q_simple;
 assign cs_fire = s_ok && !r_v && !stall;
 assign cr_fire = r_v && !stall;
 assign cr_use  = r_use;
@@ -622,77 +623,10 @@ always_ff @(posedge clk) begin
 		r_nph     <= PH_IDLE;
 		rx_q      <= 1'b0;
 		ir_v      <= 1'b0;
-		ir_go     <= 1'b0;
 	end
 	else begin
 		ir_v <= fire;
-		r_v  <= 1'b0;
 		if (fire) begin
-			// IR
-			ir_go    <= u_go;
-			ir_part  <= u_part;
-			ir_ph    <= ph;
-			ir_odd   <= (ph == PH_IDLE) && q_odd && qcnt == 4'd0;
-			ir_fast  <= pd0.legal && !pd0.slow && !full0 && !full1 && (pd0.tot <= 4'd7);
-			ir_flt   <= (win_flt & umask[15:8]) != 8'd0;
-			for (int i = 0; i < 5; i++) ir_w[i] <= win[i];
-			ir_e0[0] <= win[fb];
-			ir_e0[1] <= win[3'(fb + 3'd1)];
-			ir_e1[0] <= win[fp1];
-			ir_e1[1] <= win[3'(fp1 + 3'd1)];
-			ir_pd    <= (ph == PH_IDLE) ? pd0 : part_pd;
-			ir_pc    <= qpc;
-			ir_plen  <= (ph == PH_IDLE) ? 4'd0 : part_len;
-			ir_len   <= ((ph == PH_IDLE) ? 4'd0 : part_len) + {1'b0, u_use};
-			ir_il    <= (ph == PH_EA0) ? part_imml : 3'd0;
-			ir_npc   <= ((ph == PH_IDLE) ? qpc : part_pc) +
-			            {27'd0, ((ph == PH_IDLE) ? 4'd0 : part_len) + {1'b0, u_use}, 1'b0};
-			ir_pcb0  <= ((ph == PH_IDLE) ? qpc : part_pc) +
-			            {27'd0, (ph == PH_IDLE) ? {1'b0, fb} : part_len, 1'b0};
-			begin
-				// (the EA at the head: a one-pass instruction's EA0 at b, or
-				// the part's EA with its full-format words at 0)
-				logic [31:0] base;
-				base = (ph == PH_IDLE) ? qpc + {28'd0, fb, 1'b0} :
-				                         part_pc + {27'd0, part_len, 1'b0};
-				ir_pcs0 <= base + ((ph == PH_IDLE) ?
-				                   ea_pcd(pd0.i0, win[fb], 16'd0, 16'd0) :
-				                   ea_pcd((ph == PH_EA0) ? part_pd.i0 : part_pd.i1,
-				                          win[0], win[1], win[2]));
-			end
-			ir_jj    <= (pd0.cls == CL_JSR || pd0.cls == CL_JMP) && u_go && !u_part &&
-			            (pd0.i0 == EM_ABSW || pd0.i0 == EM_ABSL || pd0.i0 == EM_PC16);
-			ir_tsel  <= (!pd0.legal || (q_odd && qcnt == 4'd0)) ? 2'd0 :
-			            (pd0.cls == CL_BCC || pd0.cls == CL_BSR || pd0.cls == CL_DBCC ||
-			             pd0.cls == CL_FBCC || pd0.cls == CL_FDBCC ||
-			             ((pd0.cls == CL_JSR || pd0.cls == CL_JMP) && u_go && !u_part &&
-			              (pd0.i0 == EM_ABSW || pd0.i0 == EM_ABSL || pd0.i0 == EM_PC16))) ? 2'd1 :
-			            (pd0.cls == CL_RTS) ? 2'd2 : 2'd0;
-			ir_imm   <= a_imm;
-			// the exception: a fault in the words taken goes first
-			if ((win_flt & umask[15:8]) != 8'd0)
-				ir_exc <= f_code;
-			else if (ph == PH_IDLE && q_odd && qcnt == 4'd0)
-				ir_exc <= 8'd3;
-			else if (ph == PH_IDLE)
-				ir_exc <= x_exc;
-			else
-				ir_exc <= 8'd0;
-			ir_faddr <= f_addr;
-			ir_jtake <= a_jtake;
-			ir_jsrk  <= (pd0.cls == CL_JSR) && u_go && !u_part &&
-			            (pd0.i0 == EM_ABSW || pd0.i0 == EM_ABSL || pd0.i0 == EM_PC16);
-			ir_fpk   <= fpu_k(win[1], pd0.i0);
-			ir_fpkk  <= kind_fix(10'(fpu_k(win[1], pd0.i0)), 19'd0);
-			ir_ntgt  <= a_ntgt;
-			ir_dsign <= a_dsign;
-			ir_bht   <= bht_q;
-			ir_lph   <= lp_hit;
-			ir_bt_tgt <= bt_tgt;
-			ir_bt_end <= a_bt_end;
-			ir_bt_restart <= (u_go || u_part) && a_bt_any && !a_bt_end;
-			ir_bt_fa  <= qpc + {28'd0, a_bt_j, 1'b0};
-			ir_lastpc <= qpc + {28'd0, u_use - 3'd1, 1'b0};
 			// the parse
 			ph <= (r_v && !(r_part && rx_q)) ? r_nph : PH_IDLE;
 			if (u_part) begin
@@ -707,22 +641,94 @@ always_ff @(posedge clk) begin
 					part_len <= part_len + {1'b0, u_use};
 			end
 		end
-		else if (!r_v && !s_ok && (g_go || g_part)) begin
-			// the general case: decided now, taken next clock (the head
-			// stays: nothing is taken this clock)
-			r_v    <= 1'b1;
+		// the general case: decided now, taken next clock (the head stays:
+		// nothing is taken this clock).  The decision's terms load while
+		// none is held; it is held, stalled or not, until taken.
+		if (!r_v) begin
 			r_go   <= g_go;
 			r_part <= g_part;
 			r_use  <= g_use;
 			r_nph  <= g_nph;
 			rx_q   <= (ph == PH_IDLE) && g_exc;
 		end
-		else if (r_v) r_v <= 1'b1;               // (stalled: kept for the head)
+		r_v <= r_v ? !fire : (!fire && !s_ok && (g_go || g_part));
 		// a redirect drops the head and what D1a took meanwhile
 		if (flush || d_redir_v) begin
 			ph  <= PH_IDLE;
 			r_v <= 1'b0;
 		end
+	end
+end
+
+// IR: loaded every clock, without reset (D1b takes it the clock after,
+// never later; ir_v says whether it holds a take): no enable from the late
+// take, no reset in its data path
+always_ff @(posedge clk) begin
+	begin
+		ir_go    <= u_go;
+		ir_part  <= u_part;
+		ir_ph    <= ph;
+		ir_odd   <= (ph == PH_IDLE) && q_odd && qcnt == 4'd0;
+		ir_fast  <= pd0.legal && !pd0.slow && !full0 && !full1 && (pd0.tot <= 4'd7);
+		ir_flt   <= (win_flt & umask[15:8]) != 8'd0;
+		for (int i = 0; i < 5; i++) ir_w[i] <= win[i];
+		ir_e0[0] <= win[fb];
+		ir_e0[1] <= win[3'(fb + 3'd1)];
+		ir_e1[0] <= win[fp1];
+		ir_e1[1] <= win[3'(fp1 + 3'd1)];
+		ir_pd    <= (ph == PH_IDLE) ? pd0 : part_pd;
+		ir_pc    <= qpc;
+		ir_plen  <= (ph == PH_IDLE) ? 4'd0 : part_len;
+		ir_len   <= ((ph == PH_IDLE) ? 4'd0 : part_len) + {1'b0, u_use};
+		ir_il    <= (ph == PH_EA0) ? part_imml : 3'd0;
+		ir_npc   <= ((ph == PH_IDLE) ? qpc : part_pc) +
+		            {27'd0, ((ph == PH_IDLE) ? 4'd0 : part_len) + {1'b0, u_use}, 1'b0};
+		ir_pcb0  <= ((ph == PH_IDLE) ? qpc : part_pc) +
+		            {27'd0, (ph == PH_IDLE) ? {1'b0, fb} : part_len, 1'b0};
+		begin
+			// (the EA at the head: a one-pass instruction's EA0 at b, or
+			// the part's EA with its full-format words at 0)
+			logic [31:0] base;
+			base = (ph == PH_IDLE) ? qpc + {28'd0, fb, 1'b0} :
+			                         part_pc + {27'd0, part_len, 1'b0};
+			ir_pcs0 <= base + ((ph == PH_IDLE) ?
+			                   ea_pcd(pd0.i0, win[fb], 16'd0, 16'd0) :
+			                   ea_pcd((ph == PH_EA0) ? part_pd.i0 : part_pd.i1,
+			                          win[0], win[1], win[2]));
+		end
+		ir_jj    <= (pd0.cls == CL_JSR || pd0.cls == CL_JMP) && u_go && !u_part &&
+		            (pd0.i0 == EM_ABSW || pd0.i0 == EM_ABSL || pd0.i0 == EM_PC16);
+		ir_tsel  <= (!pd0.legal || (q_odd && qcnt == 4'd0)) ? 2'd0 :
+		            (pd0.cls == CL_BCC || pd0.cls == CL_BSR || pd0.cls == CL_DBCC ||
+		             pd0.cls == CL_FBCC || pd0.cls == CL_FDBCC ||
+		             ((pd0.cls == CL_JSR || pd0.cls == CL_JMP) && u_go && !u_part &&
+		              (pd0.i0 == EM_ABSW || pd0.i0 == EM_ABSL || pd0.i0 == EM_PC16))) ? 2'd1 :
+		            (pd0.cls == CL_RTS) ? 2'd2 : 2'd0;
+		ir_imm   <= a_imm;
+		// the exception: a fault in the words taken goes first
+		if ((win_flt & umask[15:8]) != 8'd0)
+			ir_exc <= f_code;
+		else if (ph == PH_IDLE && q_odd && qcnt == 4'd0)
+			ir_exc <= 8'd3;
+		else if (ph == PH_IDLE)
+			ir_exc <= x_exc;
+		else
+			ir_exc <= 8'd0;
+		ir_faddr <= f_addr;
+		ir_jtake <= a_jtake;
+		ir_jsrk  <= (pd0.cls == CL_JSR) && u_go && !u_part &&
+		            (pd0.i0 == EM_ABSW || pd0.i0 == EM_ABSL || pd0.i0 == EM_PC16);
+		ir_fpk   <= fpu_k(win[1], pd0.i0);
+		ir_fpkk  <= kind_fix(10'(fpu_k(win[1], pd0.i0)), 19'd0);
+		ir_ntgt  <= a_ntgt;
+		ir_dsign <= a_dsign;
+		ir_bht   <= bht_q;
+		ir_lph   <= lp_hit;
+		ir_bt_tgt <= bt_tgt;
+		ir_bt_end <= a_bt_end;
+		ir_bt_restart <= (u_go || u_part) && a_bt_any && !a_bt_end;
+		ir_bt_fa  <= qpc + {28'd0, a_bt_j, 1'b0};
+		ir_lastpc <= qpc + {28'd0, u_use - 3'd1, 1'b0};
 	end
 end
 
@@ -766,7 +772,11 @@ logic [18:0] part_fpkk;
 // prediction)
 (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] ras [8];
 (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] ras_f [8];
-wire [31:0] ras_top = ras[ras_tp];
+// the top entry, kept in a register: the pushed address, the entry under
+// it after a pop (copy ras read at ras_tp - 1), the restored pointer's after
+// a back-end redirect (copy ras_f)
+logic [31:0] ras_top;
+wire  [31:0] ras_m1 = ras[ras_tp - 3'd1];
 logic  [2:0] ras_tp;           // the top entry
 logic  [3:0] ras_n;            // entries held (0..8)
 
@@ -1083,6 +1093,9 @@ always @(posedge clk)
 
 wire  push = ir_ok && ir_go;
 wire  pop  = rq_pop && (rq_n != 3'd0);
+// (the FIFO's data are written by IR's own flags; a write a kill drops
+// lands past the count: the kills, far or late, only touch the count)
+wire  wr   = ir_v && ir_go;
 wire  btb_ok = (ntarget[0] == 1'b0) && (nrec.exc == 8'd0);
 // the entry's kind: a call pushes the fetch's return stack, a return pops it
 wire  [1:0] btb_kind = rcall ? 2'd1 : rret ? 2'd2 : 2'd0;
@@ -1183,6 +1196,32 @@ always_ff @(posedge clk) begin
 	end
 end
 
+// the records' data and the part under construction: no reset (the count
+// and IR's flags qualify them)
+always_ff @(posedge clk) begin
+	case ({wr, pop})
+		2'b01: begin
+			rq0 <= rq1; rq1 <= rq2; rq2 <= rq3;
+		end
+		2'b10: begin
+			case (rq_n)
+				3'd0:    rq0 <= nrec_q;
+				3'd1:    rq1 <= nrec_q;
+				3'd2:    rq2 <= nrec_q;
+				default: rq3 <= nrec_q;
+			endcase
+		end
+		2'b11: begin
+			rq0 <= (rq_n == 3'd1) ? nrec_q : rq1;
+			rq1 <= (rq_n == 3'd2) ? nrec_q : rq2;
+			rq2 <= (rq_n == 3'd3) ? nrec_q : rq3;
+			rq3 <= nrec_q;
+		end
+		default: ;
+	endcase
+	if (ir_v && ir_part) part <= nrec;
+end
+
 //--------------------------------------------------------------------------
 // D1b registers: the redirect, the BTB's maintenance, the return stack,
 // the parts of a multi-part instruction, the record FIFO
@@ -1207,11 +1246,6 @@ end
 always_ff @(posedge clk) begin
 	if (!nreset) begin
 		rq_n       <= 3'd0;
-		rq0        <= '0;
-		rq1        <= '0;
-		rq2        <= '0;
-		rq3        <= '0;
-		part       <= '0;
 		d_redir_v  <= 1'b0;
 		d_redir_pc <= '0;
 		hold_redir <= 1'b0;
@@ -1230,6 +1264,7 @@ always_ff @(posedge clk) begin
 		part_fpkk  <= '0;
 		ras_tp     <= '0;
 		ras_n      <= '0;
+		ras_top    <= '0;
 	end
 	else begin
 		d_redir_v  <= 1'b0;
@@ -1258,7 +1293,6 @@ always_ff @(posedge clk) begin
 				ras_f[ras_tp + 3'd1] <= ir_npc;
 			end
 			if (ir_part) begin
-				part <= nrec;
 				if (ir_ph == PH_IDLE) begin
 					part_call <= rcall;
 					part_ret  <= rret;
@@ -1272,12 +1306,14 @@ always_ff @(posedge clk) begin
 
 		if (push && nrec_q.exc == 8'd0) begin
 			if (rcall) begin
-				ras_tp <= ras_tp + 3'd1;
+				ras_tp  <= ras_tp + 3'd1;
+				ras_top <= ir_npc;
 				if (ras_n != 4'd8) ras_n <= ras_n + 4'd1;
 			end
 			else if (rret && ras_n != 4'd0) begin
-				ras_tp <= ras_tp - 3'd1;
-				ras_n  <= ras_n - 4'd1;
+				ras_tp  <= ras_tp - 3'd1;
+				ras_top <= ras_m1;
+				ras_n   <= ras_n - 4'd1;
 			end
 		end
 
@@ -1309,35 +1345,16 @@ always_ff @(posedge clk) begin
 			bq_wtgt    <= ntarget[31:1];
 		end
 
-		// four records: D1a took this one only with room for it
-		case ({push, pop})
-			2'b01: begin
-				rq0 <= rq1; rq1 <= rq2; rq2 <= rq3;
-				rq_n <= rq_n - 3'd1;
-			end
-			2'b10: begin
-				case (rq_n)
-					3'd0:    rq0 <= nrec_q;
-					3'd1:    rq1 <= nrec_q;
-					3'd2:    rq2 <= nrec_q;
-					default: rq3 <= nrec_q;
-				endcase
-				rq_n <= rq_n + 3'd1;
-			end
-			2'b11: begin
-				rq0 <= (rq_n == 3'd1) ? nrec_q : rq1;
-				rq1 <= (rq_n == 3'd2) ? nrec_q : rq2;
-				rq2 <= (rq_n == 3'd3) ? nrec_q : rq3;
-				rq3 <= nrec_q;
-			end
-			default: ;
-		endcase
+		// four records: D1a took this one only with room for it (the data:
+		// below, without reset)
+		rq_n <= rq_n + {2'd0, push} - {2'd0, pop};
 
 		if (flush) begin
 			rq_n       <= 3'd0;
 			if (ras_rv) begin
-				ras_tp <= ras_rtp;
-				ras_n  <= ras_rn;
+				ras_tp  <= ras_rtp;
+				ras_n   <= ras_rn;
+				ras_top <= ras_f[ras_rtp];
 			end
 			d_redir_v  <= 1'b0;
 			hold_redir <= 1'b0;
@@ -1345,6 +1362,11 @@ always_ff @(posedge clk) begin
 	end
 end
 // synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && ras_n != 4'd0 && ras_top != ras[ras_tp]) begin
+		$display("FAIL: decode: the return stack's top register %h, the stack's %h", ras_top, ras[ras_tp]);
+		$finish;
+	end
 always_ff @(posedge clk)
 	if (nreset && push && !pop && rq_n == 3'd4) begin
 		$display("FAIL: decode: a record into a full FIFO");

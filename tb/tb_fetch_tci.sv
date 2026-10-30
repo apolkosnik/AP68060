@@ -42,6 +42,7 @@ logic [31:0] qpc;
 logic        cs_fire;
 logic        cr_fire;
 logic  [2:0] cr_use;
+logic        q_simple;
 logic        q_odd;
 logic        bc_clr;
 logic        btb_we;

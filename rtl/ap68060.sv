@@ -376,7 +376,7 @@ logic  [3:0] d_ras_n;
 pd_t         pd0;
 logic  [3:0] qcnt;
 logic [31:0] qpc;
-logic        cs_fire, cr_fire;
+logic        cs_fire, cr_fire, q_simple;
 logic  [2:0] cr_use;
 logic        d_redir_v;
 logic [31:0] d_redir_pc;
@@ -395,7 +395,7 @@ ap68060_fetch fetch (
 	.cacr(cacr), .tc(tc), .itt0(itt0), .itt1(itt1), .cdis(cdis), .mdis(mdis),
 	.win(win), .win_flt(win_flt), .win_fdem(win_fdem), .win_fatc(win_fatc),
 	.win_bt(win_bt), .bt_tgt(bt_tgt),
-	.pd0(pd0), .qcnt(qcnt), .qpc(qpc),
+	.pd0(pd0), .q_simple(q_simple), .qcnt(qcnt), .qpc(qpc),
 	.cs_fire(cs_fire), .cr_fire(cr_fire), .cr_use(cr_use),
 	.q_odd(q_odd),
 	.bc_clr(bc_clr),
@@ -424,7 +424,7 @@ ap68060_decode #(.LOOP_PRED(LOOP_PRED)) dec (
 	.ras_rv(ras_rv), .ras_rtp(ras_rtp), .ras_rn(ras_rn),
 	.win(win), .win_flt(win_flt), .win_fdem(win_fdem), .win_fatc(win_fatc),
 	.win_bt(win_bt), .bt_tgt(bt_tgt),
-	.pd0(pd0), .qcnt(qcnt), .qpc(qpc), .q_odd(q_odd),
+	.pd0(pd0), .q_simple(q_simple), .qcnt(qcnt), .qpc(qpc), .q_odd(q_odd),
 	.smode(sr[13]),
 	.cs_fire(cs_fire), .cr_fire(cr_fire), .cr_use(cr_use),
 	.d_redir_v(d_redir_v), .d_redir_pc(d_redir_pc),

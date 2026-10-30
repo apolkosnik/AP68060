@@ -133,6 +133,10 @@ always_ff @(posedge clk) begin
 	pd.x0    <= legal && ((i0 == EM_AX) || (i0 == EM_PCX));
 	pd.x1    <= legal && ((i1 == EM_AX) || (i1 == EM_PCX));
 	pd.slow  <= legal && (a.cls == CL_FPU_GEN) && (i0 == EM_IMM);
+	pd.simple <= legal && !((a.cls == CL_FPU_GEN) && (i0 == EM_IMM)) &&
+	             !((i0 == EM_AX) || (i0 == EM_PCX)) && !((i1 == EM_AX) || (i1 == EM_PCX)) &&
+	             ((isl ? ({1'b0, b_l} + ({1'b0, l0_l} + {1'b0, l1}))
+	                   : ({1'b0, b_n} + ({1'b0, l0_n} + {1'b0, l1}))) <= 4'd7);
 end
 
 // synthesis translate_off
