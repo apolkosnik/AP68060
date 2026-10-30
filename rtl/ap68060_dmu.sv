@@ -378,6 +378,8 @@ wire   [3:0] ld_q  = lsm_q[7:4];
 // port keeps current (the scan's decision reads 4 bits, not 256)
 logic  [6:0] sc_set;
 logic  [3:0] sc_lv, sc_ld;
+logic  [3:0] sc_m;                // the scan's tag matches, the set's four ways
+                                  // (E_M_SCANW2: the tags hold through the set)
 logic [1:0]  rrc;                  // replacement counter
 
 // lookup ports: DC1, or the engine while it holds DC1
@@ -794,7 +796,7 @@ typedef enum logic [5:0] {
 	E_S_START, E_S_XL, E_S_XLW, E_S_XL2, E_S_ACT, E_S_RD, E_S_RDW, E_S_RD2, E_S_RD3, E_S_BUSD,
 	E_S_NEXT, E_S_DONE, E_SP_W, E_SP_2, E_SP_3, E_SP_4,
 	E_W_START, E_W_DEC, E_W_PART, E_W_DONE, E_SB,
-	E_M_START, E_M_PG, E_M_SCAN, E_M_SCANW, E_M_SCAN2, E_M_IC, E_M_DONE, E_M_CLR,
+	E_M_START, E_M_PG, E_M_SCAN, E_M_SCANW, E_M_SCANW2, E_M_SCAN2, E_M_IC, E_M_DONE, E_M_CLR,
 	E_M_PLW, E_M_PL2, E_M_PLD,
 	E_FILL, E_FILLW, E_FILL_W, E_FILL_INS, E_PUSHV, E_PUSHVW, E_PUSHV_W, E_PUSHV_B,
 	E_BUS, E_BUS_W,
@@ -2130,15 +2132,30 @@ always_ff @(posedge clk) begin
 			// (a write this cycle reaches the copy at the write port)
 			sc_lv <= lve_q;
 			sc_ld <= ld_q;                 // (ld_ra: sc_set)
+			e_st <= E_M_SCANW2;
+		end
+		E_M_SCANW2: begin
+			// the set's tags are out: each way's match, registered
+			for (int j = 0; j < 4; j++)
+				sc_m[j] <= (mt_scope == 2'd3) ||
+				           (mt_scope == 2'd1 && tq_b[j] == mt_addr[31:11]) ||
+				           (mt_scope == 2'd2 && (tc_p ? tq_b[j][20:2] == mt_addr[31:13]
+				                                      : tq_b[j][20:1] == mt_addr[31:12]));
 			e_st <= E_M_SCAN2;
 		end
 		E_M_SCAN2: begin
 			logic [6:0] s; logic [1:0] w; logic m;
 			s = ms_i[8:2]; w = ms_i[1:0];
-			m = sc_lv[w] && ((mt_scope == 2'd3) ||
-			                 (mt_scope == 2'd1 && tq_b[w] == mt_addr[31:11]) ||
-			                 (mt_scope == 2'd2 && (tc_p ? tq_b[w][20:2] == mt_addr[31:13]
-			                                            : tq_b[w][20:1] == mt_addr[31:12])));
+			m = sc_lv[w] && sc_m[w];
+			// synthesis translate_off
+			if (sc_m[w] != ((mt_scope == 2'd3) ||
+			                (mt_scope == 2'd1 && tq_b[w] == mt_addr[31:11]) ||
+			                (mt_scope == 2'd2 && (tc_p ? tq_b[w][20:2] == mt_addr[31:13]
+			                                           : tq_b[w][20:1] == mt_addr[31:12])))) begin
+				$display("FAIL: DMU: the scan's registered tag match disagrees (set %0d way %0d)", s, w);
+				$finish;
+			end
+			// synthesis translate_on
 			if (m && mt_op == MT_CPUSH && sc_ld[w]) begin
 				// push (invalidated with the push, unless CACR.DPI)
 				f_set   <= s;
@@ -3004,7 +3021,8 @@ always_comb
 	        (e_st == E_SP_2)                           ? st_set :     // (the next set)
 	        (e_st == E_S_XL2 || e_st == E_S_ACT ||
 	         e_st == E_W_DEC)                          ? e_va[10:4] :
-	        (e_st == E_M_SCANW || e_st == E_M_SCAN2)   ? sc_set : f_set;
+	        (e_st == E_M_SCANW || e_st == E_M_SCANW2 ||
+	         e_st == E_M_SCAN2)                        ? sc_set : f_set;
 initial for (int i = 0; i < 128; i++) begin
 	lsd[i] = 8'd0; lse[i] = 8'd0; lsw[i] = 8'd0;
 end
