@@ -1957,7 +1957,7 @@ always @(posedge clk) begin : fsm
 	reg n_wk;
 	if (!nreset) begin
 		fst <= F_IDLE; fst1h <= 26'd1; acc_r <= 1'b0; wbok_r <= 1'b0; known <= 1'b0; end_ok <= 1'b0;
-		lpf <= 1'b0; wk <= 1'b0; wbw <= 1'b0; r_ct <= 1'b0; r_rng <= 6'd0; r_dcnt <= 7'd0; r_icnt <= 7'd0;
+		wk <= 1'b0; wbw <= 1'b0; r_ct <= 1'b0; r_rng <= 6'd0; r_dcnt <= 7'd0; r_icnt <= 7'd0;
 		done <= 0; unimp <= 0; unsupp <= 0; exc_req <= 0; exc_vec <= 0;
 		fpcr <= 0; fpsr <= 0; fpiar <= 0; fpcr_en0 <= 1'b1;
 		fpu_used <= 0;
@@ -1968,12 +1968,12 @@ always @(posedge clk) begin : fsm
 		r_ae7 <= 0;
 		r_bin <= 0; r_mov <= 0; r_fsub <= 0; r_sgl <= 0; r_kind <= 0; r_prec <= 0;
 		r_dcls <= 0;
-		a_s <= 0; a_e <= 0; a_m <= 0; a_t <= 0; z_m <= 0; w_m <= 0; zr <= 0; wsrc <= 0;
+		a_s <= 0; a_e <= 0; a_m <= 0; a_t <= 0; z_m <= 0; zr <= 0; wsrc <= 0;
 		sh_v <= 0; sh_cnt <= 0;
-		pk_neg <= 0; pk_isz <= 0; pk_mg <= 0; pk_sat <= 0; r_lde <= 0; pk_lo <= 0; pk_ovf <= 0; int_z <= 0; unp_m <= 0;
+		pk_neg <= 0; pk_isz <= 0; pk_sat <= 0; r_lde <= 0; unp_m <= 0;
 		b_s <= 0; b_e <= 0; b_m <= 0; b_t <= 0; b_unsup <= 0;
-		grs <= 0; eff_sub <= 0; acc_hi <= 0;
-		qv <= 0; qr <= 0; srem <= 0; srad <= 0; loop_n <= 0; op_kind <= 0; okh <= 4'd0;
+		grs <= 0; eff_sub <= 0;
+		op_kind <= 0; okh <= 4'd0;
 		sh_ret <= F_PACKI; e_w <= 0; r_pr <= 0;
 		n_mode <= N_OPN;
 		// Invalid entries read as the default positive nonsignaling NaN.
@@ -2097,16 +2097,14 @@ always @(posedge clk) begin : fsm
 				r_prec <= prec_of(opmode);
 				b_s <= fr_dst_s; b_e <= {2'd0, fr_dst_e}; b_m <= fr_dst_m;
 				b_t <= dst_tag;  b_unsup <= dst_unsup;
-				a_s <= fr_src_s; a_e <= {2'd0, fr_src_e}; a_m <= fr_src_m;
+				// (a_s, a_e, a_m, e_w and sh_src from the register file: after
+				// the case, the outermost select)
 				a_t <= src_tag;  // (a memory operand's: F_SRC classifies)
 				op_kind <= bin_kind(opmode); okh <= kind1h(bin_kind(opmode));
 				grs <= 3'd0;
-				e_w <= $signed({3'd0, fr_src_e});
 				zr  <= 1'b0;
 				wsrc <= 2'd0;
-				sh_src <= (!cd_st && (cd_mcr || !cd_hw)) ? 96'd0 :
-				          (!cd_st && !cd_reg && cd_pk) ? {32'd0, din[63:0]} :
-				          {fr_src_s, fr_src_e, 16'd0, fr_src_m};
+
 				if (pipe_issue) begin
 					// into the pipeline: complete as far as the core is
 					// concerned (pdone, this cycle)
@@ -2540,11 +2538,6 @@ always @(posedge clk) begin : fsm
 					bo[BO_SQN]: begin
 						e_w <= bo_esq;
 						grs <= 0;
-						srad <= bo_sqodd ? {a_m, 2'b00} : {1'b0, a_m, 1'b0};
-						srem <= 0;
-						qr <= 0;
-						lpf <= 1'b0;
-						loop_n <= 0;
 						// the exact square root of an even power of two
 						if (bo_sqx) begin n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; end
 						else begin n_fst = F_SQRTL; n1h = 26'd1 << F_SQRTL; end
@@ -2612,8 +2605,6 @@ always @(posedge clk) begin : fsm
 						a_s <= a_s ^ b_s;
 						e_w <= bo_emul;
 						grs <= 0;
-						lpf <= 1'b0;
-						loop_n <= 0;
 						// multiplication by an exact power of two only
 						// changes sign/exponent and needs no multiply
 						if (bo_p2) begin n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; end
@@ -2647,10 +2638,6 @@ always @(posedge clk) begin : fsm
 						e_w <= bo_ediv;
 						grs <= 0;
 						// the first, integer quotient bit is formed already
-						acc_hi <= bo_rem0;
-						qv <= {66'd0, bo_q0};
-						lpf <= 1'b0;
-						loop_n <= 7'd1;
 						// division by a power of two, or equal normalized
 						// significands, is exact after exponent adjustment
 						if (bo_dvx) begin n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; end
@@ -2688,13 +2675,10 @@ always @(posedge clk) begin : fsm
 				z_m <= ur_m;
 				grs <= ur_g;
 				a_t <= T_NUM;
+				// (the loop's count and last-cycle flag: the loops' block)
 				if (lpf) begin
 					if (mul_pd[127]) e_w <= e_w + 18'sd1;
 					n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; n_acc = 1'b1;
-				end
-				else begin
-					loop_n <= loop_n + 7'd1;
-					lpf    <= (loop_n == 7'd2);
 				end
 			end
 
@@ -2705,16 +2689,10 @@ always @(posedge clk) begin : fsm
 				z_m <= ur_m;
 				grs <= ur_g;
 				a_t <= T_NUM;
+				// (the quotient's steps, two bits a cycle: the loops' block)
 				if (lpf) begin
 					if (!qv[66]) e_w <= e_w - 18'sd1;
 					n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; n_acc = 1'b1;
-				end
-				else begin
-					// two restoring fraction bits per cycle (66 = 2 x 33)
-					acc_hi <= {1'b0, dv_rem};
-					qv <= {qv[64:0], dv_q1, dv_q2};
-					loop_n <= loop_n + 7'd1;
-					lpf    <= (loop_n == 7'd33);
 				end
 			end
 
@@ -2725,15 +2703,8 @@ always @(posedge clk) begin : fsm
 				z_m <= ur_m;
 				grs <= ur_g;
 				a_t <= T_NUM;
+				// (the root's steps, one bit a cycle: the loops' block)
 				if (lpf) begin n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; n_acc = 1'b1; end
-				else begin
-					// one result digit per cycle (66 of them)
-					srad <= {srad[63:0], 2'b00};
-					srem <= sq_rem;
-					qr <= {qr[64:0], sq_q};
-					loop_n <= loop_n + 7'd1;
-					lpf    <= (loop_n == 7'd65);
-				end
 			end
 
 			fst1h[F_ROUND]: begin
@@ -2761,11 +2732,7 @@ always @(posedge clk) begin : fsm
 				// the result, written whatever the range check decides (an
 				// underflow keeps the destination: x_kill), and the
 				// underflow's denormalizing shift set up beside it
-				w_m <= !ovf ? mr : !tomax ? 64'd0 :      // created infinity: all-zero
-				       r_sgl ? 64'hFFFF_FFFF_FFFF_FFFF :
-				       (r_prec == 2'd1) ? 64'hFFFF_FF00_0000_0000 :
-				       (r_prec == 2'd2) ? 64'hFFFF_FFFF_FFFF_F800 :
-				                          64'hFFFF_FFFF_FFFF_FFFF;
+				// (the result significand: w_m, beside the state machine)
 				a_e <= (ovf && tomax) ? emax[16:0] : er[16:0];
 				a_t <= (ovf && !tomax) ? T_INF : T_NUM;
 				sh_v   <= {rin, grs};
@@ -2897,7 +2864,7 @@ always @(posedge clk) begin : fsm
 				// rounding, INEX2 for discarded bits, a zero keeps the sign).
 				// The rounded integer is zero when nothing rounds up from
 				// zero, or everything below the carry is ones: tested on
-				// sh_v beside the incrementer, decided in F_INTN.
+				// sh_v beside the incrementer (int_z), decided in F_INTN.
 				reg up;
 				up = (r_op == 7'h03) ? 1'b0 :
 				     round_up(sh_v[3], sh_v[2], (sh_v[1:0] != 0), a_s);
@@ -2905,7 +2872,6 @@ always @(posedge clk) begin : fsm
 					fpsr[9] <= 1;                        // INEX2
 					fpsr[3] <= 1;                        // accrued INEX
 				end
-				int_z <= up ? (sh_v[66:3] == 64'hFFFF_FFFF_FFFF_FFFF) : (sh_v[66:3] == 64'd0);
 				unp_m <= up ? shk_i[63:0] : shk[63:0];
 				a_e <= 17'd16383 + 17'd63;
 				n_fst = F_INTN; n1h = 26'd1 << F_INTN; n_acc = 1'b0;
@@ -2956,7 +2922,6 @@ always @(posedge clk) begin : fsm
 					n_acc = 1'b0;
 				end
 				else begin
-					pk_mg <= round_up(sh_v[3], sh_v[2], (sh_v[1:0] != 0), pk_neg) ? shk_i : shk;
 					n_fst = F_PACKI2; n1h = 26'd1 << F_PACKI2; n_acc = 1'b0;
 				end
 			end
@@ -2966,12 +2931,7 @@ always @(posedge clk) begin : fsm
 				// signed result holds below 2^(n-1), or exactly 2^(n-1)
 				// when negative), and only the low long word negated for
 				// the store; F_PACKI3 assembles
-				reg         hi32, hi16, hi8;
-				pk_lo <= pk_neg ? (32'd0 - pk_mg[31:0]) : pk_mg[31:0];
-				hi32 = (pk_mg[64:32] != 0) || (pk_mg[31] && !(pk_neg && pk_mg[30:0] == 0));
-				hi16 = (pk_mg[64:16] != 0) || (pk_mg[15] && !(pk_neg && pk_mg[14:0] == 0));
-				hi8  = (pk_mg[64:8]  != 0) || (pk_mg[7]  && !(pk_neg && pk_mg[6:0]  == 0));
-				pk_ovf <= (pk_isz == 2'd2) ? hi32 : (pk_isz == 2'd1) ? hi16 : hi8;
+				// (pk_lo, pk_ovf: beside the state machine)
 				n_fst = F_PACKI3; n1h = 26'd1 << F_PACKI3; n_acc = 1'b0;
 			end
 
@@ -3122,6 +3082,18 @@ always @(posedge clk) begin : fsm
 		// cycle after (nothing reads it before an FSAVE), so fstate_et's
 		// input is a four-way choice of flip-flops
 		if (et_cap) fstate_et <= sh_src;
+		// The dispatch's loads from the register file (F_IDLE, every idle
+		// cycle) last: the outermost select of these registers, the read
+		// data entering their final LUT
+		if (fst1h[F_IDLE]) begin
+			a_s <= fr_src_s;
+			a_e <= {2'd0, fr_src_e};
+			a_m <= fr_src_m;
+			e_w <= $signed({3'd0, fr_src_e});
+			sh_src <= (!cd_st && (cd_mcr || !cd_hw)) ? 96'd0 :
+			          (!cd_st && !cd_reg && cd_pk) ? {32'd0, din[63:0]} :
+			          {fr_src_s, fr_src_e, 16'd0, fr_src_m};
+		end
 
 		fst     <= n_fst;
 		fst1h   <= n1h;
@@ -3139,6 +3111,73 @@ always @(posedge clk) begin : fsm
 	end
 end
 
+
+// The loops' registers and the one-state results, free-running: each is
+// written every cycle (outside the states that read it the value is a
+// don't-care) and loaded by F_BIN as a loop starts, so no hold condition
+// over the state register sits in front of them.
+always @(posedge clk) begin : loops
+	reg        carry, ovf, tomax, up;
+	reg [63:0] mr;
+	reg        hi32, hi16, hi8;
+	if (!nreset) begin
+		acc_hi <= 0; qv <= 0; qr <= 0; srem <= 0; srad <= 0; loop_n <= 0; lpf <= 1'b0;
+		w_m <= 0; pk_mg <= 0; pk_lo <= 0; pk_ovf <= 0; int_z <= 0;
+	end
+	else if (ce) begin
+		if (fst1h[F_BIN]) begin
+			// a loop starts: the divide's first, integer quotient bit is
+			// formed already (count 1), the multiply and square root count
+			// from 0
+			acc_hi <= bo_rem0;
+			qv     <= {66'd0, bo_q0};
+			qr     <= 66'd0;
+			srem   <= 69'd0;
+			srad   <= bo_sqodd ? {a_m, 2'b00} : {1'b0, a_m, 1'b0};
+			loop_n <= bo[BO_DIVN] ? 7'd1 : 7'd0;
+			lpf    <= 1'b0;
+		end
+		else begin
+			// two restoring quotient bits (66 = 2 x 33), one root bit (66
+			// of them), a cycle
+			acc_hi <= {1'b0, dv_rem};
+			qv     <= {qv[64:0], dv_q1, dv_q2};
+			qr     <= {qr[64:0], sq_q};
+			srem   <= sq_rem;
+			srad   <= {srad[63:0], 2'b00};
+			loop_n <= loop_n + 7'd1;
+			// the loop's last cycle: the product in mul_pd, the quotient's
+			// 67 bits, the root's 66
+			lpf    <= (fst1h[F_MULT] && loop_n == 7'd2) || (fst1h[F_DIVL] && loop_n == 7'd33) ||
+			          (fst1h[F_SQRTL] && loop_n == 7'd65);
+		end
+		// F_RND2's result significand: the rounded value (the increment
+		// carrying out of the precision's top bit gives 1.0), or on
+		// overflow the largest number or a created infinity (all-zero)
+		carry = rn_up && rn_one;
+		mr    = carry ? 64'h8000_0000_0000_0000 : rn_up ? rn_mi[63:0] : (rin & rmask);
+		ovf   = carry ? rn_ge : rn_gt;
+		tomax = (rnd_mode == 2'b01) || (rnd_mode == 2'b10 && !a_s) || (rnd_mode == 2'b11 && a_s);
+		w_m   <= !ovf ? mr : !tomax ? 64'd0 :
+		         r_sgl ? 64'hFFFF_FFFF_FFFF_FFFF :
+		         (r_prec == 2'd1) ? 64'hFFFF_FF00_0000_0000 :
+		         (r_prec == 2'd2) ? 64'hFFFF_FFFF_FFFF_F800 :
+		                            64'hFFFF_FFFF_FFFF_FFFF;
+		// F_INTR: the rounded integer is zero when nothing rounds up from
+		// zero, or everything below the carry is ones
+		up    = (r_op == 7'h03) ? 1'b0 : round_up(sh_v[3], sh_v[2], (sh_v[1:0] != 0), a_s);
+		int_z <= up ? (sh_v[66:3] == 64'hFFFF_FFFF_FFFF_FFFF) : (sh_v[66:3] == 64'd0);
+		// F_PACKI: the integer store's rounded magnitude; F_PACKI2: its
+		// low long word negated for a negative, its range (an n-bit signed
+		// result holds below 2^(n-1), or exactly 2^(n-1) when negative)
+		pk_mg  <= round_up(sh_v[3], sh_v[2], (sh_v[1:0] != 0), pk_neg) ? shk_i : shk;
+		pk_lo  <= pk_neg ? (32'd0 - pk_mg[31:0]) : pk_mg[31:0];
+		hi32 = (pk_mg[64:32] != 0) || (pk_mg[31] && !(pk_neg && pk_mg[30:0] == 0));
+		hi16 = (pk_mg[64:16] != 0) || (pk_mg[15] && !(pk_neg && pk_mg[14:0] == 0));
+		hi8  = (pk_mg[64:8]  != 0) || (pk_mg[7]  && !(pk_neg && pk_mg[6:0]  == 0));
+		pk_ovf <= (pk_isz == 2'd2) ? hi32 : (pk_isz == 2'd1) ? hi16 : hi8;
+	end
+end
 endmodule
 
 // Two mirrored simple-dual-port banks provide two asynchronous reads and one
