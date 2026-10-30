@@ -143,6 +143,8 @@ module ap68060_backend
 	output logic        kill_now,       // this cycle: younger uops are discarded
 	output logic        lk_abandon,     // an open locked sequence is abandoned
 	output logic        adv_ag,         // AG -> DC1
+	output logic  [5:0] dm_adv,         // the DMU's copies: {AG, DC1, DT, DC2, EX, WB}
+	output logic        dm_kill,        // ... and of kill_now
 	output logic [31:0] dtt0,
 	output logic [31:0] dtt1,
 	output logic [31:0] itt0,
@@ -348,6 +350,15 @@ assign adv_dc2 = dc2_v && !stall_dc2;
 assign adv_dt  = dt_v  && !stall_dt;
 assign adv_dc1 = dc1_v && !stall_dc1;
 assign adv_ag  = ag_v  && !stall_ag;
+// the DMU's copies of the advances and the kill, separate nodes (keep), so
+// each drives its own module's registers
+(* keep *) wire dma_ag  = ag_v  && !stall_ag;
+(* keep *) wire dma_dc1 = dc1_v && !stall_dc1;
+(* keep *) wire dma_dt  = dt_v  && !stall_dt;
+(* keep *) wire dma_dc2 = dc2_v && !stall_dc2;
+(* keep *) wire dma_ex  = ex_v  && !stall_ex;
+(* keep *) wire dma_wb  = wb_v  && !stall_wb;
+assign dm_adv = {dma_ag, dma_dc1, dma_dt, dma_dc2, dma_ex, dma_wb};
 
 // AG's input: a skid register in front of it, so the sequencer's pop does
 // not wait for the stall chain.  The sequencer may pop whenever the skid is
@@ -1723,6 +1734,8 @@ logic        rst_seq;         // reset exception pending (first cycles)
 
 // same-cycle kill of every younger uop: WB takes an exception or redirects
 assign kill_now = adv_wb ? (wb_is_exc || wb_redir || xgo1) : xgo0;
+(* keep *) wire dmk = dma_wb ? (wb_is_exc || wb_redir || xgo1) : xgo0;
+assign dm_kill = dmk;
 
 // exception entry values
 logic  [7:0] x_vec;

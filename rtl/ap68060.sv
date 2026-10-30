@@ -257,6 +257,8 @@ logic [31:0] vbr, cacr;
 logic        bc_clr;
 logic  [2:0] sfc, dfc;
 logic        kill_now, adv_ag, lk_abandon;
+logic  [5:0] dm_adv;                // the DMU's copies of the advances
+logic        dm_kill;               // ... and of the kill
 logic [31:0] dtt0, dtt1, itt0, itt1, tc;
 logic        q_odd;
 logic        dm_hold1, dm_hold1_c, dm_dc2_rdy_c, dm_st_ok, mt_v, mt_ng, mt_wr, mt_done;
@@ -314,7 +316,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.dm_st_faddr(dm_st_faddr),
 	.urp(urp), .srp(srp),
 	.ipl(ipl_v), .iack_lvl(iack_lvl), .rsto_req(rsto_req), .rsto_busy(rsto_busy),
-	.kill_now(kill_now), .lk_abandon(lk_abandon), .adv_ag(adv_ag),
+	.kill_now(kill_now), .lk_abandon(lk_abandon), .adv_ag(adv_ag), .dm_adv(dm_adv), .dm_kill(dm_kill),
 	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1), .tc(tc),
 	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .halted(dbg_halted), .be_idle(be_idle),
 	.fetch_stop(be_fstop)
@@ -322,12 +324,12 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 
 ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.clk(clk), .nreset(nrst_dm),
-	.adv_ag(adv_ag), .dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem),
+	.adv_ag(dm_adv[5]), .dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem),
 	.dm_msz(dm_msz), .dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke),
 	.dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .iack_lvl(iack_lvl),
 	.dm_older(dm_older),
-	.adv_dc1(adv_dc1), .adv_dt(adv_dt), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
-	.kill_now(kill_now), .dm_hold1(dm_hold1), .dm_hold1_c(dm_hold1_c), .hold_dt(dm_hold_dt),
+	.adv_dc1(dm_adv[4]), .adv_dt(dm_adv[3]), .adv_dc2(dm_adv[2]), .adv_ex(dm_adv[1]), .adv_wb(dm_adv[0]),
+	.kill_now(dm_kill), .dm_hold1(dm_hold1), .dm_hold1_c(dm_hold1_c), .hold_dt(dm_hold_dt),
 	.dc2_rdy(dm_dc2_rdy), .dc2_rdy_c(dm_dc2_rdy_c), .ldata(dm_ldata), .ldata_al(dm_ldata_al), .ldata_alv(dm_ldata_alv), .fault(dm_fault), .fvec(dm_fvec),
 	.faddr(dm_faddr), .fslw(dm_fslw),
 	.st_v(dm_st_v), .st_data(dm_st_data), .st_rdy(dm_st_rdy), .st_ok(dm_st_ok),
