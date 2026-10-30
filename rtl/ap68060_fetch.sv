@@ -33,11 +33,11 @@
 //   F1  translation, tag compare (the hit, one-hot per way, registered    //
 //       with each way's words); the BTB's compare, and a taken branch     //
 //       sends F0 to its target (one bubble)                                //
-//   F2  the hit's words (the way's, or the line buffer's) into the        //
-//       predecoder; anything else rolls fpc back and runs in the miss     //
-//       engine (walk, line fill, cache-inhibited stream, fault)           //
-//   F3, F4  predecode (ap68060_predec: P2, P3)                             //
-//   F5  append to the queue                                                //
+//   F2  the hit's words (the way's, or the line buffer's); anything else  //
+//       rolls fpc back and runs in the miss engine (walk, line fill,      //
+//       cache-inhibited stream, fault)                                     //
+//   F3-F5  predecode (ap68060_predec: P1-P3, from F3's registered words)  //
+//   F6  append to the queue                                                //
 //                                                                          //
 // The queue holds QN words: slot 0 is always the next word D1 decodes,   //
 // and D1 sees the first eight.  D1 takes the head instruction (its       //
@@ -156,9 +156,23 @@ module ap68060_fetch
 localparam int QN  = 16;          // queue words (D1 sees the first eight)
 localparam int TQN = 8;           // targets of BTB-flagged words
 
-wire tc_e  = tc[15] && !mdis;
-wire tc_p  = tc[14];
-wire ic_en = cacr[15] && !cdis;
+// the configuration, registered here (MOVEC serializes and refetches, S
+// changes with a flush; the pins' changes are asynchronous): F0 and F1
+// start from local flip-flops, not from the back end's
+logic        sm_q, cdis_q, mdis_q;
+logic [31:0] cacr_q, tc_q, itt0_q, itt1_q;
+always_ff @(posedge clk) begin
+	sm_q   <= smode;
+	cdis_q <= cdis;
+	mdis_q <= mdis;
+	cacr_q <= cacr;
+	tc_q   <= tc;
+	itt0_q <= itt0;
+	itt1_q <= itt1;
+end
+wire tc_e  = tc_q[15] && !mdis_q;
+wire tc_p  = tc_q[14];
+wire ic_en = cacr_q[15] && !cdis_q;
 
 function automatic logic ttr_hit(input logic [31:0] t, input logic [31:0] a,
                                  input logic s);
@@ -170,8 +184,12 @@ endfunction
 // on F0 and the ATC from registers (the BIU holds the fetch's requests
 // while the processor is stopped, halted or resetting)
 logic        stop_q;
-logic        fl_all_q, fl_pg_q, fl_ng_q, fl_fc2_q;
-logic [31:0] fl_la_q;
+logic        fl_all_q, fl_pg_q, fl_ng_q;
+// the ATC's lookup address and space: fpc's copy, or a page flush's (in
+// the clock fl_pg_q acts, F0 issues nothing) -- registers, no
+// multiplexer in front of the lookup
+logic [31:0] atc_la;
+logic        atc_fc2;
 
 //--------------------------------------------------------------------------
 // queue
@@ -179,8 +197,8 @@ logic [31:0] fl_la_q;
 logic [15:0]   qw [QN];
 // the words' predecode: D1 reads only the head's, so it is a ring (no
 // shift) with the head in a register (qp0) -- loaded from the ring at the
-// head after D1's take, or from F5 when the queue empties into it.  Two
-// LUT RAM banks by slot parity (F5's two words land in consecutive slots,
+// head after D1's take, or from F6 when the queue empties into it.  Two
+// LUT RAM banks by slot parity (F6's two words land in consecutive slots,
 // one per bank, so each bank has one write a cycle), each in two copies:
 // the reads at the head after the two takes D1 may make
 (* ramstyle = "MLAB, no_rw_check" *) logic [$bits(pd_t)-1:0] qpr_ea [QN/2];
@@ -223,16 +241,18 @@ logic [15:0]  o2_w [2];
 logic         o2_f, o2_d, o2_a;
 logic  [1:0]  o2_b;            // the word ends a BTB-taken branch
 logic [30:0]  o2_t;
-logic  [1:0]  f3_n, f4_n, f5_n;
-logic [15:0]  f3_w [2], f4_w [2], f5_w [2];
-logic         f3_f, f3_d, f3_a, f4_f, f4_d, f4_a, f5_f, f5_d, f5_a;
-logic  [1:0]  f3_b, f4_b, f5_b;
-logic [30:0]  f3_t, f4_t, f5_t;
-pd_t          f5_p [2];
+// (F3-F6: the words and their flags alongside the predecoder's stages;
+// kept in flip-flops, not shift-register memory)
+(* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *) logic  [1:0]  f3_n, f4_n, f5_n, f6_n;
+(* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *) logic [15:0]  f3_w [2], f4_w [2], f5_w [2], f6_w [2];
+(* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *) logic         f3_f, f3_d, f3_a, f4_f, f4_d, f4_a, f5_f, f5_d, f5_a, f6_f, f6_d, f6_a;
+(* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *) logic  [1:0]  f3_b, f4_b, f5_b, f6_b;
+(* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *) logic [30:0]  f3_t, f4_t, f5_t, f6_t;
+pd_t          f6_p [2];
 genvar gp;
 generate
 	for (gp = 0; gp < 2; gp++) begin : g_pd
-		ap68060_predec pd (.clk(clk), .op(o2_w[gp]), .pd(f5_p[gp]));
+		ap68060_predec pd (.clk(clk), .op(f3_w[gp]), .pd(f6_p[gp]));
 	end
 endgenerate
 
@@ -283,7 +303,7 @@ initial bep = 4'd0;
 wire bvq0 = btb_q0[BTB_DW-1] && bep0 == bep && !bs_q;
 wire bvq1 = btb_q1[BTB_DW-1] && bep1 == bep && !bs_q;
 // the first branch of the fetch: word 0's when the fetch starts there
-wire btb_on   = cacr[23];
+wire btb_on   = cacr_q[23];
 wire btb_hit0 = btb_on && !btb_cf && bvq0 && btb_q0[BTB_DW-2 -: BTB_TW] == f1_pc[31:BTB_AW+2] && !f1_pc[1];
 wire btb_hit1 = btb_on && !btb_cf && bvq1 && btb_q1[BTB_DW-2 -: BTB_TW] == f1_pc[31:BTB_AW+2];
 
@@ -295,12 +315,16 @@ wire btb_hit1 = btb_on && !btb_cf && bvq1 && btb_q1[BTB_DW-2 -: BTB_TW] == f1_pc
 (* ramstyle = "MLAB, no_rw_check" *) logic [30:0] fras [8];
 logic  [2:0] fras_tp;
 logic  [3:0] fras_n;
+logic        rs_v;              // a redirect's resynchronization, a clock on
+logic  [2:0] rs_tp;
+logic  [3:0] rs_n;
+logic [30:0] rs_top;
 logic        atc_hit;
 atce_t       atc_e;
 ap68060_atc #(.SAME_SEARCH(0)) iatc (
-	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc[10]),
-	.la(fl_pg_q ? fl_la_q : fpc),
-	.fc2(fl_pg_q ? fl_fc2_q : smode),
+	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc_q[10]),
+	.la(atc_la),
+	.fc2(atc_fc2),
 	.hit(atc_hit), .ent(atc_e), .hv(), .wpa(),
 	.la_d(32'd0), .fc2_d(1'b0), .set_d(4'd0), .hv_d(), .wpa_d(),
 	.wr(iatc_wr), .wla(iatc_wla), .wfc2(iatc_wfc2), .went(iatc_went),
@@ -462,14 +486,14 @@ always_comb begin
 	tt1 = f1_tt1;
 	if (tt0 || tt1) begin
 		x_ok  = 1'b1;
-		x_cm  = tt0 ? itt0[6:5] : itt1[6:5];
-		x_upa = tt0 ? itt0[9:8] : itt1[9:8];
+		x_cm  = tt0 ? itt0_q[6:5] : itt1_q[6:5];
+		x_upa = tt0 ? itt0_q[9:8] : itt1_q[9:8];
 	end
 	else if (!f1_tce) begin
 		// the default translation: the TCR's DCI and DUI (MC68060UM 4.1.2)
 		x_ok  = 1'b1;
-		x_cm  = tc[4:3];
-		x_upa = tc[2:1];
+		x_cm  = tc_q[4:3];
+		x_upa = tc_q[2:1];
 	end
 	else if (f1_hit) begin
 		x_pa  = {f1_tg[20:1], f1_pc[11:0]};
@@ -509,8 +533,11 @@ wire  [30:0] f1_t     = tk0 ? ((bk0 == 2'd2) ? fras_top : btb_q0[30:0])
 //--------------------------------------------------------------------------
 // F2 evaluation: the hit's words, or the miss
 //--------------------------------------------------------------------------
+// (the back end's and D1's redirects are far-away registers: they only
+// override, last; a miss that starts in a redirect's clock is cancelled
+// by it, below)
 wire f2_hit  = (|f2_mj && f2_cach) || f2_lb;
-wire f2_go   = f2_v && !redir_any;
+wire f2_go   = f2_v;
 wire f2_miss = f2_go && !f2_hit;
 always_comb begin
 	logic [15:0] w0, w1;
@@ -543,7 +570,6 @@ always_comb begin
 		o2_n = md_n;
 		o2_f = md_f; o2_d = md_d; o2_a = md_a;
 	end
-	if (redir_any) o2_n = '0;
 end
 
 //--------------------------------------------------------------------------
@@ -551,13 +577,14 @@ end
 //--------------------------------------------------------------------------
 // (two words for each stage that may hold some, and the miss engine's)
 wire [4:0] inflight = {f1_v, 1'b0} + {f2_v || md_v, 1'b0} + {3'd0, f3_n} +
-                      {3'd0, f4_n} + {3'd0, f5_n};
+                      {3'd0, f4_n} + {3'd0, f5_n} + {3'd0, f6_n};
 wire       room     = {1'b0, cnt} + {1'b0, inflight} <= 6'(QN - 2);
 // the target FIFO cannot overflow: count the flagged words on their way
 wire       bt_room  = ({1'b0, tq_n} + {4'd0, f1_v} + {4'd0, f2_btk} + {4'd0, |f3_b} +
-                       {4'd0, |f4_b} + {4'd0, |f5_b}) < 5'(TQN);
+                       {4'd0, |f4_b} + {4'd0, |f5_b} + {4'd0, |f6_b}) < 5'(TQN);
 // a snooped invalidation goes first (the snooper has priority, 4.5)
-wire       f0_go    = (st == S_RUN) && !odd && !stop_q && !redir_any &&
+// (a redirect in the same clock overrides what F0 loads: it is not here)
+wire       f0_go    = (st == S_RUN) && !odd && !stop_q &&
                       !iatc_flush_page && !fl_pg_q && !inv_busy && !sn_inv && room;
 
 assign c_raddr = inv_busy ? inv_i[6:0] : fpc[10:4];
@@ -638,15 +665,15 @@ always_comb begin
 				qs_n[c].qa[i] = qa[src[3:0]];
 				qs_n[c].qb[i] = qb[src[3:0]];
 			end
-			else if (k < {3'b000, f5_n}) begin
-				qw_n[c][i]    = f5_w[k[0]];
-				qs_n[c].qf[i] = f5_f;
-				qs_n[c].qd[i] = f5_d;
-				qs_n[c].qa[i] = f5_a;
-				qs_n[c].qb[i] = f5_b[k[0]];
+			else if (k < {3'b000, f6_n}) begin
+				qw_n[c][i]    = f6_w[k[0]];
+				qs_n[c].qf[i] = f6_f;
+				qs_n[c].qd[i] = f6_d;
+				qs_n[c].qa[i] = f6_a;
+				qs_n[c].qb[i] = f6_b[k[0]];
 			end
 		end
-		qs_n[c].cnt = keep + {3'b000, f5_n};
+		qs_n[c].cnt = keep + {3'b000, f6_n};
 		qs_n[c].qh  = 4'(qh + 4'(tk[c]));
 		// D1 took the end of a BTB-taken branch: the stream continues at
 		// its target (the words after it in the queue came from there).
@@ -655,12 +682,12 @@ always_comb begin
 		qs_n[c].qpc   = cfl ? {tq[0], 1'b0} : qpc_r + {28'd0, tk[c], 1'b0};
 		qs_n[c].tq_sh = cfl && tq_n != 4'd0;
 		qs_n[c].tq_n  = tq_n - {3'd0, qs_n[c].tq_sh} +
-		                {3'd0, f5_n != 2'd0 && f5_b != 2'b00};
+		                {3'd0, f6_n != 2'd0 && f6_b != 2'b00};
 	end
 	// the head's predecode after each take
-	qp0_n[0] = (cnt == 5'd0) ? f5_p[0] : qp0;
-	qp0_n[1] = (cnt == {2'b00, tk[1]}) ? f5_p[0] : qpr_rda;
-	qp0_n[2] = (cnt == {2'b00, tk[2]}) ? f5_p[0] : qpr_rdb;
+	qp0_n[0] = (cnt == 5'd0) ? f6_p[0] : qp0;
+	qp0_n[1] = (cnt == {2'b00, tk[1]}) ? f6_p[0] : qpr_rda;
+	qp0_n[2] = (cnt == {2'b00, tk[2]}) ? f6_p[0] : qpr_rdb;
 end
 // the take: the head instruction, the decided length, or none
 wire [1:0] tsel = cs_fire ? 2'd1 : cr_fire ? 2'd2 : 2'd0;
@@ -683,11 +710,13 @@ always_ff @(posedge clk) begin
 		qpc_r <= '0;
 		odd   <= 1'b0;
 		fpc   <= '0;
+		atc_la <= '0;
+		atc_fc2 <= 1'b0;
 		fnew  <= 1'b1;
 		fspec <= 1'b0;
 		st    <= S_RUN;
 		stop_q <= 1'b1;
-		fl_all_q <= 1'b0; fl_pg_q <= 1'b0; fl_ng_q <= 1'b0; fl_fc2_q <= 1'b0; fl_la_q <= '0;
+		fl_all_q <= 1'b0; fl_pg_q <= 1'b0; fl_ng_q <= 1'b0;
 		f1_v  <= 1'b0; f1_pc <= '0; f1_s <= 1'b0; f1_dem <= 1'b0; f1_hit <= 1'b0;
 		f1_ea <= '0; f1_ew <= '0; f1_ah <= 1'b0;
 		f1_spec <= 1'b0;
@@ -699,10 +728,11 @@ always_ff @(posedge clk) begin
 		f1_tt0 <= 1'b0; f1_tt1 <= 1'b0; f1_tce <= 1'b0;
 		f1_btok <= 1'b0;
 		fras_tp <= '0; fras_n <= '0;
+		rs_v  <= 1'b0; rs_tp <= '0; rs_n <= '0; rs_top <= '0;
 		qb    <= '0; tq_n <= '0;
 		for (int i = 0; i < TQN; i++) tq[i] <= '0;
-		f3_n  <= '0; f4_n <= '0; f5_n <= '0;
-		f3_b  <= '0; f4_b <= '0; f5_b <= '0;
+		f3_n  <= '0; f4_n <= '0; f5_n <= '0; f6_n <= '0;
+		f3_b  <= '0; f4_b <= '0; f5_b <= '0; f6_b <= '0;
 		lb_v  <= 1'b0; lb_pa <= '0; m_tci <= 1'b0;
 		busy  <= 1'b0; stale <= 1'b0; b_req_r <= 1'b0;
 		m_la  <= '0; m_pa <= '0; m_upa <= '0; m_s <= 1'b0; m_dem <= 1'b0; m_ci <= 1'b0;
@@ -731,14 +761,14 @@ always_ff @(posedge clk) begin
 		sn_ihit     <= 1'b0;
 		inv_hold    <= 1'b0;
 		stop_q      <= stop;
+		atc_la      <= fpc;           // (fpc's copy: below, every fpc load)
+		atc_fc2     <= smode;
 		fl_all_q    <= iatc_flush_all;
 		fl_pg_q     <= iatc_flush_page;
 		fl_ng_q     <= iatc_flush_ng;
-		fl_la_q     <= iatc_flush_la;
-		fl_fc2_q    <= iatc_flush_fc2;
 
 		//------------------------------------------------------------------
-		// queue: D1's take, F5 appended; F2 -> F3 -> F4 -> F5
+		// queue: D1's take, F6 appended; F2 -> F3 -> ... -> F6
 		//------------------------------------------------------------------
 		for (int i = 0; i < QN; i++) qw[i] <= qw_n[tsel][i];
 		// synthesis translate_off
@@ -751,7 +781,7 @@ always_ff @(posedge clk) begin
 				src = 6'(i) + {3'b000, tk[tsel]};
 				k   = 5'(i) - keep;
 				if (5'(i) < keep) qps[i] <= qps[src[3:0]];
-				else if (k < {3'b000, f5_n}) qps[i] <= f5_p[k[0]];
+				else if (k < {3'b000, f6_n}) qps[i] <= f6_p[k[0]];
 			end
 		end
 		// synthesis translate_on
@@ -772,32 +802,35 @@ always_ff @(posedge clk) begin
 			logic       we_e, we_o;
 			w0 = 4'(qh + cnt[3:0]);
 			w1 = 4'(qh + cnt[3:0] + 4'd1);
-			we_e = (f5_n != 2'd0 && !w0[0]) || (f5_n == 2'd2 && !w1[0]);
-			we_o = (f5_n != 2'd0 &&  w0[0]) || (f5_n == 2'd2 &&  w1[0]);
+			we_e = (f6_n != 2'd0 && !w0[0]) || (f6_n == 2'd2 && !w1[0]);
+			we_o = (f6_n != 2'd0 &&  w0[0]) || (f6_n == 2'd2 &&  w1[0]);
 			if (we_e) begin
-				qpr_ea[w0[0] ? w1[3:1] : w0[3:1]] <= w0[0] ? f5_p[1] : f5_p[0];
-				qpr_eb[w0[0] ? w1[3:1] : w0[3:1]] <= w0[0] ? f5_p[1] : f5_p[0];
+				qpr_ea[w0[0] ? w1[3:1] : w0[3:1]] <= w0[0] ? f6_p[1] : f6_p[0];
+				qpr_eb[w0[0] ? w1[3:1] : w0[3:1]] <= w0[0] ? f6_p[1] : f6_p[0];
 			end
 			if (we_o) begin
-				qpr_oa[w0[0] ? w0[3:1] : w1[3:1]] <= w0[0] ? f5_p[0] : f5_p[1];
-				qpr_ob[w0[0] ? w0[3:1] : w1[3:1]] <= w0[0] ? f5_p[0] : f5_p[1];
+				qpr_oa[w0[0] ? w0[3:1] : w1[3:1]] <= w0[0] ? f6_p[0] : f6_p[1];
+				qpr_ob[w0[0] ? w0[3:1] : w1[3:1]] <= w0[0] ? f6_p[0] : f6_p[1];
 			end
 		end
 		// the targets of flagged words: the first leaves when D1 takes its
-		// word, F5's joins (both formed, the take picks)
+		// word, F6's joins (both formed, the take picks)
 		begin
 			logic [30:0] ta [TQN], tb [TQN];
 			for (int i = 0; i < TQN; i++) begin
 				ta[i] = tq[i];
 				tb[i] = (i < TQN - 1) ? tq[(i + 1) % TQN] : tq[i];
 			end
-			if (f5_n != 2'd0 && f5_b != 2'b00) begin
-				ta[tq_n[2:0]] = f5_t;
-				tb[3'(tq_n - 4'd1)] = f5_t;
+			if (f6_n != 2'd0 && f6_b != 2'b00) begin
+				ta[tq_n[2:0]] = f6_t;
+				tb[3'(tq_n - 4'd1)] = f6_t;
 			end
 			for (int i = 0; i < TQN; i++) tq[i] <= qs_n[tsel].tq_sh ? tb[i] : ta[i];
 			tq_n <= qs_n[tsel].tq_n;
 		end
+		f6_n  <= f5_n;
+		f6_w  <= f5_w; f6_f <= f5_f; f6_d <= f5_d; f6_a <= f5_a;
+		f6_b  <= f5_b; f6_t <= f5_t;
 		f5_n  <= f4_n;
 		f5_w  <= f4_w; f5_f <= f4_f; f5_d <= f4_d; f5_a <= f4_a;
 		f5_b  <= f4_b; f5_t <= f4_t;
@@ -809,6 +842,16 @@ always_ff @(posedge clk) begin
 		f3_b  <= o2_b; f3_t <= o2_t;
 		md_v  <= 1'b0;
 
+		// the redirect's return stack (F1 and F2 are empty in this clock)
+		rs_v <= 1'b0;
+		if (rs_v) begin
+			frw  = 1'b1;
+			frwa = rs_tp;
+			frwd = rs_top;
+			fras_tp <= rs_tp;
+			fras_n  <= rs_n;
+		end
+
 		//------------------------------------------------------------------
 		// F0 -> F1
 		//------------------------------------------------------------------
@@ -818,9 +861,9 @@ always_ff @(posedge clk) begin
 			f1_v   <= 1'b1;
 			f1_btok <= bt_room;
 			f1_pc  <= fpc;
-			f1_s   <= smode;
-			f1_tt0 <= ttr_hit(itt0, fpc, smode);
-			f1_tt1 <= ttr_hit(itt1, fpc, smode);
+			f1_s   <= sm_q;
+			f1_tt0 <= ttr_hit(itt0_q, fpc, sm_q);
+			f1_tt1 <= ttr_hit(itt1_q, fpc, sm_q);
 			f1_tce <= tc_e;
 			f1_dem <= fnew && !fspec;
 			f1_spec <= fspec;
@@ -828,7 +871,7 @@ always_ff @(posedge clk) begin
 				// the ATC, else the page's last walk (formed here, as the
 				// ATC's lookup is registered, so F1 starts from flip-flops)
 				logic  wm;
-				wm = wf_v && wf_fc2 == smode && wf_la[31:13] == fpc[31:13] &&
+				wm = wf_v && wf_fc2 == sm_q && wf_la[31:13] == fpc[31:13] &&
 				     (tc_p || wf_la[12] == fpc[12]);
 				f1_hit <= atc_hit || (wm && wf_ok);
 				f1_ea  <= atc_e;
@@ -838,13 +881,14 @@ always_ff @(posedge clk) begin
 			end
 			fnew   <= 1'b0;
 			fpc    <= {fpc[31:2], 2'b00} + 32'd4;
+			atc_la <= {fpc[31:2], 2'b00} + 32'd4;
 		end
 
 		//------------------------------------------------------------------
 		// F1 -> F2: the outcome registered; a BTB-taken branch redirects
 		// F0 now (unless F2 misses: F2's chunk is older)
 		//------------------------------------------------------------------
-		f2_v    <= f1_v && !redir_any && !f2_miss;
+		f2_v    <= f1_v && !f2_miss;
 		f2_pc   <= f1_pc;
 		f2_s    <= f1_s;
 		f2_dem  <= f1_dem;
@@ -876,7 +920,7 @@ always_ff @(posedge clk) begin
 		f2_rop  <= 2'd0;
 		f2_bslot <= f1_bslot;
 		f2_bt   <= f1_t;
-		if (f1_v && !redir_any && !f2_miss && f1_bt) begin
+		if (f1_v && !f2_miss && f1_bt) begin
 			// a predicted taken branch ends in this chunk: F0 goes to the
 			// target and its sequential fetch of this cycle is dropped; a
 			// call pushes its return address
@@ -884,6 +928,7 @@ always_ff @(posedge clk) begin
 			f1_v    <= 1'b0;
 			f1_btok <= 1'b0;
 			fpc   <= {f1_t, 1'b0};
+			atc_la <= {f1_t, 1'b0};
 			fnew  <= 1'b0;
 			fspec <= 1'b1;
 			if (f1_bcall) begin
@@ -910,6 +955,7 @@ always_ff @(posedge clk) begin
 			f1_v   <= 1'b0;
 			f1_btok <= 1'b0;
 			fpc    <= f2_pc;
+			atc_la <= f2_pc;
 			fnew   <= f2_dem;
 			m_la   <= f2_pc;
 			m_pa   <= f2_pa;
@@ -944,10 +990,10 @@ always_ff @(posedge clk) begin
 				st      <= S_FILL;
 				m_got   <= 4'd0;
 				lb_v    <= 1'b0;          // its beats go into m_line
-				m_alloc <= !cacr[14];     // NAI: no allocation
+				m_alloc <= !cacr_q[14];   // NAI: no allocation
 				m_tci   <= 1'b0;
 				m_way   <= !vv[0] ? 2'd0 : !vv[1] ? 2'd1 :
-				           cacr[13] ? {1'b0, rr[0]} :
+				           cacr_q[13] ? {1'b0, rr[0]} :
 				           !vv[2] ? 2'd2 : !vv[3] ? 2'd3 : rr;
 				b_req_r <= 1'b1;
 			end
@@ -1003,7 +1049,7 @@ always_ff @(posedge clk) begin
 					// being fetched goes straight to the decoder, the next one
 					// is fetched anew (unless a redirect takes the stream)
 					lb_v <= 1'b0;
-					if (!stale && !redir_any) begin
+					if (!stale) begin
 						logic [31:0] lw, nla;
 						lw  = ln[127 - 32 * m_pa[3:2] -: 32];
 						nla = {m_la[31:2], 2'b00} + 32'd4;
@@ -1022,6 +1068,7 @@ always_ff @(posedge clk) begin
 						m_pa  <= {m_pa[31:2], 2'b00} + 32'd4;
 						m_dem <= 1'b0;
 						fpc   <= nla;
+						atc_la <= nla;
 						fnew  <= 1'b0;
 					end
 				end
@@ -1054,6 +1101,7 @@ always_ff @(posedge clk) begin
 					m_pa  <= {m_pa[31:2], 2'b00} + 32'd4;
 					m_dem <= 1'b0;
 					fpc   <= nla;
+					atc_la <= nla;
 					fnew  <= 1'b0;
 					st    <= S_RUN;
 				end
@@ -1091,6 +1139,7 @@ always_ff @(posedge clk) begin
 					m_pa  <= {m_pa[31:2], 2'b00} + 32'd4;
 					m_dem <= 1'b0;
 					fpc   <= nla;
+					atc_la <= nla;
 					fnew  <= 1'b0;
 					// the page ends (or the cache mode changed): translate again
 					if (nla[11:0] == 12'd0 || (!m_ci && ic_en)) st <= S_RUN;
@@ -1127,20 +1176,24 @@ always_ff @(posedge clk) begin
 			f3_n  <= '0;
 			f4_n  <= '0;
 			f5_n  <= '0;
+			f6_n  <= '0;
 			f3_b  <= '0;
 			f4_b  <= '0;
 			f5_b  <= '0;
+			f6_b  <= '0;
 			md_v  <= 1'b0;
 			tq_n  <= '0;
 			f1_v  <= 1'b0;
 			f1_btok <= 1'b0;
 			f2_v  <= 1'b0;
-			frw  = 1'b1;
-			frwa = d_ras_tp;
-			frwd = d_ras;
-			fras_tp <= d_ras_tp;
-			fras_n  <= d_ras_n;
+			// (the return stack is resynchronized next clock, from these
+			// registers: no fetch reaches F1 before)
+			rs_v   <= 1'b1;
+			rs_tp  <= d_ras_tp;
+			rs_n   <= d_ras_n;
+			rs_top <= d_ras;
 			fpc   <= {redir_npc[31:1], 1'b0};
+			atc_la <= {redir_npc[31:1], 1'b0};
 			fspec <= !redir_v;
 			qpc_r <= redir_npc;
 			odd   <= redir_npc[0];
@@ -1150,6 +1203,18 @@ always_ff @(posedge clk) begin
 				else st <= S_RUN;
 			end
 			if (st == S_HALT) st <= S_RUN;
+			if (st == S_RUN) begin
+				// (a miss F2 started in this clock: none)
+				st      <= S_RUN;
+				iw_req  <= 1'b0;
+				b_req_r <= 1'b0;
+			end
+		end
+
+		// a page flush looks its page up a clock later (F0 issues nothing then)
+		if (iatc_flush_page) begin
+			atc_la  <= iatc_flush_la;
+			atc_fc2 <= iatc_flush_fc2;
 		end
 
 		//------------------------------------------------------------------
@@ -1182,6 +1247,8 @@ always_ff @(posedge clk) begin
 			if (inv_ph) begin
 				logic [6:0] s;
 				s = (inv_scope == 2'd1) ? inv_pa[10:4] : 7'(inv_i - 8'd1);
+				// (the set from registers, the ways from the compare)
+				iw_set = s; iw_v = 1'b0;
 				for (int w = 0; w < 4; w++) begin
 					logic m;
 					if (inv_scope == 2'd3)
@@ -1192,7 +1259,7 @@ always_ff @(posedge clk) begin
 						m = ct[w][20:2] == inv_pa[31:13];
 					else
 						m = ct[w][20:1] == inv_pa[31:12];
-					if (m) begin iw_set = s; iw_m[w] = 1'b1; iw_v = 1'b0; end
+					if (m) iw_m[w] = 1'b1;
 				end
 			end
 			inv_ph <= 1'b1;

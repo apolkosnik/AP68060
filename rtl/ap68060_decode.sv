@@ -93,6 +93,15 @@ module ap68060_decode
 
 `include "gen/ap68060_dec_pla.svh"
 
+// S, registered here (it changes with a flush: D1 sees no instruction in
+// the clock after), and the back end's flush a clock late (it drops what
+// D1a took in the flush's clock)
+logic sm_q, flush_q;
+always_ff @(posedge clk) begin
+	sm_q    <= smode;
+	flush_q <= flush;
+end
+
 
 //--------------------------------------------------------------------------
 // helpers
@@ -345,6 +354,7 @@ logic [31:0] part_pc;       // ... its address
 // a decision for the head made the clock before (anything but the common
 // case): take r_use words; a record (r_go) or a part (r_part), then r_nph
 logic        r_v, r_go, r_part;
+logic        rx_q;          // ... the head has a decode-time exception
 logic  [2:0] r_use;
 ph_t         r_nph;
 
@@ -353,7 +363,10 @@ ph_t         r_nph;
 logic        ir_v, ir_go;
 logic        hold_redir;    // a predicted branch is redirecting fetch
 wire         room  = ({1'b0, rq_n} + {3'd0, ir_v && ir_go}) < 4'd4;
-wire         stall = flush || hold_redir || d_redir_v || !room;
+// (not the back end's flush, a far register: D1a may take an instruction
+// in the flush's clock -- the queue is emptied by the redirect with it, or
+// a redirect follows (an exception's) -- and IR drops it a clock later)
+wire         stall = hold_redir || d_redir_v || !room;
 
 // A fetch fault is raised for the lowest faulted word of the window (the
 // words before it are good, so it is the first faulted word an instruction
@@ -443,8 +456,11 @@ always_comb begin
 			g_use = ({1'b0, pd0.b} <= qcnt) ? pd0.b : qcnt[2:0];
 			m     = lmask({1'b0, pd0.b});
 			flt   = |(win_flt & m[15:8]);
-			if (flt || g_exc) g_go = 1'b1;     // stop at the faulted part; an
-			else begin                          // exception needs no more parsing
+			// (stop at the faulted part; an exception needs no more parsing
+			// either: rx_q, registered alongside, turns the part into the
+			// record at the take)
+			if (flt) g_go = 1'b1;
+			else begin
 				g_part = 1'b1;
 				g_nph  = has_ext(pd0.i0) ? PH_EA0 : PH_EA1;
 			end
@@ -467,7 +483,7 @@ always_comb begin
 		x_exc = 8'd4;
 	else if (pd0.cls == CL_LPSTOP && win[1] != 16'h01C0)
 		x_exc = 8'd11;
-	else if (pd0.priv && !smode)
+	else if (pd0.priv && !sm_q)
 		x_exc = 8'd8;
 	// STOP and LPSTOP whose new SR leaves supervisor mode: privilege
 	// violation at once (the 68060)
@@ -486,8 +502,8 @@ assign g_exc = (x_exc != 8'd0);
 
 // what the fire takes: the common case's, or the decision's
 wire  [2:0] u_use  = r_v ? r_use : pd0.tot[2:0];
-wire        u_go   = r_v ? r_go : 1'b1;
-wire        u_part = r_v && r_part;
+wire        u_go   = r_v ? (r_go || (r_part && rx_q)) : 1'b1;
+wire        u_part = r_v && r_part && !rx_q;
 wire [15:0] umask  = lmask({1'b0, u_use});
 
 //--------------------------------------------------------------------------
@@ -510,6 +526,7 @@ logic [31:0] ir_npc;        // the address after it
 logic [31:0] ir_pcb0;       // EA0's extension word's address (or the part's)
 logic [31:0] ir_pcs0;       // ... plus its PC-relative displacement (EA1 has none)
 logic        ir_jj;         // JSR/JMP to a known target (absolute, PC-relative)
+logic  [1:0] ir_tsel;       // the record's target: 0 none, 1 ir_ntgt, 2 the return stack's
 logic [10:0] ir_fpk;        // FPU straight-line routine (valid, address)
 logic [18:0] ir_fpkk;       // ... its first word's kind
 logic [31:0] ir_imm;
@@ -603,6 +620,7 @@ always_ff @(posedge clk) begin
 		r_part    <= 1'b0;
 		r_use     <= '0;
 		r_nph     <= PH_IDLE;
+		rx_q      <= 1'b0;
 		ir_v      <= 1'b0;
 		ir_go     <= 1'b0;
 	end
@@ -644,6 +662,12 @@ always_ff @(posedge clk) begin
 			end
 			ir_jj    <= (pd0.cls == CL_JSR || pd0.cls == CL_JMP) && u_go && !u_part &&
 			            (pd0.i0 == EM_ABSW || pd0.i0 == EM_ABSL || pd0.i0 == EM_PC16);
+			ir_tsel  <= (!pd0.legal || (q_odd && qcnt == 4'd0)) ? 2'd0 :
+			            (pd0.cls == CL_BCC || pd0.cls == CL_BSR || pd0.cls == CL_DBCC ||
+			             pd0.cls == CL_FBCC || pd0.cls == CL_FDBCC ||
+			             ((pd0.cls == CL_JSR || pd0.cls == CL_JMP) && u_go && !u_part &&
+			              (pd0.i0 == EM_ABSW || pd0.i0 == EM_ABSL || pd0.i0 == EM_PC16))) ? 2'd1 :
+			            (pd0.cls == CL_RTS) ? 2'd2 : 2'd0;
 			ir_imm   <= a_imm;
 			// the exception: a fault in the words taken goes first
 			if ((win_flt & umask[15:8]) != 8'd0)
@@ -670,7 +694,7 @@ always_ff @(posedge clk) begin
 			ir_bt_fa  <= qpc + {28'd0, a_bt_j, 1'b0};
 			ir_lastpc <= qpc + {28'd0, u_use - 3'd1, 1'b0};
 			// the parse
-			ph <= r_v ? r_nph : PH_IDLE;
+			ph <= (r_v && !(r_part && rx_q)) ? r_nph : PH_IDLE;
 			if (u_part) begin
 				if (ph == PH_IDLE) begin
 					part_pd   <= pd0;
@@ -691,6 +715,7 @@ always_ff @(posedge clk) begin
 			r_part <= g_part;
 			r_use  <= g_use;
 			r_nph  <= g_nph;
+			rx_q   <= (ph == PH_IDLE) && g_exc;
 		end
 		else if (r_v) r_v <= 1'b1;               // (stalled: kept for the head)
 		// a redirect drops the head and what D1a took meanwhile
@@ -705,7 +730,7 @@ end
 // D1b
 //==========================================================================
 // a redirect (D1b's, the clock before) drops what D1a took meanwhile
-wire ir_ok = ir_v && !flush && !d_redir_v;
+wire ir_ok = ir_v && !flush && !flush_q && !d_redir_v;
 
 // the entry's attributes: a ROM (block RAM) whose address register is
 // loaded with the head's entry every clock, so its answer is the entry of
@@ -734,13 +759,14 @@ logic        part_call, part_ret, part_fpg, part_bt;
 logic [10:0] part_fpk;
 logic [18:0] part_fpkk;
 
-// the return stack (a LUT RAM: one push, one read at the pointer the fetch
-// resynchronizes to; never cleared -- an entry is read only below the
-// count of entries pushed).  (One read: the prediction's read at ras_tp is
-// the same unless a redirect restored the pointer, and the redirect
-// flushes D1 -- two read addresses kept the stack in logic)
+// the return stack (a LUT RAM: one push; never cleared -- an entry is read
+// only below the count of entries pushed), in two copies: the prediction
+// reads at D1b's pointer, the fetch's resynchronization at the pointer a
+// back-end redirect restores (the restore is a far register: kept off the
+// prediction)
 (* ramstyle = "MLAB, no_rw_check" *) logic [31:0] ras [8];
-wire [31:0] ras_top = ras[ras_tp_o];
+(* ramstyle = "MLAB, no_rw_check" *) logic [31:0] ras_f [8];
+wire [31:0] ras_top = ras[ras_tp];
 logic  [2:0] ras_tp;           // the top entry
 logic  [3:0] ras_n;            // entries held (0..8)
 
@@ -965,7 +991,11 @@ always_comb begin
 		// (FPU_GEN: the operation word and the command word, b = 2)
 		if (fpg && nrec.ea0.m == EM_IMM && !ir_odd)
 			nrec.ea0.bd = ir_pcb0;
-		nrec.target = flt ? ir_faddr : ntarget;
+		// (the target as the prediction's case picks it, by a select formed
+		// in D1a: off the class decode)
+		nrec.target = flt ? ir_faddr :
+		              (ir_tsel == 2'd1) ? ir_ntgt :
+		              (ir_tsel == 2'd2 && ras_n != 4'd0) ? ras_top : 32'd0;
 		nrec.pred   = nredir && (ir_exc == 8'd0) && ir_pd.legal && !ir_odd;
 	end
 end
@@ -1036,6 +1066,11 @@ always_ff @(posedge clk)
 // synthesis translate_on
 // synthesis translate_off
 always @(posedge clk)
+	if (nreset && ir_ok && ir_ph == PH_IDLE && nrec.target != (ir_flt ? ir_faddr : ntarget)) begin
+		$display("FAIL: decode: the record's target %h, the prediction's %h", nrec.target, ntarget);
+		$finish;
+	end
+always @(posedge clk)
 	if (nreset && ir_ok && ir_ph == PH_IDLE && ir_pd.legal && !ir_odd && !ir_part &&
 	    ir_go && ir_exc == 8'd0 && !ir_pd.slow &&
 	    (ir_pd.cls == CL_JSR || ir_pd.cls == CL_JMP) &&
@@ -1056,7 +1091,7 @@ always_comb begin
 	// restored pointer (its pointer and the top entry)
 	ras_tp_o = ras_rv ? ras_rtp : ras_tp;
 	ras_n_o  = ras_rv ? ras_rn  : ras_n;
-	ras_o    = ras_top[31:1];
+	ras_o    = ras_f[ras_tp_o][31:1];
 end
 
 // loop exit table updates.  EX's training a clock late: registered here
@@ -1218,7 +1253,10 @@ always_ff @(posedge clk) begin
 			// cost the entry it overwrote -- the oldest, or one a recovery
 			// would restore -- which only costs a prediction: EX checks
 			// every return
-			if (rcall) ras[ras_tp + 3'd1] <= ir_npc;
+			if (rcall) begin
+				ras[ras_tp + 3'd1]   <= ir_npc;
+				ras_f[ras_tp + 3'd1] <= ir_npc;
+			end
 			if (ir_part) begin
 				part <= nrec;
 				if (ir_ph == PH_IDLE) begin

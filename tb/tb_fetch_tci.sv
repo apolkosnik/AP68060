@@ -110,7 +110,8 @@ task fill(input logic [15:0] opcode);
  if ($test$plusargs("race") && reads==1) begin redir_v=1; redir_pc=32'h2000; end
  tick(); b_done=0; redir_v=0;
  tick(); stop=0; tick(); stop=1;
- repeat(6) tick();
+ // (the fetch pipeline's depth: F0 to the queue, the stop a clock late)
+ repeat(12) tick();
 endtask
 initial begin
 clk = '0;
@@ -221,7 +222,7 @@ b_rtci = '0;
  if ($test$plusargs("race")) begin
   for (int k = 0; k < 4 && (qcnt == 0 || win[0] != 16'h7002); k++) begin
    if (b_req) fill(16'h7002);
-   else begin stop=0; tick(); stop=1; repeat(5) tick(); end
+   else begin stop=0; tick(); stop=1; repeat(12) tick(); end
   end
   $display("RACE data=%h reads=%0d",win[0],reads);
   if (win[0]!=16'h7002 || reads<2) $display("FAIL TCI completion and redirect retain stale data");
@@ -240,12 +241,12 @@ b_rtci = '0;
  if ($test$plusargs("sequential")) begin cr_fire=1; cr_use=2; tick(); cr_fire=0; end
  else begin redir_v=1; redir_pc=32'h2000; tick(); redir_v=0; end
  stop=0; tick(); stop=1;
- repeat(5) tick();
+ repeat(12) tick();
  // (the unit may have asked for the next long word already: every request
  // is answered from memory as it now is, until words arrive)
  for (int k = 0; k < 4 && qcnt == 0; k++) begin
   if (b_req) fill(16'h7002);
-  else begin stop=0; tick(); stop=1; repeat(5) tick(); end
+  else begin stop=0; tick(); stop=1; repeat(12) tick(); end
  end
  if (qcnt==0) $fatal(1,"FAIL no words after redirect");
  $display("SECOND data=%h reads=%0d lb_valid=%b",win[0],reads,dut.lb_v);

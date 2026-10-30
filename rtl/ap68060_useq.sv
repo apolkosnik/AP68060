@@ -60,6 +60,11 @@ module ap68060_useq
 	input  logic        uq_pop      // the back end takes uq0 this cycle
 );
 
+// S, registered here (it changes with a flush: no word is in D2 the clock
+// after); the register naming (A7) and JC_SUPER read it
+logic smode_q;
+always_ff @(posedge clk) smode_q <= smode;
+
 //--------------------------------------------------------------------------
 // D2a state: the word being read
 //--------------------------------------------------------------------------
@@ -169,7 +174,7 @@ endfunction
 //--------------------------------------------------------------------------
 // register naming
 //--------------------------------------------------------------------------
-wire [4:0] sp_reg = !smode ? R_USP : R_ISP;
+wire [4:0] sp_reg = !smode_q ? R_USP : R_ISP;
 
 function automatic logic [4:0] areg(input logic [2:0] n, input logic [4:0] spr);
 	areg = (n == 3'd7) ? spr : (R_A0 + {2'b00, n});
@@ -880,7 +885,7 @@ always_comb begin
 	a_pc0 = c && !e1;
 	a_pc1 = c && e1;
 	// MOVEM: a base or index register in a load list (see the loop below)
-	spr = !smode ? R_USP : R_ISP;
+	spr = !smode_q ? R_USP : R_ISP;
 	pdm = (as.ea0.m == EM_APD);
 	pim = (as.ea0.m == EM_AIP);
 	an  = areg(as.ea0.r, spr);
@@ -1025,7 +1030,7 @@ always_ff @(posedge clk) begin
 		a_cjv <= 1'b0;
 		if (!flush && !exc_go && a_v && a_jmp && !a_k.jalw && !a_cjv) begin
 			a_cjv <= 1'b1;
-			a_cjt <= jc_eval(a_k.jc, as, smode);
+			a_cjt <= jc_eval(a_k.jc, as, smode_q);
 		end
 		// an exception routine ends with its last word
 		if (pass && a_k.last && a_exc) a_exc <= 1'b0;
