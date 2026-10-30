@@ -518,18 +518,17 @@ ap68060_atc #(.SAME_SEARCH(0)) datc (
 //--------------------------------------------------------------------------
 // translation and cache tag compare of a lookup
 //--------------------------------------------------------------------------
-function automatic xres_t xlate(input logic [31:0] la, input logic s, input logic wr,
-                                input logic alt,
-                                input logic hitv, input atce_t e,
-                                input logic [20:0] t0, input logic [20:0] t1,
-                                input logic [20:0] t2, input logic [20:0] t3,
-                                input logic [3:0] valid);
+// (xlate_t: the transparent translation registers' matches given, formed a
+// clock ahead by the engine's lookup)
+function automatic xres_t xlate_t(input logic [31:0] la, input logic s, input logic wr,
+                                  input logic alt, input logic tt0, input logic tt1,
+                                  input logic hitv, input atce_t e,
+                                  input logic [20:0] t0, input logic [20:0] t1,
+                                  input logic [20:0] t2, input logic [20:0] t3,
+                                  input logic [3:0] valid);
 	xres_t x;
-	logic tt0, tt1;
 	logic [20:0] tg;
 	x = '0;
-	tt0 = ttr_hit(dtt0, la, s);
-	tt1 = ttr_hit(dtt1, la, s);
 	if (alt) begin
 		// an alternate address space (MOVES with SFC/DFC 0, 3, 4, 7): the
 		// address is physical, untranslated (MC68060UM 4.2.5), and the
@@ -578,7 +577,16 @@ function automatic xres_t xlate(input logic [31:0] la, input logic s, input logi
 		if (valid[2] && t2 == tg) begin x.hit = 1'b1; x.way = 2'd2; end
 		if (valid[3] && t3 == tg) begin x.hit = 1'b1; x.way = 2'd3; end
 	end
-	xlate = x;
+	xlate_t = x;
+endfunction
+function automatic xres_t xlate(input logic [31:0] la, input logic s, input logic wr,
+                                input logic alt,
+                                input logic hitv, input atce_t e,
+                                input logic [20:0] t0, input logic [20:0] t1,
+                                input logic [20:0] t2, input logic [20:0] t3,
+                                input logic [3:0] valid);
+	xlate = xlate_t(la, s, wr, alt, ttr_hit(dtt0, la, s), ttr_hit(dtt1, la, s),
+	                hitv, e, t0, t1, t2, t3, valid);
 endfunction
 
 // the FSLW RW field of the DC2 access: read, write, read-modify-write
@@ -826,6 +834,7 @@ endfunction
 // asynchronous read) registered in the clock the tag RAM takes the stolen
 // set (E_S_XLW, E_SP_W), the tags compared from the RAM the clock after
 logic        lk_hit;
+logic        lk_tt0, lk_tt1;       // ... and the address's TTR matches
 atce_t       lk_e;
 logic  [3:0] lk_hv;
 logic        e_job;               // the engine owns the DC2 uop until it is done
@@ -1505,6 +1514,8 @@ always_ff @(posedge clk) begin
 		end
 		E_SP_W: begin                   // the RAMs register the stolen address
 			lk_hit <= atc_hit; lk_e <= atc_e; lk_hv <= atc_hv;
+			lk_tt0 <= ttr_hit(dtt0, {m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode);
+			lk_tt1 <= ttr_hit(dtt1, {m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode);
 			e_st   <= E_SP_2;
 		end
 		E_SP_3: begin
@@ -1544,8 +1555,8 @@ always_ff @(posedge clk) begin
 		end
 		E_SP_2: begin
 			xres_t x;
-			x  = xlate({m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode, (m2.r.mem != M_LD),
-			           fc_tt(m2.r.fc) == TT_ALT, lk_hit, lk_e,
+			x  = xlate_t({m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode, (m2.r.mem != M_LD),
+			           fc_tt(m2.r.fc) == TT_ALT, lk_tt0, lk_tt1, lk_hit, lk_e,
 			           tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_q);
 			// the second part's translation and lookup, registered (the
 			// decision and the data next cycle; the RAM keeps reading the
@@ -1564,14 +1575,16 @@ always_ff @(posedge clk) begin
 		end
 		E_S_XLW: begin                 // the RAMs register the stolen address
 			lk_hit <= atc_hit; lk_e <= atc_e; lk_hv <= atc_hv;
+			lk_tt0 <= ttr_hit(dtt0, e_va, m2.r.smode);
+			lk_tt1 <= ttr_hit(dtt1, e_va, m2.r.smode);
 			e_st   <= E_S_XL2;
 		end
 		E_S_XL2: begin
 			xres_t x;
 			// after a search: its result, not the ATC's (a failed search
 			// leaves no entry, nor does one in the no-allocate mode)
-			x = xlate(e_va, m2.r.smode, (m2.r.mem != M_LD), fc_tt(m2.r.fc) == TT_ALT,
-			          lk_hit || tw_use,
+			x = xlate_t(e_va, m2.r.smode, (m2.r.mem != M_LD), fc_tt(m2.r.fc) == TT_ALT,
+			          lk_tt0, lk_tt1, lk_hit || tw_use,
 			          tw_use ? tw_e : lk_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_q);
 			if (tw_use && tw_fail) begin
 				x.ok  = 1'b1;
@@ -2897,6 +2910,14 @@ end
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset) begin
+		if (!e_kill && ((e_st == E_S_XL2 && (lk_tt0 != ttr_hit(dtt0, e_va, m2.r.smode) ||
+		                                     lk_tt1 != ttr_hit(dtt1, e_va, m2.r.smode))) ||
+		                (e_st == E_SP_2 &&
+		                 (lk_tt0 != ttr_hit(dtt0, {m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode) ||
+		                  lk_tt1 != ttr_hit(dtt1, {m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode))))) begin
+			$display("FAIL: DMU: the engine's registered TTR matches disagree");
+			$finish;
+		end
 		if (dc2r_q && !dc2_rdy_c) begin
 			$display("FAIL: DMU: DC2's registered ready is ahead of its state");
 			$finish;
