@@ -1758,12 +1758,13 @@ always_ff @(posedge clk) begin
 				// word was an extension word, read, long, TT normal, TM the
 				// program space (FC 6 or 2), and the cause: the translation's
 				// (PTA PTB IL PF SP, TWE LK for a bus error in the search) or a
-				// bus error (RE)
+				// bus error (RE, with TTR when an ITT maps the fetch: the
+				// fetch's if_cause then)
 				if (ifs || ex_u.exc == EXC_IFB || ex_u.exc == EXC_IFA) begin
 					wb_exc_addr <= ex_u.pc;
 					wb_exc_fslw <= FSLW_IO | ((ex_u.target != ex_u.pc) ? FSLW_MA : 32'd0) |
 					               FSLW_R | {13'd0, sr_r[13], 2'b10, 16'd0} |
-					               (ifa ? if_cause : FSLW_RE);
+					               (ifa ? if_cause : (FSLW_RE | (if_cause & FSLW_TTR)));
 				end
 				else begin
 					wb_exc_addr <= ex_u.pc;

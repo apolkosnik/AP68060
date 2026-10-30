@@ -6,10 +6,10 @@
 ; completes at WB.  Each case puts a mispredicted branch next to something
 ; that could overtake or undo that early redirect:
 ;   1-4    a store that takes a bus error just before the branch (format $4,
-;          FSLW W|WE; the store is RESTARTED by the RTE and rewrites memory,
+;          FSLW W|WE|TTR; the store is RESTARTED by the RTE and rewrites memory,
 ;          the branch then taken, its fall-through never executed), at four
 ;          alignments
-;   5-6    the same with a load (FSLW R|RE; the load is re-executed and
+;   5-6    the same with a load (FSLW R|RE|TTR; the load is re-executed and
 ;          returns what the handler left at the faulted address)
 ;   7-9    trace on every instruction across a mispredicted branch: the
 ;          frames' PCs, in order
@@ -35,8 +35,10 @@
 ;
 ; FSLW (8.4.4.3, WinUAE cpummu.cpp mmu_bus_error): R $01000000 /
 ; W $00800000, SIZE 00 = long, TT 0, TM 5 (supervisor data), RE $20 /
-; WE $10; no other bit (aligned, unlocked, not a table search, no TTR
-; fault: a TTR hit only sets FSLW TTR for a fault the TTR itself detects).
+; WE $10, and TTR $08: DTT1 maps the access, and TTR is set for any fault
+; on an access one of the four TTRs maps, a bus error too (8.4.4; WinUAE
+; sets it only for a TTR's own write protection; GitHub issue 2); no
+; other bit (aligned, unlocked, not a table search).
 
 FAILREG	equ	$F100
 DONEREG	equ	$F102
@@ -49,8 +51,8 @@ nberr	equ	$3600		; bus errors taken
 berr_pc	equ	$3604		; stacked PC of the last one
 berr_fa	equ	$3608		; its fault address
 berr_fs	equ	$3618		; its FSLW
-SBE_FSLW equ	$00850010	; W, long, TM 5, WE
-LBE_FSLW equ	$01050020	; R, long, TM 5, RE
+SBE_FSLW equ	$00850018	; W, long, TM 5, WE, TTR
+LBE_FSLW equ	$01050028	; R, long, TM 5, RE, TTR
 SBE_FILL equ	$A5A5A5A5	; written by the handler under a faulted store
 LBE_FILL equ	$5EED1234	; written by the handler under a faulted load
 ntrace	equ	$360C		; trace frames recorded
