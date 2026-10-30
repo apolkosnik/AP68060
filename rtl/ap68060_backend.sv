@@ -542,15 +542,27 @@ end
 // flip-flops (ex_a/ex_b keep the register operands as they were)
 logic [31:0] ex_av, ex_bv;
 
-logic [31:0] alu_res, alu_sum;
-logic  [4:0] alu_flags;
+logic [31:0] alu_res, alu_sum, alu_sumo;
+logic  [4:0] alu_flags, alu_sumfl;
 logic        alu_cc, alu_trap;
+// the adder's controls, decoded as the uop enters EX: {CMP, X in, subtract,
+// NEG(X)}; the adder ops' size mask for EX's result select (ex_sk: the sum's
+// bits, the rest of the select takes the destination's upper bits); the
+// ops whose flags are the adder's (ex_fs)
+function automatic logic [3:0] alu_ctl(input logic [6:0] op);
+	alu_ctl = {op == OP_CMP, op == OP_ADDX || op == OP_SUBX || op == OP_NEGX,
+	           op == OP_SUB || op == OP_SUBX || op == OP_CMP || op == OP_NEG || op == OP_NEGX,
+	           op == OP_NEG || op == OP_NEGX};
+endfunction
+logic  [3:0] ex_ac;
+logic [31:0] ex_sk;
+logic        ex_fs;
 
 ap68060_alu alu (
 	.op(ex_u.op), .sz(ex_u.sz), .cond(ex_u.cond),
 	.a(ex_av), .b(ex_bv), .ea(ex_ea),
-	.flags_in(ccr_f),
-	.res(alu_res), .res_sum(alu_sum), .flags_out(alu_flags),
+	.flags_in(ccr_f), .ac(ex_ac),
+	.res(alu_res), .res_sum(alu_sum), .sum_o(alu_sumo), .sum_fl(alu_sumfl), .flags_out(alu_flags),
 	.cc_true(alu_cc), .trap(alu_trap)
 );
 
@@ -1110,8 +1122,8 @@ logic  [4:0] cas_flags;
 logic        cas_cc, cas_tr;
 ap68060_alu cas_alu (
 	.op(OP_CMP), .sz(ex_u.sz), .cond(4'd0),
-	.a(cas_dc_m), .b(ex_bv), .ea(32'd0), .flags_in(ccr_f),
-	.res(cas_res), .res_sum(), .flags_out(cas_flags), .cc_true(cas_cc), .trap(cas_tr)
+	.a(cas_dc_m), .b(ex_bv), .ea(32'd0), .flags_in(ccr_f), .ac(alu_ctl(OP_CMP)),
+	.res(cas_res), .res_sum(), .sum_o(), .sum_fl(), .flags_out(cas_flags), .cc_true(cas_cc), .trap(cas_tr)
 );
 wire cas_eq = cas_flags[2];
 
@@ -1284,7 +1296,10 @@ endfunction
 always_comb begin
 	logic [31:0] bfs;
 	bfs = ex_u.cond[0] ? {24'd0, bf_lonew} : {{3{ex_av[31]}}, ex_av[31:3]};
-	exw_val = ({32{ex_rs[RS_SUM]}}   & alu_sum)   | ({32{ex_rs[RS_ALU]}}   & alu_res)  |
+	// (the sum at the size, ex_sk, in the last AND-OR; above it the
+	// destination's bits, from flip-flops)
+	exw_val = (ex_sk & alu_sumo) | ({32{ex_rs[RS_SUM]}} & ~ex_szm & ex_bv) |
+	          ({32{ex_rs[RS_ALU]}}   & alu_res)  |
 	          ({32{ex_rs[RS_SLOW]}}  & xs_q.res)  | ({32{ex_rs[RS_FP]}}    & fp_res)   |
 	          ({32{ex_rs[RS_MD]}}    & md_q_res)  | ({32{ex_rs[RS_MDLO]}}  & md_lol)   |
 	          ({32{ex_rs[RS_MDREM]}} & md_rem)    | ({32{ex_rs[RS_BV]}}    & ex_bv)    |
@@ -1298,6 +1313,19 @@ always_ff @(posedge clk)
 		$display("FAIL: EX's flat result %h, the case chain gives %h (op %0d, pc %h)", exw_val,
 		         (ex_u.op == OP_CAS) ? ((ex_bv & ex_szm) | (ex_latch & ~ex_szm)) : ex_res, ex_u.op, ex_u.pc);
 		$finish;
+	end
+// the adder's registered controls and flags against the op's
+always_ff @(posedge clk)
+	if (nreset && ex_v) begin
+		if (ex_ac != alu_ctl(ex_u.op)) begin
+			$display("FAIL: EX's adder controls %b, the op's %b (pc %h)", ex_ac, alu_ctl(ex_u.op), ex_u.pc);
+			$finish;
+		end
+		if (ex_fs && alu_sumfl != ex_flags) begin
+			$display("FAIL: EX's adder flags %b, the op's %b (op %0d, pc %h)", alu_sumfl, ex_flags,
+			         ex_u.op, ex_u.pc);
+			$finish;
+		end
 	end
 // synthesis translate_on
 
@@ -1841,6 +1869,14 @@ always_ff @(posedge clk) begin
 			ex_u     <= dc2_u;
 			ex_npc   <= dc2_u.pc + {27'd0, dc2_u.ilen, 1'b0};
 			ex_rs    <= rsel(dc2_u);
+			ex_ac    <= alu_ctl(dc2_u.op);
+			ex_sk    <= (rsel(dc2_u) & 11'd1 << RS_SUM) != 11'd0 ?
+			            ((dc2_u.sz == SZ_B) ? 32'h0000_00FF : (dc2_u.sz == SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF) :
+			            32'd0;
+			ex_fs    <= nphase(dc2_u.op) == 2'd0 &&
+			            (dc2_u.op == OP_ADD || dc2_u.op == OP_SUB || dc2_u.op == OP_ADDX ||
+			             dc2_u.op == OP_SUBX || dc2_u.op == OP_NEG || dc2_u.op == OP_NEGX ||
+			             dc2_u.op == OP_CMP);
 			ex_kc    <= {dc2_u.op == OP_DBCC, dc2_u.op == OP_MDRES, dc2_u.op == OP_DIV,
 			             dc2_u.op == OP_FPU};
 			ex_a     <= dc2_af;
@@ -2014,7 +2050,8 @@ always_ff @(posedge clk) begin
 			// their flags and then trap: the stacked SR carries them)
 			if (ex_xok && !ex_fault) begin
 				logic [4:0] nf;
-				nf = (ex_u.op == OP_CAS) ? cas_flags : ex_flags;
+				// (the adder's flags, the late ones, picked last)
+				nf = ex_fs ? alu_sumfl : (ex_u.op == OP_CAS) ? cas_flags : ex_flags;
 				ccr_f  <= (nf & ex_u.ccr_we) | (ccr_f & ~ex_u.ccr_we);
 				wb_ccr <= (nf & ex_u.ccr_we) | (ccr_f & ~ex_u.ccr_we);
 			end

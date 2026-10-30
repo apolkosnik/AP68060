@@ -593,6 +593,18 @@ int exop [64], wbop [64];
 initial for (int i = 0; i < 64; i++) begin exop[i] = 0; wbop[i] = 0; end
 int hold [8];
 int us [5];
+// registered holds on a clock the stage's own state would let it go:
+// WB's store answer, WB's other terms, DC2, DC1
+int rh [4];
+initial for (int i = 0; i < 4; i++) rh[i] = 0;
+always_ff @(posedge clk) if (rsti_n && prof) begin
+	if (dut.be.wb_v && !dut.be.wb_hold) begin
+		if (dut.be.wbh_q) rh[1]++;
+		else if (dut.be.wb_stv && !dut.be.dm_st_ok) rh[0]++;
+	end
+	if (dut.be.dc2_v && dut.be.dc2_mx && !dut.be.dm_dc2_rdy && dut.be.dm_dc2_rdy_c) rh[2]++;
+	if (dut.be.dc1_v && dut.dm_hold1 && !dut.dm_hold1_c) rh[3]++;
+end
 initial for (int i = 0; i < 5; i++) us[i] = 0;
 initial for (int i = 0; i < 8; i++) hold[i] = 0;
 always_ff @(posedge clk) if (rsti_n && prof) begin
@@ -697,6 +709,9 @@ task automatic prof_report();
 	         100 * us[0] / tot, 100 * us[1] / tot, 100 * us[2] / tot, 100 * us[3] / tot, 100 * us[4] / tot);
 	for (int i = 0; i < 5; i++) us[i] = 0;
 	for (int i = 0; i < 8; i++) hold[i] = 0;
+	$display("PROF registered holds over the stage's state (cycles): WB store %0d, WB other %0d, DC2 %0d, DC1 %0d",
+	         rh[0], rh[1], rh[2], rh[3]);
+	for (int i = 0; i < 4; i++) rh[i] = 0;
 	for (int i = 0; i < 64; i++) begin
 		if (exop[i] * 100 > tot) $display("PROF   EX op %0d: %0d%%", i, 100 * exop[i] / tot);
 		if (wbop[i] * 100 > tot) $display("PROF   WB op %0d: %0d%%", i, 100 * wbop[i] / tot);
