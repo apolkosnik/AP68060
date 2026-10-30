@@ -432,8 +432,11 @@ logic [20:0] twd_b;
 
 // data: write port for stores and fills, read port for DT / engine
 logic [127:0] dq_rn [4];           // unregistered output
-logic  [63:0] dq2w [4];            // DC2: every way's two long words (taken
-                                   // as the access left DT)
+logic  [31:0] dqa [4];             // DC2: every way's operand bytes (taken as
+                                   // the access left DT)
+// synthesis translate_off
+logic  [63:0] dq2w [4];            // (simulation: the two long words, the check's)
+// synthesis translate_on
 logic         dw;
 logic  [6:0]  dw_set;
 logic  [1:0]  dw_way;
@@ -480,10 +483,19 @@ generate
 	end
 endgenerate
 
-// DC2's copy: every way's two long words at its address, as the access
-// leaves DT (DT held until that read was fresh); the way is picked in DC2
+// DC2's copy: every way's operand at its address, as the access leaves DT
+// (DT held until that read was fresh): byte p of the two long words at the
+// address by its index tk_bsel[p] (none: zero); the way is picked in DC2
 always_ff @(posedge clk)
-	if (adv_dt) for (int j = 0; j < 4; j++) dq2w[j] <= pair(dq_rn[j], mt.a[3:2]);
+	if (adv_dt) for (int j = 0; j < 4; j++) begin
+		logic [63:0] pr;
+		pr = pair(dq_rn[j], mt.a[3:2]);
+		for (int p = 0; p < 4; p++)
+			dqa[j][8*p +: 8] <= (tk_bsel[p] == 3'd7) ? 8'd0 : pr[63 - 8*tk_bsel[p] -: 8];
+		// synthesis translate_off
+		dq2w[j] <= pr;
+		// synthesis translate_on
+	end
 
 //--------------------------------------------------------------------------
 // D-ATC
@@ -707,7 +719,6 @@ logic [2:0] tk_bsel [4];
 always_comb
 	for (int p = 0; p < 4; p++)
 		tk_bsel[p] = (3'(p) < nbytes(mt.msz)) ? 3'({1'b0, mt.a[1:0]} + nbytes(mt.msz) - 3'd1 - 3'(p)) : 3'd7;
-logic [2:0] m2_bsel [4];
 
 // a store older than an access, by its line within the page (PA11-4 =
 // LA11-4: a store to the same offset of another page counts too)
@@ -740,17 +751,13 @@ logic m1_stale;
 // (DT let the access go only with its data read fresh: no older store to
 // its line was still in flight then, and every older one is ahead of it)
 wire fast_now = m2.r.v && m2.fast;
-// the hit way's two long words (the way registered: a 4-input multiplexer
-// per bit), and the operand from them, each byte picked by its registered
-// index (m2_bsel; a split load's bytes past the line are masked by its user)
-logic [63:0] dq2;
+// the hit way's operand (the way registered: a 4-input multiplexer per bit;
+// a split load's bytes past the line are masked by its user)
 logic [31:0] fast_data;
-always_comb begin
-	dq2 = dq2w[m2.x.way];
-	for (int p = 0; p < 4; p++)
-		fast_data[8*p +: 8] = (m2_bsel[p] == 3'd7) ? 8'd0 : dq2[63 - 8*m2_bsel[p] -: 8];
-end
+assign fast_data = dqa[m2.x.way];
 // synthesis translate_off
+logic [63:0] dq2;
+assign dq2 = dq2w[m2.x.way];
 always_ff @(posedge clk)
 	if (nreset && m2.r.v && m2.fast &&
 	    fast_data != take({dq2, 64'd0}, {2'd0, m2.r.a[1:0]}, nbytes(m2.r.msz))) begin
@@ -1384,7 +1391,6 @@ always_ff @(posedge clk) begin
 			m2.x1    <= '0;
 			m2.fast  <= tk_fast;
 			m2.sfast <= tk_sfast;
-			m2_bsel  <= tk_bsel;
 			m2ss_n   = st_simp(mt, x_tk, tk_split);
 		end
 		else begin
@@ -2956,12 +2962,9 @@ assign tw_busy = (e_st == E_TW_START) || (e_st == E_TW_DESC) || (e_st == E_TW_DB
 // once the engine has taken the DC2 uop, only its completion releases it
 assign dc2_rdy_c = !m2.r.v || e_dc2_done || (!e_job && (fast_now || st_simple));
 assign ldata   = e_dc2_done ? e_ldata : fast_data;
-// for AG's capture of a load into a base or index (a short path): the long
-// word of the line the address points at -- the operand itself for an
-// aligned long or an even word (in the low half), else not offered
-wire [31:0] al_word = dq2[63:32];
-assign ldata_al  = e_dc2_done ? e_ldata :
-                   (m2.r.msz == SZ_W) ? {16'd0, m2.r.a[1] ? al_word[15:0] : al_word[31:16]} : al_word;
+// for AG's capture of a load into a base or index: the operand, offered for
+// an aligned long or an even word
+assign ldata_al  = ldata;
 assign ldata_alv = e_dc2_done ||
                    (m2.r.msz == SZ_L && m2.r.a[1:0] == 2'd0) ||
                    (m2.r.msz == SZ_W && !m2.r.a[0]);
