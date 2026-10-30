@@ -502,14 +502,21 @@ endgenerate
 // address by its index tk_bsel[p] (none: zero); the way is picked in DC2
 always_ff @(posedge clk)
 	if (adv_dt) for (int j = 0; j < 4; j++) begin
-		logic [63:0] pr;
-		pr = pair(dq_rn[j], mt.a[3:2]);
 		for (int p = 0; p < 4; p++)
-			dqa[j][8*p +: 8] <= (mt_bsel[p] == 3'd7) ? 8'd0 : pr[63 - 8*mt_bsel[p] -: 8];
+			dqa[j][8*p +: 8] <= mt_bv[p] ? dq_rn[j][127 - 8*mt_bidx[p] -: 8] : 8'd0;
 		// synthesis translate_off
-		dq2w[j] <= pr;
+		dq2w[j] <= pair(dq_rn[j], mt.a[3:2]);
 		// synthesis translate_on
 	end
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (mt.v) for (int p = 0; p < 4; p++)
+		if (mt_bv[p] !== (mt_bsel[p] != 3'd7) ||
+		    (mt_bv[p] && mt_bidx[p] !== 4'({mt.a[3:2], 2'b00} + 4'(mt_bsel[p])))) begin
+			$display("FAIL: dmu: DT's byte %0d index %0d/%b against its select %0d", p, mt_bidx[p], mt_bv[p], mt_bsel[p]);
+			$finish;
+		end
+// synthesis translate_on
 
 //--------------------------------------------------------------------------
 // D-ATC
@@ -733,6 +740,8 @@ wire        tk_fast  = (mt.mem == M_LD || mt.mem == M_RMW) && !mt.lock &&
 // (byte 0 the first): its index, 7 for none, registered with the access
 logic [2:0] tk_bsel [4];
 logic [2:0] mt_bsel [4];        // (registered as the access enters DT, from DC1's)
+logic [3:0] mt_bidx [4];        // ... the byte's index in the line
+logic       mt_bv [4];          // ... and that the operand has that byte
 always_comb
 	for (int p = 0; p < 4; p++)
 		tk_bsel[p] = (3'(p) < nbytes(mt.msz)) ? 3'({1'b0, mt.a[1:0]} + nbytes(mt.msz) - 3'd1 - 3'(p)) : 3'd7;
@@ -1391,9 +1400,14 @@ always_ff @(posedge clk) begin
 				// in DT's clock: m1_tp is DC1's)
 				mt_tp   <= transp_of(m1.a, m1.smode, m1.fc, m1.ack);
 				mt_tt0  <= ttr_hit(dtt0, m1.a, m1.smode);
-				for (int p = 0; p < 4; p++)
+				for (int p = 0; p < 4; p++) begin
 					mt_bsel[p] <= (3'(p) < nbytes(m1.msz)) ?
 					              3'({1'b0, m1.a[1:0]} + nbytes(m1.msz) - 3'd1 - 3'(p)) : 3'd7;
+					// (the byte's index in the line, and whether there is one:
+					// DC2's copy takes it from the line in one select)
+					mt_bidx[p] <= 4'({m1.a[3:2], 2'b00} + 4'({1'b0, m1.a[1:0]} + nbytes(m1.msz) - 3'd1 - 3'(p)));
+					mt_bv[p]   <= (3'(p) < nbytes(m1.msz));
+				end
 				mt_tt1  <= ttr_hit(dtt1, m1.a, m1.smode);
 				mt_aset <= m1_aset;
 				stl = (dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet;
@@ -3090,9 +3104,25 @@ assign ldata   = e_dc2_done ? e_ldata : fast_data;
 // for AG's capture of a load into a base or index: the operand, offered for
 // an aligned long or an even word
 assign ldata_al  = ldata;
-assign ldata_alv = e_dc2_done ||
-                   (m2.r.msz == SZ_L && m2.r.a[1:0] == 2'd0) ||
-                   (m2.r.msz == SZ_W && !m2.r.a[0]);
+// (a register formed a clock ahead: DT's record if it moves in, else DC2's
+// own with the engine's done as it will be; checked against the terms)
+function automatic logic al_ok(input logic [1:0] msz, input logic [1:0] a);
+	al_ok = (msz == SZ_L && a == 2'd0) || (msz == SZ_W && !a[0]);
+endfunction
+logic alv_q;
+always_ff @(posedge clk)
+	alv_q <= !kill_now &&
+	         (adv_dt ? al_ok(mt.msz, mt.a[1:0])
+	                 : (al_ok(m2.r.msz, m2.r.a[1:0]) || (e_dc2_done && !adv_dc2) ||
+	                    (e_st == E_S_DONE && !e_kill)));
+assign ldata_alv = alv_q;
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && m2.r.v && alv_q !== (e_dc2_done || al_ok(m2.r.msz, m2.r.a[1:0]))) begin
+		$display("FAIL: dmu: the aligned-data valid register %b, its terms %b/%b", alv_q, e_dc2_done, al_ok(m2.r.msz, m2.r.a[1:0]));
+		$finish;
+	end
+// synthesis translate_on
 assign fault   = e_dc2_done && e_flt;
 assign fvec    = 8'd2;
 assign faddr   = e_faddr;

@@ -1117,31 +1117,33 @@ always_comb begin
 	a_amt0 = size_bytes(mszf[1:0], as.ea0.r == 3'd7);
 	a_amt1 = size_bytes(mszf[1:0], as.ea1.r == 3'd7);
 	a_dov = 1'b0;
-	a_dsv = dsv;
 	case (ur.ag)
-		AGM_PUSH: begin a_dov = 1'b1; a_dsv = neg5(size_bytes(mszf[1:0], 1'b1)); end
+		AGM_PUSH: a_dov = 1'b1;
 		AGM_BASED, AGM_BASEDU, AGM_ADDC: a_dov = 1'b1;
-		AGM_VAL0, AGM_ADDV:
-			if (as.ea0.m == EM_IMM) begin
-				a_dov = 1'b1;
-				a_dsv = (as.sz == SZ_W) ? {{16{as.ea0.bd[15]}}, as.ea0.bd[15:0]} : as.ea0.bd;
-			end
-		AGM_FEA:
-			if (as.ea0.m == EM_AIP || as.ea0.m == EM_APD) begin
-				a_dov = 1'b1;
-				a_dsv = (as.ea0.m == EM_APD) ? neg7(fps) : 32'd0;
-			end
-			else if (as.ea0.m == EM_IMM) begin
-				a_dov = 1'b1;
-				a_dsv = as.ea0.bd + ((as.ext1[15:13] == 3'b010 && as.ext1[12:10] == 3'd6) ? 32'd1 : 32'd0);
-			end
-		AGM_FUPD:
-			if (as.ea0.m == EM_AIP || as.ea0.m == EM_APD) begin
-				a_dov = 1'b1;
-				a_dsv = (as.ea0.m == EM_APD) ? neg7(fps) : {25'd0, fps};
-			end
+		AGM_VAL0, AGM_ADDV: if (as.ea0.m == EM_IMM) a_dov = 1'b1;
+		AGM_FEA:  if (as.ea0.m == EM_AIP || as.ea0.m == EM_APD || as.ea0.m == EM_IMM) a_dov = 1'b1;
+		AGM_FUPD: if (as.ea0.m == EM_AIP || as.ea0.m == EM_APD) a_dov = 1'b1;
 		default: ;
 	endcase
+	// the value: the mode's and the row's selects, one-hot, over the
+	// candidates formed apart (an AND-OR, not the case's chain)
+	begin
+		logic s_push, s_imm, s_fap, s_fimm, s_fupd, s_dsv, ipd, m_ad;
+		m_ad   = (as.ea0.m == EM_AIP || as.ea0.m == EM_APD);
+		ipd    = (as.ea0.m == EM_APD);
+		s_push = (ur.ag == AGM_PUSH);
+		s_imm  = (ur.ag == AGM_VAL0 || ur.ag == AGM_ADDV) && (as.ea0.m == EM_IMM);
+		s_fap  = (ur.ag == AGM_FEA) && m_ad;
+		s_fimm = (ur.ag == AGM_FEA) && (as.ea0.m == EM_IMM);
+		s_fupd = (ur.ag == AGM_FUPD) && m_ad;
+		s_dsv  = !(s_push || s_imm || s_fap || s_fimm || s_fupd);
+		a_dsv  = ({32{s_push}} & neg5(size_bytes(mszf[1:0], 1'b1))) |
+		         ({32{s_imm}}  & ((as.sz == SZ_W) ? {{16{as.ea0.bd[15]}}, as.ea0.bd[15:0]} : as.ea0.bd)) |
+		         ({32{s_fap}}  & (ipd ? neg7(fps) : 32'd0)) |
+		         ({32{s_fimm}} & (as.ea0.bd + ((as.ext1[15:13] == 3'b010 && as.ext1[12:10] == 3'd6) ? 32'd1 : 32'd0))) |
+		         ({32{s_fupd}} & (ipd ? neg7(fps) : {25'd0, fps})) |
+		         ({32{s_dsv}}  & dsv);
+	end
 	// MOVEM's first transfer: the mask's lowest bit
 	a_low1 = as.ext1 & (~as.ext1 + 16'd1);
 	a_bi1  = 4'd0;

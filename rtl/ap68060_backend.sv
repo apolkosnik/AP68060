@@ -414,9 +414,23 @@ logic [31:0] exw_q;
 // the load whose data can be handed over: its result is the data itself
 // (a long MOVE, MOVEA.W sign-extended, a memory-indirect pointer)
 // (captured as the load moves to EX: adv_dc2 selects at the last level)
-wire        dc2_capd = dc2_u.d_v && dc2_u.op == OP_MOV && dc2_u.cond == 4'd0 &&
-                       dc2_u.mem == M_LD && dc2_u.a_src == OS_MEM && dc2_u.sz == SZ_L &&
-                       dc2_u.exc == 8'd0 && dm_ldata_alv && dc2_v;
+// (the uop's part registered as it enters DC2: the flag is one AND of
+// flip-flops, the DMU's aligned-data valid -- a register too -- among them)
+function automatic logic capx(input uop_t u);
+	capx = u.d_v && u.op == OP_MOV && u.cond == 4'd0 && u.mem == M_LD &&
+	       u.a_src == OS_MEM && u.sz == SZ_L && u.exc == 8'd0;
+endfunction
+logic       dc2_capx;
+always_ff @(posedge clk)
+	if (adv_dt) dc2_capx <= capx(dt_u);
+wire        dc2_capd = dc2_capx && dm_ldata_alv && dc2_v;
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (dc2_v && dc2_capx !== capx(dc2_u)) begin
+		$display("FAIL: DC2's capture flag %b, its uop's %b (pc %h)", dc2_capx, capx(dc2_u), dc2_u.pc);
+		$finish;
+	end
+// synthesis translate_on
 // (from the DMU's aligned word, not its general byte gather: a short path;
 // a misaligned load reaches AG a cycle later, through EX's write)
 wire [31:0] dc2_capv = dc2_u.a_sxw ? {{16{dm_ldata_al[15]}}, dm_ldata_al[15:0]} : dm_ldata_al;
@@ -1351,7 +1365,18 @@ always_ff @(posedge clk)
 // The unconditional transfers (and RTE) are always taken; the others'
 // target is the decoded one, and only the FPU's (FBcc FDBcc) can be taken
 // besides Bcc and DBcc: its own taken, not EX's selected one.
-wire        ex_bdb  = (ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC);
+// (registered as the uop enters EX: the odd-address check and the
+// exception address select start from a flip-flop, not the op decode)
+logic       ex_bdb;
+always_ff @(posedge clk)
+	if (adv_dc2) ex_bdb <= (dc2_u.op == OP_BCC) || (dc2_u.op == OP_DBCC);
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (ex_v && ex_bdb !== ((ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC))) begin
+		$display("FAIL: EX's branch flag %b, its op's %b (pc %h)", ex_bdb, (ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC), ex_u.pc);
+		$finish;
+	end
+// synthesis translate_on
 wire        ex_ubr  = (ex_u.br == BR_IMM) || (ex_u.br == BR_EA) ||
                       (ex_u.br == BR_A) || (ex_u.br == BR_B) || (ex_u.op == OP_RTE);
 wire [31:0] ex_otgt = (!ex_bdb && ex_ubr) ? ex_tgt : ex_u.target;
