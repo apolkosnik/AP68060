@@ -472,6 +472,10 @@ endfunction
 wire [31:0] ag_ea   = add3(ag_base, ag_ix, ag_u.disp);
 wire [31:0] ag_pinc = ag_base + {{24{ag_u.upd_amt[7]}}, ag_u.upd_amt};
 wire [31:0] ag_updv = ag_u.pinc ? ag_pinc : ag_ea;
+// (the file's write data from a second copy of the adders, kept: the one
+// output's fanout to the banks, the forwarding and DC1 spread it too far)
+(* keep *) wire [31:0] ag_updf = ag_u.pinc ? ag_base + {{24{ag_u.upd_amt[7]}}, ag_u.upd_amt}
+                                           : add3(ag_base, ag_ix, ag_u.disp);
 wire [31:0] ag_u2v  = rrd[2] + {{24{ag_u.upd2_amt[7]}}, ag_u.upd2_amt};
 // bit field memory transfers sized by the field (see ucode.py _bf_mem_load)
 // (the bit-field accesses' kinds registered as the uop enters AG, the
@@ -1584,7 +1588,7 @@ assign lk_abandon = x_go || dbl_fault ||
 // the routine's operands (T8-T13, three per cycle).
 always_comb begin
 	logic wcom, wpost;
-	fwe[0] = adv_ag && ag_u.upd_v && !ag_dyncan;  fwa[0] = ag_u.upd_reg;  fwd[0] = ag_updv;
+	fwe[0] = adv_ag && ag_u.upd_v && !ag_dyncan;  fwa[0] = ag_u.upd_reg;  fwd[0] = ag_updf;
 	fwe[1] = adv_ag && ag_u.upd2_v && !ag_dyncan; fwa[1] = ag_u.upd2_reg; fwd[1] = ag_u2v;
 	fwoh[0] = ag_uoh; fwoh[1] = ag_u2oh; fwoh[2] = ex_doh;
 	fwe_ag[0] = ag_v && ag_u.upd_v && !ag_dyncan;
@@ -2687,10 +2691,10 @@ always_ff @(posedge clk) begin
 	x1 = fwe_ag[1] && fwa[1] == ain_u.idx;
 	x0 = fwe_ag[0] && fwa[0] == ain_u.idx;
 	b = ({32{ain_u.base_v && b1}}                  & fwd[1])  |
-	    ({32{ain_u.base_v && !b1 && b0}}           & fwd[0])  |
+	    ({32{ain_u.base_v && !b1 && b0}}           & ag_updv)  |
 	    ({32{ain_u.base_v && !b1 && !b0}} & ain_fb);
 	x = ({32{x1}}                  & ixf(fwd[1], ain_u))  |
-	    ({32{!x1 && x0}}           & ixf(fwd[0], ain_u))  |
+	    ({32{!x1 && x0}}           & ixf(ag_updv, ain_u))  |
 	    ({32{!x1 && !x0}} & ixf(ain_fx, ain_u));
 	// the value staying: EX's result of last clock (exw_q), else its own
 	qb_o = exw_qv && exw_qreg == ag_u.base && !cbl;
