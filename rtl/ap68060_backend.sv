@@ -555,7 +555,7 @@ assign dm_older   = ex_v || wb_v;
 // (saturating 0..3); trained as the branch leaves EX, written a cycle
 // later unless that cycle flushes (the branch was on a wrong path: an
 // older uop at WB redirected or trapped as it left EX)
-wire        bht_agree = (ex_taken == ex_u.bst);
+wire        bht_agree = (ex_tkn == ex_u.bst);
 logic       bht_we_q;
 always_ff @(posedge clk) begin
 	bht_we_q <= nreset && adv_ex && ex_u.op == OP_BCC && ex_u.br == BR_COND;
@@ -569,7 +569,7 @@ always_ff @(posedge clk) begin
 	lp_we_q <= nreset && adv_ex && ex_u.bst &&
 	           ((ex_u.op == OP_BCC && ex_u.br == BR_COND) || ex_u.op == OP_DBCC);
 	lp_wa   <= ex_u.pc[12:1];
-	lp_tk   <= ex_taken;
+	lp_tk   <= ex_tkn;
 	lp_mp   <= ex_mispred;
 end
 assign lp_we = lp_we_q && !flush;
@@ -1212,10 +1212,21 @@ wire ex_smc = (ex_u.mem == M_ST || ex_u.mem == M_RMW) &&
                (ex_ea[31:6] == ex_npc[31:6] + 26'd1));
 logic smc_pend;
 // mispredict: the actual path differs from the one the front end took
-wire        ex_br      = (ex_u.br != BR_NONE) || (ex_u.op == OP_RTE);
-wire [31:0] ex_next    = ex_taken ? ex_target : ex_npc;
-wire        ex_mispred = ex_br && ((ex_taken != ex_u.pred) ||
-                                   (ex_taken && ex_u.pred && ex_target != ex_u.target));
+// (the target's source and the taken decision's, one-hot, registered as the
+// uop enters EX: the target an AND-OR of flip-flops, its compare with the
+// predicted target made per source in parallel; checked against EX's case)
+logic        ex_br;
+logic  [4:0] ex_ts;           // target: A, B, EA, the decoded one, the slow op's
+logic  [4:0] ex_tk;           // taken: always, FPU, Bcc, DBcc, the slow op's
+wire [31:0] ex_tgt     = ({32{ex_ts[0]}} & ex_av) | ({32{ex_ts[1]}} & ex_bv) |
+                         ({32{ex_ts[2]}} & ex_ea) | ({32{ex_ts[3]}} & ex_u.target) |
+                         ({32{ex_ts[4]}} & xs_q.target);
+wire        ex_tne     = (ex_ts[0] && ex_av != ex_u.target) || (ex_ts[1] && ex_bv != ex_u.target) ||
+                         (ex_ts[2] && ex_ea != ex_u.target) || (ex_ts[4] && xs_q.target != ex_u.target);
+wire        ex_tkn     = ex_tk[0] || (ex_tk[1] && fp_taken) || (ex_tk[2] && alu_cc) ||
+                         (ex_tk[3] && !alu_cc && (ex_bv[15:0] != 16'd0)) || (ex_tk[4] && xs_q.taken);
+wire [31:0] ex_next    = ex_tkn ? ex_tgt : ex_npc;
+wire        ex_mispred = ex_br && ((ex_tkn != ex_u.pred) || (ex_tkn && ex_u.pred && ex_tne));
 // a mispredicted Bcc or DBcc that WB will redirect for no other reason
 // turns the front end round as it leaves EX, a cycle early; the stages
 // behind it still go at WB (the front end is not flushed again), and AG
@@ -1259,9 +1270,9 @@ always_ff @(posedge clk)
 wire        ex_bdb  = (ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC);
 wire        ex_ubr  = (ex_u.br == BR_IMM) || (ex_u.br == BR_EA) ||
                       (ex_u.br == BR_A) || (ex_u.br == BR_B) || (ex_u.op == OP_RTE);
-wire [31:0] ex_otgt = (!ex_bdb && ex_ubr) ? ex_target : ex_u.target;
+wire [31:0] ex_otgt = (!ex_bdb && ex_ubr) ? ex_tgt : ex_u.target;
 wire        ex_odd  = ex_br && (ex_bdb ? ex_u.target[0] :
-                                ex_ubr ? ex_target[0] :
+                                ex_ubr ? ex_tgt[0] :
                                 ((ex_u.op == OP_FPU) && fp_taken && ex_u.target[0]));
 logic [31:0] ex_odd_pc;
 always_comb begin
@@ -1285,7 +1296,7 @@ wire ex_d_eff = ex_u.d_v && !ex_dkill;
 // FDBcc are branches that write one, so the ALU's taken stays off the
 // operand forwarding -- the FPU's own taken, not EX's selected one)
 wire ex_odd_w = ex_br && (ex_bdb ? ex_u.target[0] :
-                          (ex_u.op == OP_FPU) && fp_taken && ex_target[0]);
+                          (ex_u.op == OP_FPU) && fp_taken && ex_tgt[0]);
 // EX's result is final once its own unit is done (ex_hold, without WB's
 // stall): the front file is written, and the younger uops capture it, from
 // then on -- every cycle EX holds it, the same value -- so neither waits
@@ -1678,6 +1689,12 @@ always_ff @(posedge clk)
 			$display("FAIL: AG's registered bit-field selects disagree (pc %h)", ag_u.pc);
 			$finish;
 		end
+		if (ex_v && (ex_br != ((ex_u.br != BR_NONE) || (ex_u.op == OP_RTE)) || ex_tgt != ex_target ||
+		             ex_tkn != ex_taken || ex_tne != (ex_target != ex_u.target))) begin
+			$display("FAIL: EX's registered target/taken selects disagree: %h/%h %b/%b (pc %h)",
+			         ex_tgt, ex_target, ex_tkn, ex_taken, ex_u.pc);
+			$finish;
+		end
 		if (wb_v && wb_xf != xflags(wb_exc)) begin
 			$display("FAIL: WB's registered exception cases %b disagree with %0d (pc %h)", wb_xf, wb_exc, wb_u.pc);
 			$finish;
@@ -2003,6 +2020,20 @@ always_ff @(posedge clk) begin
 			ex_npc   <= dc2_u.pc + {27'd0, dc2_u.ilen, 1'b0};
 			ex_rs    <= rsel(dc2_u);
 			ex_ac    <= alu_ctl(dc2_u.op);
+			ex_br    <= (dc2_u.br != BR_NONE) || (dc2_u.op == OP_RTE);
+			if (nphase(dc2_u.op) != 2'd0) begin
+				ex_ts <= 5'b10000;
+				ex_tk <= 5'b10000;
+			end
+			else begin
+				ex_ts <= (dc2_u.br == BR_A) ? 5'b00001 : (dc2_u.br == BR_B) ? 5'b00010 :
+				         (dc2_u.br == BR_EA) ? 5'b00100 : 5'b01000;
+				ex_tk <= (dc2_u.br == BR_IMM || dc2_u.br == BR_EA || dc2_u.br == BR_A ||
+				          dc2_u.br == BR_B)  ? 5'b00001 :
+				         (dc2_u.op == OP_FPU)  ? 5'b00010 :
+				         (dc2_u.op == OP_BCC)  ? 5'b00100 :
+				         (dc2_u.op == OP_DBCC) ? 5'b01000 : 5'b00000;
+			end
 			ex_szm   <= (dc2_u.sz == SZ_B) ? 32'h0000_00FF :
 			            (dc2_u.sz == SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
 			ex_mw    <= {dc2_u.sz == SZ_W, dc2_u.op == OP_MUL && dc2_u.sz == SZ_W};
@@ -2113,7 +2144,7 @@ always_ff @(posedge clk) begin
 			wb_reset    <= (ex_u.op == OP_MISC) && (ex_u.cond == 4'd1);
 			wb_mt       <= (ex_u.op == OP_MISC) && (ex_u.cond >= 4'd3) && (ex_u.cond <= 4'd5);
 			wb_is_stop  <= (ex_u.op == OP_MISC) && (ex_u.cond == 4'd2 || ex_u.cond == 4'd8);
-			wb_cof      <= ex_br && ex_taken;
+			wb_cof      <= ex_br && ex_tkn;
 			wb_sr_new   <= ex_sr_new;
 			if (ex_u.exc == EXC_SNR || ex_snw) begin
 				wb_exc      <= EXC_IFS;     // refetched by WB, never an error
