@@ -218,11 +218,20 @@ function automatic logic [31:0] line_word(input logic [127:0] w, input logic [1:
 	endcase
 endfunction
 
-// each client's first data word, formed in parallel with the pick
+// each client's first data word, formed in parallel with the pick, and the
+// picked one by the pick's one-hot (an AND-OR, not a tree over pick_c)
 logic [31:0] dcand [NC];
-always_comb
+logic [NC-1:0] pick_oh;
+logic [31:0] dpick;
+always_comb begin
 	for (int c = 0; c < NC; c++)
 		dcand[c] = (breq[c].siz == SIZ_LINE) ? line_word(wdata[c], breq[c].addr[3:2]) : wdata[c][31:0];
+	for (int c = 0; c < NC; c++)
+		pick_oh[c] = req[c] && ((c == 0) || !(|(req & ((NC'(1) << c) - NC'(1)))));
+	dpick = '0;
+	for (int c = 0; c < NC; c++)
+		dpick = dpick | ({32{pick_oh[c]}} & dcand[c]);
+end
 
 
 // BS3-BS0 from SIZ and A1:A0 (table 2-6; asserted low)
@@ -659,7 +668,7 @@ always_ff @(posedge clk) begin
 				w = (st == S_RETRY) ? cur_wd : wdata[pick_c];
 				// (each client's first data word formed before the pick)
 				dw = (st == S_RETRY) ? ((cur.siz == SIZ_LINE) ? line_word(cur_wd, cur.addr[3:2]) : cur_wd[31:0])
-				                     : dcand[pick_c];
+				                     : dpick;
 				ab        <= B_EXP;
 				bb_n_o    <= 1'b0;
 				bb_oe     <= 1'b1;

@@ -688,6 +688,24 @@ assign f1_tg1 = f1_v && f1_btok && !f2_miss && !redir_any && tk1;
 (* keep *) wire        f1_ta1;
 assign f1_ta0 = f1_tg0 && !iatc_flush_page;
 assign f1_ta1 = f1_tg1 && !iatc_flush_page;
+// the next-address registers' own selects: the qualifiers (far from the
+// BTB's RAMs) kept apart, so each select is one function of them and the
+// hits -- the hits' compare feeds one level, not the chain above
+(* keep *) wire f1_qg = f1_v && f1_btok && !f2_miss && !redir_any;
+(* keep *) wire f1_qa = f1_v && f1_btok && !f2_miss && !redir_any && !iatc_flush_page;
+(* keep *) wire fras_e = (fras_n == 4'd0);
+wire f1_tg0_l = f1_qg && btb_hit0 && !(bk0 == 2'd2 && fras_e);
+wire f1_tg1_l = f1_qg && !btb_hit0 && btb_hit1 && !(bk1 == 2'd2 && fras_e);
+wire f1_ta0_l = f1_qa && btb_hit0 && !(bk0 == 2'd2 && fras_e);
+wire f1_ta1_l = f1_qa && !btb_hit0 && btb_hit1 && !(bk1 == 2'd2 && fras_e);
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (f1_tg0_l !== f1_tg0 || f1_tg1_l !== f1_tg1 || f1_ta0_l !== f1_ta0 || f1_ta1_l !== f1_ta1) begin
+		$display("FAIL: fetch: the next-address selects %b%b%b%b differ from the take flags %b%b%b%b",
+		         f1_tg0_l, f1_tg1_l, f1_ta0_l, f1_ta1_l, f1_tg0, f1_tg1, f1_ta0, f1_ta1);
+		$finish;
+	end
+// synthesis translate_on
 
 assign c_raddr = inv_busy ? inv_i[6:0] : fpc[10:4];
 
@@ -972,9 +990,9 @@ always_ff @(posedge clk) begin
 		stop_q      <= stop;
 		stop_f      <= stop;
 		// F0's address, and the ATC's (fpc's copy, or a page flush's)
-		fpc         <= f1_tg0 ? {f1_t0, 1'b0} : f1_tg1 ? {f1_t1, 1'b0} : fpc_b;
-		atc_la      <= f1_ta0 ? {f1_t0, 1'b0} : f1_ta1 ? {f1_t1, 1'b0} : atc_b;
-		atc_set     <= f1_ta0 ? atc_sx({f1_t0, 1'b0}, tc_p) : f1_ta1 ? atc_sx({f1_t1, 1'b0}, tc_p) :
+		fpc         <= f1_tg0_l ? {f1_t0, 1'b0} : f1_tg1_l ? {f1_t1, 1'b0} : fpc_b;
+		atc_la      <= f1_ta0_l ? {f1_t0, 1'b0} : f1_ta1_l ? {f1_t1, 1'b0} : atc_b;
+		atc_set     <= f1_ta0_l ? atc_sx({f1_t0, 1'b0}, tc_p) : f1_ta1_l ? atc_sx({f1_t1, 1'b0}, tc_p) :
 		               atc_sx(atc_b, tc_p);
 		atc_fc2     <= smode;
 		fl_all_q    <= iatc_flush_all;
