@@ -999,6 +999,20 @@ wire wb_st   = m4.r.v && st_v && (m4.r.mem == M_ST || m4.r.mem == M_RMW);
 // enters WB, cleared with its hit)
 logic m4_fq;
 wire wb_fast = wb_st && m4_fq && dc_en && (e_st == E_IDLE) && !e_wst_done;
+// WB's store straight into the store buffer: a write-through or noncachable
+// imprecise store (CACR.ESB) in one aligned bus piece that has no line in
+// the cache, not locked, no acknowledge cycle -- the engine's E_SB path in
+// its own WB clock.  Qualified as it enters WB (m4_fsb); without room it
+// takes the engine's path (which keeps a younger access's bus cycles behind
+// it)
+function automatic logic fsb_of(input mrec_t m);
+	fsb_of = !m.split && m.x.ok && !m.x.flt && !m.r.lock && (m.r.msz != SZ_Q) &&
+	         (m.r.ack == 2'd0) && (m.x.cm == 2'b00 || m.x.cm == 2'b11) && cacr[29] &&
+	         !(m.x.hit && dc_en) &&
+	         ((m.r.msz == SZ_B) || (m.r.msz == SZ_W && !m.r.a[0]) ||
+	          (m.r.msz == SZ_L && m.r.a[1:0] == 2'b00));
+endfunction
+logic m4_fsb;
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && m4.r.v && m4_fq != (!m4.split && m4.x.ok && !m4.x.flt && m4.x.hit &&
@@ -1029,12 +1043,12 @@ wire  [31:0] wfs_acc = lalign(st_data, m4.r.msz);
 wire ex_st    = m3.r.v && (m3.r.mem != M_LD);
 wire dc2_slow = m2.r.v && !fast_now && !(st_simple && !e_job) && !e_dc2_done && !e_job &&
                 !ex_st;
-wire wb_slow  = wb_st && !wb_fast && !wb_fs && !wfs_p1 && !e_wst_done;
+logic wb_fsb, wb_slow;            // (below, with the store buffer's room)
 
 // store ready: the fast store answers in its own WB cycle (the engine's
 // stores through the registered pulse)
 logic st_rdy_r, st_fault_r;
-assign st_rdy   = st_rdy_r || (wb_fast && !sn_frz) || (wfs_p1 && m4.x1.hit && !sn_frz);
+assign st_rdy   = st_rdy_r || (wb_fast && !sn_frz) || (wfs_p1 && m4.x1.hit && !sn_frz) || wb_fsb;
 assign st_fault = st_rdy_r && st_fault_r;
 
 // The holds the pipeline's stall chain reads, as registers: each formed a
@@ -1077,6 +1091,8 @@ logic        own_sb;              // the transaction in progress is the buffer's
 logic        sb_fly;              // the head is on the bus (granted, not done)
 wire         sb_room = (sb_n < 3'(SBN));
 wire         sb_push = (e_st == E_SB) && sb_room;
+assign wb_fsb  = wb_st && m4_fsb && (e_st == E_IDLE) && !e_wst_done && !wfs_p1 && sb_room;
+assign wb_slow = wb_st && !wb_fast && !wb_fs && !wfs_p1 && !e_wst_done && !wb_fsb;
 // present the head while it is not on the bus already (the BIU may start
 // again in the clock its done comes); the engine's request waits while the
 // buffer holds anything, so no bus cycle of the engine passes a write
@@ -1086,7 +1102,7 @@ assign       bi_more = sb_fly && (sb_n > 3'd1 || b_req);
 wire         sb_pop  = own_sb && (bi_done || bi_err);
 logic        sb_mt;               // (sb_n == 0, a register)
 assign       sb_empty = sb_mt;
-assign       sb_ne_n  = (sb_n > 3'd1) || (sb_n == 3'd1 && !sb_pop) || sb_push;
+assign       sb_ne_n  = (sb_n > 3'd1) || (sb_n == 3'd1 && !sb_pop) || sb_push || wb_fsb;
 // a TEA on a buffered write (SBE) or on a push (PBE): recorded, reported
 // as an access error once the buffers are empty (MC68060UM 8.4.6)
 logic        sbe_r, pbe_r;
@@ -1141,15 +1157,26 @@ always_ff @(posedge clk) begin
 			n = n - 3'd1;
 			if (bi_err) sbe_r <= 1'b1;
 		end
-		if (sb_push) begin
+		if (sb_push || wb_fsb) begin
 			sbent_t e;
-			e.pa  = bo_pa;
-			e.n   = bo_np;
-			e.wd  = bo_wd;
-			e.tt  = bo.tt;
-			e.tm  = bo.tm;
-			e.upa = bo.upa;
-			e.ci  = bo.ci;
+			if (wb_fsb) begin
+				e.pa  = m4.x.pa;
+				e.n   = nbytes(m4.r.msz);
+				e.wd  = lalign(st_data, m4.r.msz);
+				e.tt  = fc_tt(m4.r.fc);
+				e.tm  = fc_tm(m4.r.fc);
+				e.upa = m4.x.upa;
+				e.ci  = m4.x.cm[1];
+			end
+			else begin
+				e.pa  = bo_pa;
+				e.n   = bo_np;
+				e.wd  = bo_wd;
+				e.tt  = bo.tt;
+				e.tm  = bo.tm;
+				e.upa = bo.upa;
+				e.ci  = bo.ci;
+			end
 			sb[n[$clog2(SBN)-1:0]] <= e;
 			n = n + 3'd1;
 		end
@@ -1428,6 +1455,7 @@ always_ff @(posedge clk) begin
 			m4    <= m3;
 			m4_fq <= !m3.split && m3.x.ok && !m3.x.flt && m3.x.hit && m3.x.cm == 2'b01 &&
 			         !m3.r.lock && (m3.r.msz != SZ_Q);
+			m4_fsb <= fsb_of(m3);
 		end
 		else if (adv_wb) m4.r.v <= 1'b0;
 
@@ -1445,6 +1473,12 @@ always_ff @(posedge clk) begin
 			dw_word <= wbf_word;
 			vf_set = m4.x.pa[10:4]; vf_wm[m4.x.way] = 1'b1; vf_dwe = 1'b1; vf_dv = 1'b1;
 			// answered this cycle: kept only if WB does not move
+			st_rdy_r   <= !adv_wb;
+			st_fault_r <= 1'b0;
+			e_wst_done <= !adv_wb;
+		end
+		// (the store into the store buffer: the buffer's push, below)
+		if (wb_fsb) begin
 			st_rdy_r   <= !adv_wb;
 			st_fault_r <= 1'b0;
 			e_wst_done <= !adv_wb;
@@ -2912,6 +2946,7 @@ always_ff @(posedge clk) begin
 		//--------------------------------------------------------------
 		begin
 			logic frz_n, nofrz, m1v_n, mtv_n, busy_n, stl_set, r_new, r_stay, ok_new, ok_stay;
+			logic [2:0] sbn_n;
 			// the snoop port may hold the cache next cycle
 			frz_n = sn_frz || sn_req || sf_req;
 			nofrz = !frz_n;
@@ -2945,10 +2980,16 @@ always_ff @(posedge clk) begin
 			// finishing a job, and no snoop starting); one staying (answered
 			// now, the engine's store finishing, or the fast store as the
 			// engine finishes its job)
-			ok_new  = !m3.split && m3.x.ok && !m3.x.flt && m3.x.hit && m3.x.cm == 2'b01 &&
-			          !m3.r.lock && (m3.r.msz != SZ_Q) && dc_en && nofrz &&
-			          ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) || e_st == E_S_DONE);
-			ok_stay = (st_rdy_r && !st_fault_r) || (!sn_frz && (wb_fast || (wfs_p1 && m4.x1.hit))) ||
+			// (into the store buffer: the engine idle, the buffer's count as
+			// it will be below its size)
+			sbn_n   = sb_n - 3'(sb_pop) + 3'(sb_push || wb_fsb);
+			ok_new  = (!m3.split && m3.x.ok && !m3.x.flt && m3.x.hit && m3.x.cm == 2'b01 &&
+			           !m3.r.lock && (m3.r.msz != SZ_Q) && dc_en && nofrz &&
+			           ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) || e_st == E_S_DONE)) ||
+			          (fsb_of(m3) && (sbn_n < 3'(SBN)) &&
+			           ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) ||
+			            (e_st == E_S_DONE && !sn_frz)));
+			ok_stay = (st_rdy_r && !st_fault_r) || (!sn_frz && (wb_fast || (wfs_p1 && m4.x1.hit))) || wb_fsb ||
 			          (!sn_frz && e_st == E_W_DONE && !(bo_err && m4.r.ack != 2'd3) &&
 			           !(m4.split && !e_part)) ||
 			          (nofrz && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
