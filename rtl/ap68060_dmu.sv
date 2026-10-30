@@ -2864,7 +2864,22 @@ always_ff @(posedge clk) begin
 			$finish;
 		end
 		// synthesis translate_on
-		dt_inv <= (vp_lwe && !vp_lv && adv_dt && mt.a[10:4] == vp_set) ? vp_wm : 4'd0;
+		// (the invalidations alone, for the records' hits: the snoop port's,
+		// else the engine's -- the WB store's writes never invalidate)
+		begin
+		logic       iv_v;
+		logic [6:0] iv_set;
+		logic [3:0] iv_wm;
+		iv_v   = (vs_lwe && !vs_lv) || (ve_lwe && !ve_lv);
+		iv_set = (vs_lwe || vs_dwe) ? vs_set : ve_set;
+		iv_wm  = (vs_lwe || vs_dwe) ? vs_wm : ve_wm;
+		// synthesis translate_off
+		if (iv_v != (vp_lwe && !vp_lv) || (iv_v && (iv_set != vp_set || iv_wm != vp_wm))) begin
+			$display("FAIL: DMU: the invalidation select disagrees with the port's request");
+			$finish;
+		end
+		// synthesis translate_on
+		dt_inv <= (iv_v && adv_dt && mt.a[10:4] == iv_set) ? iv_wm : 4'd0;
 		if (dt_inv[m2.x.way] && m2.x.hit) begin
 			if (!adv_dc2) begin
 				xres_t xm;
@@ -2877,42 +2892,43 @@ always_ff @(posedge clk) begin
 			// (the engine taking the access this cycle copies its record)
 			if (e_st == E_S_START && !sn_frz) e_x.hit <= 1'b0;
 		end
-		if (vp_lwe && !vp_lv) begin
-			for (int j = 0; j < 4; j++) if (vp_wm[j]) begin
+		if (iv_v) begin
+			for (int j = 0; j < 4; j++) if (iv_wm[j]) begin
 				if (!adv_dt) begin
-					if (m2.x.hit && m2.x.pa[10:4] == vp_set && m2.x.way == 2'(j)) begin
+					if (m2.x.hit && m2.x.pa[10:4] == iv_set && m2.x.way == 2'(j)) begin
 						xres_t xm;
 						xm = m2.x;
 						xm.hit = 1'b0;
 						m2.x.hit <= 1'b0;
 						m2ss_n   = st_simp(m2.r, xm, m2.split);
 					end
-					if (m2.x1.hit && m2.x1.pa[10:4] == vp_set && m2.x1.way == 2'(j)) m2.x1.hit <= 1'b0;
+					if (m2.x1.hit && m2.x1.pa[10:4] == iv_set && m2.x1.way == 2'(j)) m2.x1.hit <= 1'b0;
 				end
 				if (adv_dc2) begin
-					if (m2.x.hit && m2.x.pa[10:4] == vp_set && m2.x.way == 2'(j)) m3.x.hit <= 1'b0;
-					if (m2.x1.hit && m2.x1.pa[10:4] == vp_set && m2.x1.way == 2'(j)) m3.x1.hit <= 1'b0;
+					if (m2.x.hit && m2.x.pa[10:4] == iv_set && m2.x.way == 2'(j)) m3.x.hit <= 1'b0;
+					if (m2.x1.hit && m2.x1.pa[10:4] == iv_set && m2.x1.way == 2'(j)) m3.x1.hit <= 1'b0;
 				end
 				else begin
-					if (m3.x.hit && m3.x.pa[10:4] == vp_set && m3.x.way == 2'(j)) m3.x.hit <= 1'b0;
-					if (m3.x1.hit && m3.x1.pa[10:4] == vp_set && m3.x1.way == 2'(j)) m3.x1.hit <= 1'b0;
+					if (m3.x.hit && m3.x.pa[10:4] == iv_set && m3.x.way == 2'(j)) m3.x.hit <= 1'b0;
+					if (m3.x1.hit && m3.x1.pa[10:4] == iv_set && m3.x1.way == 2'(j)) m3.x1.hit <= 1'b0;
 				end
 				if (adv_ex) begin
-					if (m3.x.hit && m3.x.pa[10:4] == vp_set && m3.x.way == 2'(j)) begin
+					if (m3.x.hit && m3.x.pa[10:4] == iv_set && m3.x.way == 2'(j)) begin
 						m4.x.hit <= 1'b0;
 						m4_fq    <= 1'b0;
 					end
-					if (m3.x1.hit && m3.x1.pa[10:4] == vp_set && m3.x1.way == 2'(j)) m4.x1.hit <= 1'b0;
+					if (m3.x1.hit && m3.x1.pa[10:4] == iv_set && m3.x1.way == 2'(j)) m4.x1.hit <= 1'b0;
 				end
 				else begin
-					if (m4.x.hit && m4.x.pa[10:4] == vp_set && m4.x.way == 2'(j)) begin
+					if (m4.x.hit && m4.x.pa[10:4] == iv_set && m4.x.way == 2'(j)) begin
 						m4.x.hit <= 1'b0;
 						m4_fq    <= 1'b0;
 					end
-					if (m4.x1.hit && m4.x1.pa[10:4] == vp_set && m4.x1.way == 2'(j)) m4.x1.hit <= 1'b0;
+					if (m4.x1.hit && m4.x1.pa[10:4] == iv_set && m4.x1.way == 2'(j)) m4.x1.hit <= 1'b0;
 				end
-				if (e_x.hit && e_x.pa[10:4] == vp_set && e_x.way == 2'(j)) e_x.hit <= 1'b0;
+				if (e_x.hit && e_x.pa[10:4] == iv_set && e_x.way == 2'(j)) e_x.hit <= 1'b0;
 			end
+		end
 		end
 
 		//--------------------------------------------------------------
