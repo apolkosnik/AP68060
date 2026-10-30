@@ -26,7 +26,8 @@ module ap68060_atc
 	// access's M-bit update rewrites its own entry).  0: no copy for the
 	// search -- the caller says whether the page is there (wsame) and in
 	// which way (the hit vector of the lookup that started the search)
-	parameter bit SAME_SEARCH = 1
+	parameter bit SAME_SEARCH = 1,
+	parameter bit SET_IN = 0           // the first port's set from the set input
 )
 (
 	input  logic        clk,
@@ -36,6 +37,8 @@ module ap68060_atc
 
 	// lookup
 	input  logic [31:0] la,
+	input  logic  [3:0] set,           // (SET_IN) la's set, registered with it
+	input  logic        set_v,         // ... and that the port is in use (check)
 	input  logic        fc2,
 	output logic        hit,
 	output atce_t       ent,
@@ -79,7 +82,15 @@ logic [1:0] rr;           // replacement counter
 logic       fp_v;         // a page flush's clear: pending, its set and ways
 logic [3:0] fp_s, fp_m;
 
-wire [3:0] lset = p8k ? la[16:13]  : la[15:12];
+// (SET_IN: the caller registers the first port's set with la)
+wire [3:0] lset = SET_IN ? set : (p8k ? la[16:13] : la[15:12]);
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (SET_IN && nreset && set_v && set !== (p8k ? la[16:13] : la[15:12])) begin
+		$display("FAIL: ATC: the first port's set %0d, its address's %0d", set, p8k ? la[16:13] : la[15:12]);
+		$finish;
+	end
+// synthesis translate_on
 wire [3:0] wset = p8k ? wla[16:13] : wla[15:12];
 
 slot_t s [4];

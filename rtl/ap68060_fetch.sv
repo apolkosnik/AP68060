@@ -355,7 +355,7 @@ function automatic logic [3:0] atc_sx(input logic [31:0] a, input logic p8);
 endfunction
 ap68060_atc #(.SAME_SEARCH(0)) iatc (
 	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc_q[10]),
-	.la(atc_la),
+	.set(4'd0), .set_v(1'b0), .la(atc_la),
 	.fc2(atc_fc2),
 	.hit(atc_hit1), .ent(atc_e1), .hv(), .wpa(),   // (the first port: page flushes)
 	.la_d(atc_la), .fc2_d(atc_fc2), .set_d(atc_set), .hv_d(atc_hv), .wpa_d(), .ent_d(atc_went),

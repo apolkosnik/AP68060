@@ -397,6 +397,10 @@ logic [1:0]  rrc;                  // replacement counter
 // lookup ports: DC1, or the engine while it holds DC1
 logic        steal, steal_q;
 logic [31:0] st_la;                // engine lookup address (logical, for the ATC)
+logic  [3:0] st_aset;              // ... its ATC set (registered with it)
+function automatic logic [3:0] aset_of(input logic [31:0] la);
+	aset_of = tc_p ? la[16:13] : la[15:12];
+endfunction
 logic        st_fc2;
 logic  [6:0] st_set;               // engine data/tag set
 
@@ -536,11 +540,11 @@ logic        atc_fall, atc_fpage, atc_fng;
 
 logic        tw_upd;              // the search updates an entry (first write: M)
 logic  [3:0] tw_hw;               // ... in this way (the ATC's hit vector then)
-ap68060_atc #(.SAME_SEARCH(0)) datc (
+ap68060_atc #(.SAME_SEARCH(0), .SET_IN(1)) datc (
 	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc[11]),
 	// (the first port is the engine's alone: its stolen address; DC1 and
 	// DT look up through the second)
-	.la(st_la), .fc2(st_fc2),
+	.la(st_la), .set(st_aset), .set_v(steal), .fc2(st_fc2),
 	.hit(atc_hit), .ent(atc_e), .hv(atc_hv), .wpa(atc_wpa),
 	// (the second port: DC1's lookup, or DT's while it looks up again)
 	.la_d(tk_relook ? mt.a : m1.a), .fc2_d(tk_relook ? mt.smode : m1.smode),
@@ -1270,6 +1274,9 @@ always_ff @(posedge clk) begin
 	if (adv_wb || !wb_st) st_rdy_r <= 1'b0;
 	mt_done   <= 1'b0;
 	lkend     <= 1'b0;
+	// (the stolen address's ATC set follows TC.P: a MOVEC of TC serializes,
+	// nothing looks up in the clock after it; the loads below set both)
+	st_aset   <= aset_of(st_la);
 	iack_end  <= 1'b0;
 	iw_done   <= 1'b0;
 	atc_wr    <= 1'b0;
@@ -1295,7 +1302,7 @@ always_ff @(posedge clk) begin
 		e_breq <= 1'b0;
 		bo <= '0; bo_wd <= '0; bo_line <= '0; bo_err <= 1'b0; bo_rd <= '0;
 		bo_avec <= 1'b0; bo_tci <= 1'b0; bo_left <= '0; bo_pn <= '0; bo_pa <= '0;
-		steal <= 1'b0; st_la <= '0; st_fc2 <= 1'b0; st_set <= '0;
+		steal <= 1'b0; st_la <= '0; st_aset <= '0; st_fc2 <= 1'b0; st_set <= '0;
 		f_set <= '0; f_way <= '0; f_tag <= '0;
 		pv_v <= 1'b0; pv_line <= '0; pv_lpa <= '0; pv_dirty <= 1'b0; pv_tln <= '0; pv_keep <= 1'b0;
 		mv_line <= '0;
@@ -1597,6 +1604,7 @@ always_ff @(posedge clk) begin
 				// at once through the stolen ports)
 				steal  <= 1'b1;
 				st_la  <= {m2.r.a[31:4] + 28'd1, 4'd0};
+				st_aset <= aset_of({m2.r.a[31:4] + 28'd1, 4'd0});
 				st_fc2 <= m2.r.smode;
 				st_set <= m2.r.a[10:4] + 7'd1;
 				e_st   <= E_SP_W;
@@ -1663,6 +1671,7 @@ always_ff @(posedge clk) begin
 			// stolen ports; one cycle for the RAM and ATC reads
 			steal  <= 1'b1;
 			st_la  <= e_va;
+			st_aset <= aset_of(e_va);
 			st_fc2 <= m2.r.smode;
 			st_set <= e_va[10:4];
 			e_st   <= E_S_XLW;
@@ -2080,6 +2089,7 @@ always_ff @(posedge clk) begin
 					// stolen port), in the space of the DFC
 					steal  <= 1'b1;
 					st_la  <= mt_addr;
+					st_aset <= aset_of(mt_addr);
 					st_fc2 <= mt_fc[2];
 					mt_fault <= 1'b0;
 					e_st   <= E_M_PLW;
@@ -2096,6 +2106,7 @@ always_ff @(posedge clk) begin
 					else begin
 						steal  <= 1'b1;
 						st_la  <= mt_addr;
+						st_aset <= aset_of(mt_addr);
 						st_fc2 <= mt_fc[2];
 						iatc_flush_la  <= mt_addr;
 						iatc_flush_fc2 <= mt_fc[2];
