@@ -173,12 +173,18 @@ logic          b_idle;
 logic          rsto_req, rsto_busy;
 logic          be_fstop, be_idle;
 logic          b_drop, b_more;
+// the fetch's hold at the BIU, its own flip-flop (placed by the BIU's
+// arbitration): a clock after the back end's, still well before what it
+// holds the fetch for (the LPSTOP broadcast, RSTO waiting for any transfer
+// starting)
+logic          bstop_q;
+always_ff @(posedge clk) bstop_q <= be_fstop || rsto_busy;
 
 ap68060_biu #(.NC(NC)) biu (
 	.clk(clk), .nreset(nreset), .bclk_en(bclk_en),
 	.m_ign(m_ign), .m_native(m_native), .m_hold(m_hold), .m_cnt(m_cnt),
 	// (client 1, the fetch, is held while stopped, halted or resetting)
-	.req(b_req & ~{be_fstop || rsto_busy, 1'b0}), .breq(b_breq), .wdata(b_wdata),
+	.req(b_req & ~{bstop_q, 1'b0}), .breq(b_breq), .wdata(b_wdata),
 	.gnt(b_gnt), .done(b_done), .err(b_err),
 	.rvalid(b_rvalid), .rclient(b_rclient), .rdata(b_rdata), .rbeat(b_rbeat),
 	.ravec(b_ravec), .rtci(b_rtci), .errbeat(b_errbeat), .idle(b_idle), .own(b_own),
