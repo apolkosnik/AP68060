@@ -767,8 +767,8 @@ always_ff @(posedge clk)
 //--------------------------------------------------------------------------
 typedef enum logic [5:0] {
 	E_IDLE,
-	E_S_START, E_S_XL, E_S_XLW, E_S_XL2, E_S_ACT, E_S_RD, E_S_RDW, E_S_RD2, E_S_BUSD,
-	E_S_NEXT, E_S_DONE, E_SP_W, E_SP_2, E_SP_3,
+	E_S_START, E_S_XL, E_S_XLW, E_S_XL2, E_S_ACT, E_S_RD, E_S_RDW, E_S_RD2, E_S_RD3, E_S_BUSD,
+	E_S_NEXT, E_S_DONE, E_SP_W, E_SP_2, E_SP_3, E_SP_4,
 	E_W_START, E_W_DEC, E_W_PART, E_W_DONE, E_SB,
 	E_M_START, E_M_PG, E_M_SCAN, E_M_SCANW, E_M_SCAN2, E_M_IC, E_M_DONE, E_M_CLR,
 	E_M_PLW, E_M_PL2, E_M_PLD,
@@ -809,7 +809,8 @@ logic        sp_dw;               // a write to the next set while its
 // lookup captured stay good (a fast split read; the RAM re-reads the held
 // DC1 set after its stolen read, steal_q)
 wire  e_quiet = (e_st == E_IDLE) || (e_st == E_S_START) || (e_st == E_SP_W) ||
-                (e_st == E_SP_2) || (e_st == E_SP_3) || (e_st == E_S_DONE && sp_job);
+                (e_st == E_SP_2) || (e_st == E_SP_3) || (e_st == E_SP_4) ||
+                (e_st == E_S_DONE && sp_job);
 // the engine's own lookup through the stolen ports: the ATC's part (an
 // asynchronous read) registered in the clock the tag RAM takes the stolen
 // set (E_S_XLW, E_SP_W), the tags compared from the RAM the clock after
@@ -1148,6 +1149,8 @@ wire [127:0] etk_line = (e_st == E_S_ACT) ? bo_line : dq_rn[e_x.way];
 wire  [3:0]  etk_o    = etk_sp ? 4'd0 : e_va[3:0];
 wire  [2:0]  etk_n    = etk_sp ? 3'(nbytes(m2.r.msz) - sp_n0) : e_n;
 wire [31:0]  etk      = take(etk_line, etk_o, etk_n);
+// (from the RAM's output, registered before it is merged: E_S_RD3, E_SP_4)
+logic [31:0] etk_q;
 
 always_ff @(posedge clk) begin
 	// a store's answer is kept until WB takes it: WB can be held in the
@@ -1479,12 +1482,10 @@ always_ff @(posedge clk) begin
 			    !hz && !st_line(m3, e_x.pa[31:4]) && !st_line(m4, e_x.pa[31:4]) &&
 			    !sp_dw && !(dw && (dw_set == m2.r.a[10:4] || dw_set == st_set))) begin
 				// the first part from DC2's copy, the rest from the stolen read
-				// (DC2's bytes are fast_data's: its low bytes, past the
-				// line, give way to the stolen read's)
-				e_acc <= (fast_data & ~((32'd1 << (8 * (nbytes(m2.r.msz) - n0))) - 32'd1)) |
-				         etk;
+				// (registered here, merged in E_SP_4)
+				etk_q <= etk;
 				m2.x1 <= e_x;
-				e_st  <= E_S_DONE;
+				e_st  <= E_SP_4;
 			end
 			else begin
 				steal  <= 1'b0;
@@ -1492,6 +1493,14 @@ always_ff @(posedge clk) begin
 				e_x    <= m2.x;
 				e_st   <= m2.x.ok ? E_S_ACT : E_S_XL;
 			end
+		end
+		E_SP_4: begin
+			logic [2:0] n0;
+			n0 = 3'(5'd16 - {1'b0, m2.r.a[3:0]});
+			// (DC2's bytes are fast_data's: its low bytes, past the line,
+			// give way to the stolen read's)
+			e_acc <= (fast_data & ~((32'd1 << (8 * (nbytes(m2.r.msz) - n0))) - 32'd1)) | etk_q;
+			e_st  <= E_S_DONE;
 		end
 		E_SP_2: begin
 			xres_t x;
@@ -1720,9 +1729,19 @@ always_ff @(posedge clk) begin
 		end
 		E_S_RDW: e_st <= E_S_RD2;
 		E_S_RD2: begin
-			if (m2.r.msz == SZ_Q) mv_line <= dq_rn[e_x.way];
-			else e_acc <= (e_acc << (8 * e_n)) | etk;
-			e_st <= E_S_NEXT;
+			// (the operand's bytes registered here, merged in E_S_RD3)
+			if (m2.r.msz == SZ_Q) begin
+				mv_line <= dq_rn[e_x.way];
+				e_st    <= E_S_NEXT;
+			end
+			else begin
+				etk_q <= etk;
+				e_st  <= E_S_RD3;
+			end
+		end
+		E_S_RD3: begin
+			e_acc <= (e_acc << (8 * e_n)) | etk_q;
+			e_st  <= E_S_NEXT;
 		end
 		E_S_BUSD: begin
 			// the bus read finished
