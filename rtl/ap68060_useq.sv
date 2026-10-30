@@ -67,6 +67,13 @@ module ap68060_useq
 logic nrst;
 always_ff @(posedge clk) nrst <= nreset;
 
+// an operand selector's register terms (osel, below)
+typedef struct packed {
+	logic       v;
+	logic [1:0] src;
+	logic [4:0] r;
+} osel_t;
+
 // S, registered here (it changes with a flush: no word is in D2 the clock
 // after); the register naming (A7) and JC_SUPER read it
 logic smode_q;
@@ -103,7 +110,10 @@ logic        b_mev, b_me1, b_agin;
 logic [12:0] b_ia, b_ib;        // the A and B operands' immediate source (one-hot)
 logic        b_e1pc2, b_e1pc3;  // the MOVEM mask has at most two / three bits
 logic  [1:0] b_mem;
-logic [31:0] b_dsv;
+osel_t       b_oa, b_ob, b_od;  // the operand selectors' register terms
+logic [31:0] b_dsv;             // an explicit AG mode's displacement ...
+logic        b_dov;             // ... which replaces the memory EA's
+logic  [4:0] b_amt0, b_amt1;    // EA0's, EA1's (An)+/-(An) step
 logic  [3:0] b_bi1;
 logic [15:0] b_low1;
 logic [31:0] b_npc;
@@ -135,6 +145,8 @@ logic  [4:0] c_mupd_reg;
 logic        c_bupd_x;          // (simulation: B's update read as one clock forms it)
 logic        c_e1pc2, c_e1pc3;  // the record's mask has at most two / three bits
 logic        mv_pc2;            // the mask has at most two bits
+logic        c_bok, c_beq;      // the word's AG base is valid; it is the deferred
+logic  [7:0] c_mamt;            // register; its own step plus the deferred one
 logic        c_def_set;         // the uop defers its source update
 logic  [4:0] c_def_reg;
 logic  [7:0] c_def_amt;
@@ -223,6 +235,51 @@ function automatic logic [5:0] mvdst(input logic [4:0] r, input logic isan, inpu
 	else if (fx && !pd && isx) mvdst = {5'(R_T0 + 5'd6), 1'b1};
 	else                       mvdst = {r, !(pi && isan)};
 endfunction
+// an operand selector's register terms (valid, source kind, register):
+// D2a forms them from the word and the record, D2b takes them as they are
+// (its immediates come by class: imm_cls)
+function automatic osel_t osel(input logic [5:0] s, input dinst_t rc, input logic [4:0] spr,
+                               input logic [4:0] sspr);
+	osel_t o;
+	o     = '0;
+	o.v   = (s != S_NONE);
+	o.src = OS_REG;
+	if (s >= 6'd40) o.r = 5'(s - 6'd25);
+	else case (s)
+		S_EA0, S_EA0R, S_EA1, S_EA1R: begin
+			ea_t e;
+			e = (s == S_EA0 || s == S_EA0R) ? rc.ea0 : rc.ea1;
+			if (e.m == EM_DN) o.r = dreg(e.r);
+			else if (e.m == EM_AN) o.r = areg(e.r, spr);
+			else if (e.m == EM_IMM) o.src = OS_IMM;
+			else if (s == S_EA0R || s == S_EA1R) o.v = 1'b0;
+			else o.src = OS_MEM;
+		end
+		S_DX:    o.r = dreg(rc.opw[11:9]);
+		S_DY:    o.r = dreg(rc.opw[2:0]);
+		S_AX:    o.r = areg(rc.opw[11:9], spr);
+		S_AY:    o.r = areg(rc.opw[2:0], spr);
+		S_SP:    o.r = spr;
+		S_SSP:   o.r = sspr;
+		S_X1R:   o.r = rc.ext1[15] ? areg(rc.ext1[14:12], spr) : dreg(rc.ext1[14:12]);
+		S_X1DL:  o.r = dreg(rc.ext1[14:12]);
+		S_X1DH:  o.r = dreg(rc.ext1[2:0]);
+		S_X1DU:  o.r = dreg(rc.ext1[8:6]);
+		S_X2DC:  o.r = dreg(rc.ext2[2:0]);
+		S_X2DU:  o.r = dreg(rc.ext2[8:6]);
+		S_X2R:   o.r = rc.ext2[15] ? areg(rc.ext2[14:12], spr) : dreg(rc.ext2[14:12]);
+		S_IMM, S_QUICK, S_MOVEQ, S_NPC, S_PC, S_CONST, S_CREG, S_OPW, S_EXT1: o.src = OS_IMM;
+		S_SHCNT: if (rc.opw[5]) o.r = dreg(rc.opw[11:9]); else o.src = OS_IMM;
+		S_ZERO:  o.src = OS_ZERO;
+		S_LD:    o.src = OS_MEM;
+		S_BFO:   if (rc.ext1[11]) o.r = dreg(rc.ext1[8:6]); else o.src = OS_IMM;
+		S_BFW:   if (rc.ext1[5]) o.r = dreg(rc.ext1[2:0]); else o.src = OS_IMM;
+		S_FPDL:  o.r = dreg(rc.ext1[6:4]);
+		S_CREGR: o.r = R_USP;
+		default: o.v = 1'b0;
+	endcase
+	osel = o;
+endfunction
 
 function automatic logic is_mem(input logic [3:0] m);
 	is_mem = (m >= EM_AI) && (m != EM_IMM) && (m != EM_NONE);
@@ -264,22 +321,22 @@ typedef struct packed {
 // byte through A7 moves it by two), FMOVE(M) of control registers four per
 // register; the other FPU instructions move their address register by a
 // run-time amount (ADDT0)
-logic [6:0] fp_size;
-always_comb begin
+function automatic logic [6:0] fpsz(input logic [15:0] ext1, input logic [2:0] r);
 	logic [2:0] crl;
-	crl = (src.ext1[12:10] == 3'd0) ? 3'b001 : src.ext1[12:10];
-	case (src.ext1[15:13])
-		3'b010, 3'b011: case (src.ext1[12:10])
-			3'd0, 3'd1: fp_size = 7'd4;
-			3'd4:       fp_size = 7'd2;
-			3'd6:       fp_size = (src.ea0.r == 3'd7) ? 7'd2 : 7'd1;
-			3'd5:       fp_size = 7'd8;
-			default:    fp_size = 7'd12;
+	crl = (ext1[12:10] == 3'd0) ? 3'b001 : ext1[12:10];
+	case (ext1[15:13])
+		3'b010, 3'b011: case (ext1[12:10])
+			3'd0, 3'd1: fpsz = 7'd4;
+			3'd4:       fpsz = 7'd2;
+			3'd6:       fpsz = (r == 3'd7) ? 7'd2 : 7'd1;
+			3'd5:       fpsz = 7'd8;
+			default:    fpsz = 7'd12;
 		endcase
-		3'b100, 3'b101: fp_size = {3'd0, 2'(crl[0]) + 2'(crl[1]) + 2'(crl[2]), 2'b00};
-		default: fp_size = 7'd0;
+		3'b100, 3'b101: fpsz = {3'd0, 2'(crl[0]) + 2'(crl[1]) + 2'(crl[2]), 2'b00};
+		default: fpsz = 7'd0;
 	endcase
-end
+endfunction
+wire [6:0] fp_size = fpsz(src.ext1, src.ea0.r);
 
 // an operand's immediate, by its source (one-hot, formed in D2a from the
 // selector and the record): EA0's, EA1's, the record's, QUICK (and a quick
@@ -337,7 +394,9 @@ uop_t        nb;
 agf_t        nb_v1;
 logic        nb_mupd_v;      // the EA's own update (before the explicit AG modes)
 logic  [4:0] nb_mupd_reg;
-logic        dbg_bupd;       // (simulation: B's update read, as one clock forms it,
+logic        dbg_med;        // (simulation: the memory EA's displacement and step
+                             // differ from the mode's,
+logic        dbg_bupd;       // B's update read, as one clock forms it,
 logic        dbg_imm;        // and the operands' immediates by their selectors)
 logic        nb_def_set;     // the uop defers its source update
 logic  [4:0] nb_def_reg;
@@ -356,6 +415,7 @@ always_comb begin
 	logic [3:0] cnd;
 
 	nu         = '0;
+	dbg_med    = 1'b0;
 	nb_v1      = '0;
 	nb_mupd_v  = 1'b0;
 	nb_mupd_reg = '0;
@@ -458,18 +518,19 @@ always_comb begin
 	nu.msz    = msz;
 	nu.cond   = cnd;
 	nu.ccr_we = uw.ccr_inst ? src.ccr : uw.ccr;
-	nu.a_src  = oa.v ? oa.src : OS_ZERO;
-	nu.a_reg  = oa.r;
+	nu.a_src  = b_oa.v ? b_oa.src : OS_ZERO;
+	nu.a_reg  = b_oa.r;
 	nu.a_sxw  = (uw.sxw == 2'd1) || (uw.sxw == 2'd2 && src.sz == SZ_W);
-	nu.b_src  = ob.v ? ob.src : OS_ZERO;
-	nu.b_reg  = ob.r;
+	nu.b_src  = b_ob.v ? b_ob.src : OS_ZERO;
+	nu.b_reg  = b_ob.r;
 	// (the immediates by their sources' one-hot classes from D2a: an
 	// AND-OR, not the selector's decode; A takes the word's constant when
 	// it has no immediate of its own)
 	nu.imm    = imm_val(b_ia, src, uw.cval, b_npc);
 	nu.imm_b  = imm_val(b_ib, src, uw.cval, b_npc);
 	// synthesis translate_off
-	dbg_imm = (nu.imm == (oa.imm_v ? oa.imm : {{16{uw.cval[15]}}, uw.cval})) && (nu.imm_b == ob.imm);
+	dbg_imm = (nu.imm == (oa.imm_v ? oa.imm : {{16{uw.cval[15]}}, uw.cval})) && (nu.imm_b == ob.imm) &&
+	          {oa.v, oa.src, oa.r} == b_oa && {ob.v, ob.src, ob.r} == b_ob && {od.v, od.src, od.r} == b_od;
 	// synthesis translate_on
 	nu.mfc    = (uw.mfc == MFC_EAP) ? MFC_NORM : uw.mfc;
 	nu.dyn    = uw.dyn;
@@ -493,9 +554,9 @@ always_comb begin
 	nu.exc    = (src.exc != 8'd0) ? src.exc : 8'd0;
 
 	// destination
-	if (od.v && od.src == OS_REG) begin
+	if (b_od.v && b_od.src == OS_REG) begin
 		nu.d_v   = 1'b1;
-		nu.d_reg = od.r;
+		nu.d_reg = b_od.r;
 	end
 
 	//----------------------------------------------------------------------
@@ -507,7 +568,7 @@ always_comb begin
 	me_ea1 = b_me1;
 	me     = bme;
 	me_sp  = (me.r == 3'd7);
-	amt    = size_bytes(msz, me_sp && (me.m == EM_AIP || me.m == EM_APD));
+	amt    = me_ea1 ? b_amt1 : b_amt0;       // (used by (An)+ and -(An) only)
 	nu.mem = b_mem;
 
 	if (b_agin) begin
@@ -523,12 +584,10 @@ always_comb begin
 			end
 			EM_APD: begin
 				nu.base_v = 1'b1; nu.base = bre;
-				nu.disp = neg5(amt);
 				nu.upd_v = 1'b1; nu.upd_reg = bre;
 			end
-			EM_AD16: begin nu.base_v = 1'b1; nu.base = bre; nu.disp = me.bd; end
-			EM_ABSW, EM_ABSL: nu.disp = me.bd;
-			EM_PC16: begin nu.disp = me.bd; nu.mprog = 1'b1; end   // D1 added the PC
+			EM_AD16: begin nu.base_v = 1'b1; nu.base = bre; end
+			EM_PC16: nu.mprog = 1'b1;          // (D1 added the PC)
 			EM_AX, EM_PCX: begin
 				logic [4:0] xr;
 				xr = me.xa ? areg(me.xr, sp_reg) : dreg(me.xr);
@@ -542,13 +601,12 @@ always_comb begin
 				if (me.mi == 2'd0) begin
 					nu.base_v = nb_v1.base_v; nu.base = nb_v1.base;
 					nu.idx_v = nb_v1.idx_v; nu.idx = nb_v1.idx; nu.idx_l = nb_v1.idx_l;
-					nu.scale = nb_v1.scale; nu.disp = nb_v1.disp; nu.mprog = nb_v1.mprog;
+					nu.scale = nb_v1.scale; nu.mprog = nb_v1.mprog;
 				end
 				else begin
 					// through the pointer: T13 (EA0) / T12 (EA1) + index + od
 					nu.base_v = 1'b1;
 					nu.base   = me_ea1 ? (R_T0 + 5'd12) : (R_T0 + 5'd13);
-					nu.disp   = me.od;
 					nu.idx_v  = !me.is && (me.mi == 2'd2);
 					nu.idx    = xr;
 					nu.idx_l  = me.xl;
@@ -558,6 +616,21 @@ always_comb begin
 			end
 			default: ;
 		endcase
+		// the displacement, by the memory EA's kind (D1's, in the record):
+		// bd, od (through the pointer), -(An)'s step
+		case (me_ea1 ? src.eak[7:6] : src.eak[5:4])
+			2'd1:    nu.disp = me.bd;
+			2'd2:    nu.disp = me.od;
+			2'd3:    nu.disp = neg5(amt);
+			default: nu.disp = 32'd0;
+		endcase
+		// synthesis translate_off
+		dbg_med = ((me.m == EM_APD) ? neg5(size_bytes(msz, me_sp)) :
+		           ((me.m == EM_AX || me.m == EM_PCX) && me.mi != 2'd0) ? me.od :
+		           (me.m == EM_AD16 || me.m == EM_ABSW || me.m == EM_ABSL || me.m == EM_PC16 ||
+		            me.m == EM_AX || me.m == EM_PCX) ? me.bd : 32'd0) != nu.disp ||
+		          ((me.m == EM_AIP || me.m == EM_APD) && amt != size_bytes(msz, me_sp));
+		// synthesis translate_on
 
 		// deferral of the source update into a later uop
 		if (uw.noupd && !me_ea1 && (me.m == EM_AIP || me.m == EM_APD)) begin
@@ -595,7 +668,6 @@ always_comb begin
 	begin
 		logic [4:0]  rb, rw;
 		logic        rb_v;
-		logic [31:0] dsv;
 		rb_v = (uw.agb != S_NONE) && (uw.agb != S_ZERO);
 		case (uw.agb)
 			S_X1R: rb = src.ext1[15] ? areg(src.ext1[14:12], sp_reg) : dreg(src.ext1[14:12]);
@@ -613,11 +685,9 @@ always_comb begin
 			S_SSP: rw = ssp;
 			default: rw = 5'(uw.agw - 6'd25);
 		endcase
-		dsv = b_dsv;                    // (D2a's: its sums and negations)
 		case (uw.ag)
 			AGM_PUSH: begin
 				nu.ag = 1'b1; nu.base_v = 1'b1; nu.base = sp_reg;
-				nu.disp = neg5(size_bytes(msz, 1'b1));
 				nu.upd_v = 1'b1; nu.upd_reg = sp_reg;
 			end
 			AGM_POP: begin
@@ -631,7 +701,7 @@ always_comb begin
 				nu.upd_amt = {3'd0, size_bytes(msz, 1'b0)};
 			end
 			AGM_BASED, AGM_BASEDU: begin
-				nu.ag = 1'b1; nu.base_v = rb_v; nu.base = rb; nu.disp = dsv;
+				nu.ag = 1'b1; nu.base_v = rb_v; nu.base = rb;
 				if (uw.ag == AGM_BASEDU) begin
 					nu.upd_v = 1'b1;
 					nu.upd_reg = (uw.agw != S_NONE) ? rw : rb;
@@ -641,15 +711,13 @@ always_comb begin
 				end
 			end
 			AGM_ADDC: begin
-				nu.ag = 1'b1; nu.base_v = rb_v; nu.base = rb; nu.disp = dsv;
+				nu.ag = 1'b1; nu.base_v = rb_v; nu.base = rb;
 				nu.upd_v = 1'b1; nu.upd_reg = rw;
 			end
 			AGM_VAL0, AGM_ADDV: begin
 				nu.ag = 1'b1;
 				nu.base_v = (uw.ag == AGM_ADDV); nu.base = rb;
-				if (src.ea0.m == EM_IMM)
-					nu.disp = (src.sz == SZ_W) ? {{16{src.ea0.bd[15]}}, src.ea0.bd[15:0]} : src.ea0.bd;
-				else begin
+				if (src.ea0.m != EM_IMM) begin
 					nu.idx_v = 1'b1;
 					nu.idx   = (src.ea0.m == EM_AN) ? areg(src.ea0.r, sp_reg) : dreg(src.ea0.r);
 					nu.idx_l = (src.sz == SZ_L);
@@ -674,12 +742,9 @@ always_comb begin
 				if (src.ea0.m == EM_AIP || src.ea0.m == EM_APD) begin
 					nu.ag = 1'b1; nu.base_v = 1'b1; nu.base = areg(src.ea0.r, sp_reg);
 					nu.idx_v = 1'b0; nu.pinc = 1'b0;
-					nu.disp = (src.ea0.m == EM_APD) ? neg7(fp_size) : 32'd0;
 				end
 				else if (src.ea0.m == EM_IMM) begin
 					nu.ag = 1'b1; nu.base_v = 1'b0; nu.idx_v = 1'b0; nu.pinc = 1'b0;
-					nu.disp = src.ea0.bd + ((src.ext1[15:13] == 3'b010 &&
-					                         src.ext1[12:10] == 3'd6) ? 32'd1 : 32'd0);
 					nu.mprog = 1'b1;
 				end
 				nu.upd_v = 1'b1; nu.upd_reg = rw;
@@ -688,12 +753,14 @@ always_comb begin
 				if (src.ea0.m == EM_AIP || src.ea0.m == EM_APD) begin
 					nu.ag = 1'b1; nu.base_v = 1'b1; nu.base = areg(src.ea0.r, sp_reg);
 					nu.idx_v = 1'b0; nu.pinc = 1'b0;
-					nu.disp = (src.ea0.m == EM_APD) ? neg7(fp_size) : {25'd0, fp_size};
 					nu.upd_v = 1'b1; nu.upd_reg = areg(src.ea0.r, sp_reg);
 				end
 			end
 			default: ;
 		endcase
+		// the mode's displacement (PUSH, BASED, ADDC, VAL0/ADDV of an
+		// immediate, FEA and FUPD of (An)+/-(An)/#imm): D2a's, whole
+		if (b_dov) nu.disp = b_dsv;
 	end
 
 	// FMOVEM of control registers: a slot whose register is not in the
@@ -840,8 +907,9 @@ always_comb begin
 	dmerge = 1'b0;
 	if (c_upd2 && def_v) begin
 		logic same;
-		same = cu.ag && cu.base_v && cu.base == def_reg &&
-		       (c_memi == 2'd0 || !(c_me1 ? ind1 : ind0));
+		// (the base's compare with the deferred register and the merged
+		// step: registers, formed as the word entered D2c)
+		same = c_bok && c_beq && (c_memi == 2'd0 || !(c_me1 ? ind1 : ind0));
 		// MOVE16 (Ax)+,(Ay)+ with Ax = Ay: both transfers use the original
 		// address and the register advances once (WinUAE, the cputest
 		// oracle); CMPM-style pairs see the first update
@@ -850,7 +918,7 @@ always_comb begin
 		end
 		else if (same) begin
 			dmerge = 1'b1;
-			if (c_mem_aip) nu.upd_amt = cu.upd_amt + def_amt;
+			if (c_mem_aip) nu.upd_amt = c_mamt;
 		end
 		if (!(same && (c_aipd || c_m16))) begin
 			nu.upd2_v   = 1'b1;
@@ -920,25 +988,33 @@ function automatic logic omem(input logic [5:0] s, input dinst_t r, output logic
 	omem = (s == S_EA0 && !(r.ea0.m == EM_DN || r.ea0.m == EM_AN || r.ea0.m == EM_IMM)) ||
 	       (s == S_EA1 && !(r.ea1.m == EM_DN || r.ea1.m == EM_AN || r.ea1.m == EM_IMM));
 endfunction
+// (the same from the record's EA kinds, D1's: no mode decode here)
+function automatic logic omemk(input logic [5:0] s, input logic [7:0] k, output logic e1);
+	e1    = (s == S_EA1);
+	omemk = (s == S_EA0 && k[0]) || (s == S_EA1 && k[1]);
+endfunction
 
 logic a_pc0, a_pc1, a_base_in, a_fb_in, a_fx_in, a_e1pc1;
 logic        a_mev, a_me1, a_agin;
 logic [12:0] a_ia, a_ib;
 logic  [1:0] a_mem;
 logic [31:0] a_dsv;
+logic        a_dov;
+osel_t       a_oa, a_ob, a_od;
+logic  [4:0] a_amt0, a_amt1;
 logic [15:0] a_low1;
 logic  [3:0] a_bi1;
 always_comb begin
 	logic ma, mb, md, ea, eb, ed, mv, e1, agin, c;
-	logic [31:0] q;
-	logic [3:0] m;
-	logic [1:0] mi;
+	logic [31:0] q, dsv;
+	logic [2:0] mszf;
+	logic [6:0] fps;
 	logic [4:0] spr, an, xreg;
 	logic pdm, pim;
 	// the uop's memory EA (as the build below selects it)
-	ma = omem(ur.a, as, ea);
-	mb = omem(ur.b, as, eb);
-	md = omem(ur.d, as, ed);
+	ma = omemk(ur.a, as.eak, ea);
+	mb = omemk(ur.b, as.eak, eb);
+	md = omemk(ur.d, as.eak, ed);
 	mv = ma || mb || md;
 	e1 = ma ? ea : mb ? eb : ed;
 	if (ur.ag == AGM_EA0 || ur.ag == AGM_LEA0 || ur.ag == AGM_FEA) e1 = 1'b0;
@@ -951,6 +1027,9 @@ always_comb begin
 	a_ia   = imm_cls(ur.a, as);
 	if (a_ia == 13'd0) a_ia = 13'h0080;       // (A without one: the word's constant)
 	a_ib   = imm_cls(ur.b, as);
+	a_oa   = osel(ur.a, as, sp_reg, ssp);
+	a_ob   = osel(ur.b, as, sp_reg, ssp);
+	a_od   = osel(ur.d, as, sp_reg, ssp);
 	if (ur.mem != 2'd0)
 		a_mem = ur.mem;
 	else if (ur.a == S_LD || ur.b == S_LD)
@@ -961,24 +1040,55 @@ always_comb begin
 		else                  a_mem = M_LD;
 	end
 	else a_mem = M_NONE;
-	// an explicit AG mode's displacement
+	// an explicit AG mode's displacement, whole (a_dov: the mode sets
+	// one): D2b takes it or the memory EA's, no arithmetic or mode decode
+	// there
 	q = (as.opw[11:9] == 3'd0) ? 32'd8 : {29'd0, as.opw[11:9]};
 	case (ur.dsel)
-		DS_IMM:    a_dsv = as.imm;
-		DS_NIMM:   a_dsv = -((as.sz == SZ_W) ? {{16{as.ea0.bd[15]}}, as.ea0.bd[15:0]} : as.ea0.bd);
-		DS_QUICK:  a_dsv = q;
-		DS_NQUICK: a_dsv = neg5(q[4:0]);      // q: 1..8
-		DS_IMMC:   a_dsv = as.imm + {{16{ur.cval[15]}}, ur.cval};
-		DS_SZB:    a_dsv = {27'd0, size_bytes(as.sz, 1'b0)};
-		default:   a_dsv = {{16{ur.cval[15]}}, ur.cval};
+		DS_IMM:    dsv = as.imm;
+		DS_NIMM:   dsv = -((as.sz == SZ_W) ? {{16{as.ea0.bd[15]}}, as.ea0.bd[15:0]} : as.ea0.bd);
+		DS_QUICK:  dsv = q;
+		DS_NQUICK: dsv = neg5(q[4:0]);      // q: 1..8
+		DS_IMMC:   dsv = as.imm + {{16{ur.cval[15]}}, ur.cval};
+		DS_SZB:    dsv = {27'd0, size_bytes(as.sz, 1'b0)};
+		default:   dsv = {{16{ur.cval[15]}}, ur.cval};
+	endcase
+	mszf = (ur.msz == 3'd0) ? {1'b0, as.sz} : (ur.msz - 3'd1);
+	fps  = fpsz(as.ext1, as.ea0.r);
+	// (An)+/-(An)'s step for either EA (a byte through A7 moves it by two)
+	a_amt0 = size_bytes(mszf[1:0], as.ea0.r == 3'd7);
+	a_amt1 = size_bytes(mszf[1:0], as.ea1.r == 3'd7);
+	a_dov = 1'b0;
+	a_dsv = dsv;
+	case (ur.ag)
+		AGM_PUSH: begin a_dov = 1'b1; a_dsv = neg5(size_bytes(mszf[1:0], 1'b1)); end
+		AGM_BASED, AGM_BASEDU, AGM_ADDC: a_dov = 1'b1;
+		AGM_VAL0, AGM_ADDV:
+			if (as.ea0.m == EM_IMM) begin
+				a_dov = 1'b1;
+				a_dsv = (as.sz == SZ_W) ? {{16{as.ea0.bd[15]}}, as.ea0.bd[15:0]} : as.ea0.bd;
+			end
+		AGM_FEA:
+			if (as.ea0.m == EM_AIP || as.ea0.m == EM_APD) begin
+				a_dov = 1'b1;
+				a_dsv = (as.ea0.m == EM_APD) ? neg7(fps) : 32'd0;
+			end
+			else if (as.ea0.m == EM_IMM) begin
+				a_dov = 1'b1;
+				a_dsv = as.ea0.bd + ((as.ext1[15:13] == 3'b010 && as.ext1[12:10] == 3'd6) ? 32'd1 : 32'd0);
+			end
+		AGM_FUPD:
+			if (as.ea0.m == EM_AIP || as.ea0.m == EM_APD) begin
+				a_dov = 1'b1;
+				a_dsv = (as.ea0.m == EM_APD) ? neg7(fps) : {25'd0, fps};
+			end
+		default: ;
 	endcase
 	// MOVEM's first transfer: the mask's lowest bit
 	a_low1 = as.ext1 & (~as.ext1 + 16'd1);
 	a_bi1  = 4'd0;
 	for (int i = 15; i >= 0; i--) if (as.ext1[i]) a_bi1 = 4'(i);
-	m  = e1 ? as.ea1.m : as.ea0.m;
-	mi = e1 ? as.ea1.mi : as.ea0.mi;
-	c  = agin && (m == EM_AX || m == EM_PCX) && mi != 2'd0;
+	c  = agin && (e1 ? as.eak[3] : as.eak[2]);
 	a_pc0 = c && !e1;
 	a_pc1 = c && e1;
 	// MOVEM: a base or index register in a load list (see the loop below)
@@ -1015,6 +1125,8 @@ wire done   = emit && !c_stay_q && c_last;                 // instruction ends
 wire c_free = !c_v || (c_step && !c_stay_q);
 wire b_go   = b_v && c_free;                               // D2b's word to D2c
 wire b_free = !b_v || c_free;                              // (registers only)
+// D2c's uop sets the deferred update (the source EA's) this clock
+wire def_ld = emit && !n_ptr && !n_mv_pre && !(c_loop && c_stay_q) && c_def_set;
 logic        c_me1;             // the memory EA is EA1
 
 //--------------------------------------------------------------------------
@@ -1064,6 +1176,12 @@ endfunction
 logic  [9:0] na;          // next microcode address
 logic        nv;
 ukind_t      nk;          // ... its kind
+logic        x_go;        // the back end's exception entry, a clock on
+logic  [3:0] x_kind;
+always_ff @(posedge clk) begin
+	x_go   <= nrst && exc_go;
+	x_kind <= exc_kind;
+end
 always_comb begin
 	na = upc;
 	nv = a_v;
@@ -1087,8 +1205,11 @@ always_comb begin
 		nv = 1'b1;
 	end
 	if (flush) nv = 1'b0;
-	if (exc_go) begin
-		case (exc_kind)
+	// the exception routine starts the clock after the back end's entry,
+	// from its kind registered here (the entry, a far register, only
+	// empties D2a in its own clock: it is not on the ROM's address)
+	if (x_go && !flush) begin
+		case (x_kind)
 			4'd1:    begin na = UA_EXC_FMT2;  nk = UK_EXC_FMT2;  end
 			4'd2:    begin na = UA_EXC_FMT4;  nk = UK_EXC_FMT4;  end
 			4'd3:    begin na = UA_EXC_IRQ;   nk = UK_EXC_IRQ;   end
@@ -1097,6 +1218,7 @@ always_comb begin
 		endcase
 		nv = 1'b1;
 	end
+	if (exc_go) nv = 1'b0;
 end
 
 // the microcode ROM in block RAM: its address register is the sequencing
@@ -1149,9 +1271,9 @@ end
 (* keep *) wire [$bits(uop_t)-1:0] uq1_p;
 (* keep *) wire [$bits(uop_t)-1:0] uq1_h;
 assign uq0_h = (emit && uq_n == 2'd0) ? nu : uq0;
-assign uq0_p = (uq_n == 2'd0) ? uq0_h : (emit && uq_n == 2'd1) ? nu : uq1;
+assign uq0_p = (emit && !uq_n[1]) ? nu : (uq_n == 2'd0) ? uq0 : uq1;   // (not through uq0_h)
 assign uq1_h = (emit && uq_n == 2'd1) ? nu : uq1;
-assign uq1_p = (uq_n == 2'd0) ? uq1_h : (emit && uq_n == 2'd2) ? nu : uq1;
+assign uq1_p = uq1;            // (a pop leaves no uop for uq1: D2c emits only below two)
 
 //--------------------------------------------------------------------------
 // the stages' data and the uop FIFO's: no reset (the valid bits and the
@@ -1177,6 +1299,12 @@ always_ff @(posedge clk) begin
 		b_e1pc3  <= pcle(as.ext1, 2'd3);
 		b_mem    <= a_mem;
 		b_dsv    <= a_dsv;
+		b_dov    <= a_dov;
+		b_oa     <= a_oa;
+		b_ob     <= a_ob;
+		b_od     <= a_od;
+		b_amt0   <= a_amt0;
+		b_amt1   <= a_amt1;
 		b_low1   <= a_low1;
 		b_bi1    <= a_bi1;
 		b_npc    <= a_npc;
@@ -1213,6 +1341,11 @@ always_ff @(posedge clk) begin
 		c_an     <= areg(rb.ea0.r, sp_reg);
 		c_xreg   <= rb.ea0.xa ? areg(rb.ea0.xr, sp_reg) : dreg(rb.ea0.xr);
 		c_last   <= ub.last;
+		// (against the deferred update as it will be: one D2c is emitting
+		// now lands with this clock)
+		c_bok    <= nb.ag && nb.base_v;
+		c_beq    <= nb.base == (def_ld ? c_def_reg : def_reg);
+		c_mamt   <= nb.upd_amt + (def_ld ? c_def_amt : def_amt);
 	end
 	// MOVEM's transfer terms: the first transfer's as the word enters D2c,
 	// the next one's as a transfer is emitted (the word stays: D2c takes
@@ -1410,6 +1543,61 @@ always_ff @(posedge clk)
 	end
 // the registered forms against the combinational ones
 always_ff @(posedge clk)
+	if (nrst && c_v && c_upd2 && def_v &&
+	    (c_bok != (cu.ag && cu.base_v) || c_beq != (cu.base == def_reg) ||
+	     c_mamt != cu.upd_amt + def_amt)) begin
+		$display("FAIL: useq: the deferred update's merge terms");
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst && a_v && !a_exc && as.eak[3:0] != {(as.ea1.m == EM_AX || as.ea1.m == EM_PCX) && as.ea1.mi != 2'd0,
+	                                       (as.ea0.m == EM_AX || as.ea0.m == EM_PCX) && as.ea0.mi != 2'd0,
+	                                       !(as.ea1.m == EM_DN || as.ea1.m == EM_AN || as.ea1.m == EM_IMM),
+	                                       !(as.ea0.m == EM_DN || as.ea0.m == EM_AN || as.ea0.m == EM_IMM)}) begin
+		$display("FAIL: useq: the record's EA kinds %b", as.eak);
+		$finish;
+	end
+// the explicit AG mode's displacement D2a formed, against D2b's word and
+// record (BASED/ADDC: the selector's value itself is D2a's)
+always_ff @(posedge clk)
+	if (nrst && b_v) begin
+		logic        ov, ck;
+		logic [31:0] ovv;
+		logic  [2:0] mf;
+		mf  = (ub.msz == 3'd0) ? {1'b0, rb.sz} : (ub.msz - 3'd1);
+		ov  = 1'b0;
+		ck  = 1'b0;
+		ovv = '0;
+		case (ub.ag)
+			AGM_PUSH: begin ov = 1'b1; ck = 1'b1; ovv = neg5(size_bytes(mf[1:0], 1'b1)); end
+			AGM_BASED, AGM_BASEDU, AGM_ADDC: ov = 1'b1;
+			AGM_VAL0, AGM_ADDV:
+				if (rb.ea0.m == EM_IMM) begin
+					ov = 1'b1; ck = 1'b1;
+					ovv = (rb.sz == SZ_W) ? {{16{rb.ea0.bd[15]}}, rb.ea0.bd[15:0]} : rb.ea0.bd;
+				end
+			AGM_FEA:
+				if (rb.ea0.m == EM_AIP || rb.ea0.m == EM_APD) begin
+					ov = 1'b1; ck = 1'b1;
+					ovv = (rb.ea0.m == EM_APD) ? neg7(fp_size) : 32'd0;
+				end
+				else if (rb.ea0.m == EM_IMM) begin
+					ov = 1'b1; ck = 1'b1;
+					ovv = rb.ea0.bd + ((rb.ext1[15:13] == 3'b010 && rb.ext1[12:10] == 3'd6) ? 32'd1 : 32'd0);
+				end
+			AGM_FUPD:
+				if (rb.ea0.m == EM_AIP || rb.ea0.m == EM_APD) begin
+					ov = 1'b1; ck = 1'b1;
+					ovv = (rb.ea0.m == EM_APD) ? neg7(fp_size) : {25'd0, fp_size};
+				end
+			default: ;
+		endcase
+		if (ov != b_dov || (ck && ovv != b_dsv)) begin
+			$display("FAIL: useq: an AG mode's displacement %b %h, D2b's %b %h", b_dov, b_dsv, ov, ovv);
+			$finish;
+		end
+	end
+always_ff @(posedge clk)
 	if (nrst && a_pl != (a_v && a_k.last && !a_k.jmp && !a_exc)) begin
 		$display("FAIL: useq: the pop term a_pl");
 		$finish;
@@ -1454,8 +1642,13 @@ always_ff @(posedge clk)
 // the immediates by class against the selectors', B's update read, the
 // MOVEM count terms
 always_ff @(posedge clk)
+	if (nrst && b_v && dbg_med) begin
+		$display("FAIL: useq: the memory EA's displacement by the record's kind at %0d", upc);
+		$finish;
+	end
+always_ff @(posedge clk)
 	if (nrst && b_v && !dbg_imm) begin
-		$display("FAIL: useq: an operand immediate by class at %0d", upc);
+		$display("FAIL: useq: an operand's terms (its immediate by class, D2a's register) at %0d", upc);
 		$finish;
 	end
 always_ff @(posedge clk)

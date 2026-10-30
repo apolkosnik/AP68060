@@ -365,6 +365,9 @@ typedef struct packed {
 	logic  [1:0] bhc;     // Bcc: its history counter as D1 read it
 	ras_snap_t   ras;     // D1's return stack before this instruction
 	logic [18:0] k0;      // the kind of its first micro-instruction (ukind_t)
+	logic  [7:0] eak;     // the EAs' kinds, for D2: {EA1, EA0 displacement (0
+	                      // none, 1 bd, 2 od, 3 -(An)'s), EA1, EA0 memory
+	                      // indirect, EA1, EA0 in memory (not Dn, An, #imm)}
 } dinst_t;
 
 endpackage

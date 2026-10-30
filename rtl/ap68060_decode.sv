@@ -161,6 +161,18 @@ function automatic logic [31:0] ea_pcd(input logic [3:0] idx, input logic [15:0]
                                        input logic [15:0] w1, input logic [15:0] w2);
 	ea_pcd = (idx == EM_PC16) ? sx16(w0) : ea_bdx(w0, w1, w2);
 endfunction
+// a one-pass instruction's EA displacement from its two words (mk_ea's,
+// brief extensions; the PC-relative modes' is the PC sum, added apart)
+function automatic logic [31:0] ea_fbd(input logic [3:0] idx, input logic [2:0] immlen,
+                                       input logic [15:0] w0, input logic [15:0] w1);
+	case (idx)
+		EM_AD16, EM_ABSW: ea_fbd = sx16(w0);
+		EM_ABSL:          ea_fbd = {w0, w1};
+		EM_IMM:           ea_fbd = (immlen == 3'd1) ? {16'd0, w0} : {w0, w1};
+		EM_AX:            ea_fbd = {{24{w0[7]}}, w0[7:0]};
+		default:          ea_fbd = 32'd0;
+	endcase
+endfunction
 
 // EA record from its extension words w0.. at instruction word offset p;
 // pcs: the PC-relative modes' address, the extension word's address plus
@@ -211,6 +223,25 @@ function automatic ea_t mk_ea(input logic [3:0] idx, input logic [2:0] r,
 		default: ;
 	endcase
 	mk_ea = e;
+endfunction
+
+// the EAs' kinds D2 selects on: {EA1, EA0 displacement, EA1, EA0 memory
+// indirect, EA1, EA0 in memory}
+function automatic logic [1:0] ea_dk(input ea_t e);
+	case (e.m)
+		EM_APD:                               ea_dk = 2'd3;
+		EM_AX, EM_PCX:                        ea_dk = (e.mi != 2'd0) ? 2'd2 : 2'd1;
+		EM_AD16, EM_ABSW, EM_ABSL, EM_PC16:   ea_dk = 2'd1;
+		default:                              ea_dk = 2'd0;
+	endcase
+endfunction
+function automatic logic [7:0] ea_kind(input ea_t e1, input ea_t e0);
+	ea_kind[0]   = !(e0.m == EM_DN || e0.m == EM_AN || e0.m == EM_IMM);
+	ea_kind[1]   = !(e1.m == EM_DN || e1.m == EM_AN || e1.m == EM_IMM);
+	ea_kind[2]   = (e0.m == EM_AX || e0.m == EM_PCX) && e0.mi != 2'd0;
+	ea_kind[3]   = (e1.m == EM_AX || e1.m == EM_PCX) && e1.mi != 2'd0;
+	ea_kind[5:4] = ea_dk(e0);
+	ea_kind[7:6] = ea_dk(e1);
 endfunction
 
 // effective first micro-instruction given the routine's leading jump
@@ -528,6 +559,9 @@ logic        ir_flt;        // a fault in the words taken
 logic [15:0] ir_w [5];      // the words at the head
 ea_t         ir_ea0, ir_ea1; // the EAs, formed in D1a (a part's: its own)
 logic        ir_epc;        // ... EA0's (a part's) displacement is the PC sum
+logic        ir_e0f, ir_e1f; // ... a one-pass instruction's displacement is
+logic [15:0] ir_e0 [2];     // formed in D1b from its EA's two words
+logic [15:0] ir_e1 [2];
 pd_t         ir_pd;         // the instruction's predecode (its first part's)
 logic [31:0] ir_pc;         // the part's address
 logic  [3:0] ir_len;        // ... and with it
@@ -540,6 +574,7 @@ logic [10:0] ir_fpk;        // FPU straight-line routine (valid, address)
 logic [18:0] ir_fpkk;       // ... its first word's kind
 logic [31:0] ir_imm;
 logic  [7:0] ir_exc;        // exception vector (a fault's included)
+logic        ir_xany;       // ... it is one (ir_exc != 0)
 logic [31:0] ir_faddr;      // a fault's address
 logic        ir_jtake;      // the routine's first jump is taken
 logic        ir_jsrk;       // JSR to a known target
@@ -704,7 +739,7 @@ always_ff @(posedge clk) begin
 			// 0; the fixed operand forms.  (A PC-relative displacement is
 			// the PC sum D1b adds in: ir_epc.)
 			ea_t        e0, e1, ep;
-			logic       fast, pc0;
+			logic       fast, pc0, f0, f1;
 			logic [3:0] ip;
 			fast = pd0.legal && !pd0.slow && !full0 && !full1 && (pd0.tot <= 4'd7);
 			ip   = (ph == PH_EA0) ? part_pd.i0 : part_pd.i1;
@@ -714,16 +749,23 @@ always_ff @(posedge clk) begin
 			e0   = '0;
 			e1   = '0;
 			pc0  = 1'b0;
+			f0   = 1'b0;
+			f1   = 1'b0;
 			if (!(q_odd && qcnt == 4'd0)) begin
 				e0.m = EM_NONE;
 				e1.m = EM_NONE;
 				if (pd0.legal) begin
 					if (fast) begin
+						// (the displacements: D1b's, from the words, f0/f1)
 						e0  = mk_ea(pd0.i0, win[0][2:0], {1'b0, pd0.b},
 						            (pd0.sz == SZ_L) ? 3'd2 : 3'd1, 32'd0,
 						            win[fb], win[3'(fb + 3'd1)], 16'd0, 16'd0, 16'd0);
 						e1  = mk_ea(pd0.i1, win[0][11:9], {1'b0, pd0.p1}, 3'd0, 32'd0,
 						            win[fp1], win[3'(fp1 + 3'd1)], 16'd0, 16'd0, 16'd0);
+						e0.bd = 32'd0;
+						e1.bd = 32'd0;
+						f0  = 1'b1;
+						f1  = 1'b1;
 						pc0 = (pd0.i0 == EM_PC16) || (pd0.i0 == EM_PCX && !e0.bs);
 					end
 					else begin
@@ -735,6 +777,8 @@ always_ff @(posedge clk) begin
 					// fixed operand forms: (Ay)+,(Ax)+ and -(Ay),-(Ax); MOVE16
 					if (pd0.fea == 2'd3) begin
 						pc0 = 1'b0;
+						f0  = 1'b0;
+						f1  = 1'b0;
 						if (win[0][5]) begin
 							e0.m = EM_AIP; e0.r = win[0][2:0];
 							e1.m = EM_AIP; e1.r = win[1][14:12];
@@ -759,6 +803,12 @@ always_ff @(posedge clk) begin
 			ir_ea0 <= (ph == PH_IDLE) ? e0 : ep;
 			ir_ea1 <= (ph == PH_IDLE) ? e1 : ep;
 			ir_epc <= (ph == PH_IDLE) ? pc0 : ((ip == EM_PC16) || (ip == EM_PCX && !ep.bs));
+			ir_e0f <= (ph == PH_IDLE) && f0 && !pc0;
+			ir_e1f <= (ph == PH_IDLE) && f1;
+			ir_e0[0] <= win[fb];
+			ir_e0[1] <= win[3'(fb + 3'd1)];
+			ir_e1[0] <= win[fp1];
+			ir_e1[1] <= win[3'(fp1 + 3'd1)];
 		end
 		ir_pc    <= qpc;
 		ir_len   <= ((ph == PH_IDLE) ? 4'd0 : part_len) + {1'b0, u_use};
@@ -787,14 +837,22 @@ always_ff @(posedge clk) begin
 		            (pd0.cls == CL_RTS) ? 2'd2 : 2'd0;
 		ir_imm   <= a_imm;
 		// the exception: a fault in the words taken goes first
-		if ((win_flt & umask[15:8]) != 8'd0)
-			ir_exc <= f_code;
-		else if (ph == PH_IDLE && q_odd && qcnt == 4'd0)
-			ir_exc <= 8'd3;
-		else if (ph == PH_IDLE)
-			ir_exc <= x_exc;
-		else
-			ir_exc <= 8'd0;
+		if ((win_flt & umask[15:8]) != 8'd0) begin
+			ir_exc  <= f_code;
+			ir_xany <= 1'b1;
+		end
+		else if (ph == PH_IDLE && q_odd && qcnt == 4'd0) begin
+			ir_exc  <= 8'd3;
+			ir_xany <= 1'b1;
+		end
+		else if (ph == PH_IDLE) begin
+			ir_exc  <= x_exc;
+			ir_xany <= x_exc != 8'd0;
+		end
+		else begin
+			ir_exc  <= 8'd0;
+			ir_xany <= 1'b0;
+		end
 		ir_faddr <= f_addr;
 		ir_jtake <= a_jtake;
 		ir_jsrk  <= (pd0.cls == CL_JSR) && u_go && !u_part &&
@@ -974,10 +1032,12 @@ always_comb begin
 		nrec.pc    = ir_pc;
 		nrec.ilen  = ir_len;
 		nrec.exc   = ir_exc;
-		// (the EAs: D1a's)
+		// (the EAs: D1a's; a one-pass instruction's displacements here)
 		nrec.ea0 = ir_ea0;
 		if (ir_epc) nrec.ea0.bd = ir_pcs0;
+		if (ir_e0f) nrec.ea0.bd = ea_fbd(ir_pd.i0, (ir_pd.sz == SZ_L) ? 3'd2 : 3'd1, ir_e0[0], ir_e0[1]);
 		nrec.ea1 = ir_ea1;
+		if (ir_e1f) nrec.ea1.bd = ea_fbd(ir_pd.i1, 3'd0, ir_e1[0], ir_e1[1]);
 		if (!ir_odd) begin
 			nrec.opw   = ir_w[0];
 			nrec.ext1  = ir_w[1];
@@ -998,7 +1058,7 @@ always_comb begin
 				end
 			end
 		end
-		if (ir_exc != 8'd0) nrec.rt = UA_DEC_EXC;
+		if (ir_xany) nrec.rt = UA_DEC_EXC;
 
 		// PC-relative branches: target and prediction
 		if (ir_pd.legal && !ir_odd) case (ir_pd.cls)
@@ -1052,22 +1112,17 @@ always_comb begin
 		nrec.target = flt ? ir_faddr :
 		              (ir_tsel == 2'd1) ? ir_ntgt :
 		              (ir_tsel == 2'd2 && ras_n != 4'd0) ? ras_top : 32'd0;
-		nrec.pred   = nredir && (ir_exc == 8'd0) && ir_pd.legal && !ir_odd;
+		nrec.pred   = nredir && !ir_xany && ir_pd.legal && !ir_odd;
 	end
 end
 
 // synthesis translate_off
 // the EAs D1a formed against the one-clock form from IR's words
 logic        ir_fast;
-logic [15:0] ir_e0 [2], ir_e1 [2];
 logic  [3:0] ir_plen;
 logic  [2:0] ir_il;
 always_ff @(posedge clk) begin
 	ir_fast  <= pd0.legal && !pd0.slow && !full0 && !full1 && (pd0.tot <= 4'd7);
-	ir_e0[0] <= win[fb];
-	ir_e0[1] <= win[3'(fb + 3'd1)];
-	ir_e1[0] <= win[fp1];
-	ir_e1[1] <= win[3'(fp1 + 3'd1)];
 	ir_plen  <= (ph == PH_IDLE) ? 4'd0 : part_len;
 	ir_il    <= (ph == PH_EA0) ? part_imml : 3'd0;
 end
@@ -1143,7 +1198,7 @@ always_comb begin
 	logic  [9:0] rt_b;
 	logic [18:0] k0_b;
 	snr     = ir_go && (ir_bt_restart || part_bt);
-	exc_any = (ir_ph == PH_IDLE) ? (ir_exc != 8'd0) : ir_flt;
+	exc_any = (ir_ph == PH_IDLE) ? ir_xany : ir_flt;
 	if (ir_ph != PH_IDLE) begin
 		rt_b = part.rt;
 		k0_b = part.k0;
@@ -1182,6 +1237,7 @@ always_comb begin
 	// a branch the fetch already took, as D1 decodes it (the branch cache's
 	// prediction, confirmed)
 	nrec_q.bcp = (ir_ph == PH_IDLE) && ir_bt_end && nrec.pred && teq;
+	nrec_q.eak = ea_kind(nrec.ea1, nrec.ea0);
 	if (ir_go && (ir_bt_restart || part_bt)) begin
 		nrec_q.bcp  = 1'b0;
 		nrec_q.exc  = EXC_SNR;
@@ -1215,7 +1271,8 @@ always @(posedge clk)
 // synthesis translate_on
 
 wire  push = ir_ok && ir_go;
-wire  pop  = rq_pop && (rq_n != 3'd0);
+// (D2 pops only a record it is sequencing: rq0's, rq_n > 0)
+wire  pop  = rq_pop;
 // (the FIFO's data are written by IR's own flags; a write a kill drops
 // lands past the count: the kills, far or late, only touch the count)
 wire  wr   = ir_v && ir_go;
@@ -1508,6 +1565,16 @@ always_ff @(posedge clk)
 	if (nrst && !flush && !flush_q && !hold_redir && !d_redir_v &&
 	    q_flt != |(win_flt & 8'((9'd1 << qcnt) - 9'd1))) begin
 		$display("FAIL: decode: a fault flag past the queue's count");
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst && rq_pop && rq_n == 3'd0) begin
+		$display("FAIL: decode: a pop of the empty record FIFO");
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst && ir_v && ir_xany != (ir_exc != 8'd0)) begin
+		$display("FAIL: decode: ir_xany");
 		$finish;
 	end
 always_ff @(posedge clk)

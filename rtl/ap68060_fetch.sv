@@ -325,6 +325,9 @@ wire btb_hit1 = btb_on && !btb_cf && bvq1 && btb_q1[BTB_DW-2 -: BTB_TW] == f1_pc
 logic  [2:0] fras_tp;
 logic  [3:0] fras_n;
 logic        rs_p1, rs_p2;      // a redirect's resynchronization, two clocks on
+logic        frw_q;             // the return stack's write, registered
+logic  [2:0] frwa_q;
+logic [30:0] frwd_q;
 logic        atc_hit;
 atce_t       atc_e;
 ap68060_atc #(.SAME_SEARCH(0)) iatc (
@@ -486,6 +489,7 @@ assign f1_e = f1_ah ? f1_ea : f1_ew;
 wire [20:0] f1_tg = {f1_e.pa[19:1], tc_p ? f1_pc[12] : f1_e.pa[0], f1_pc[11]};
 always_comb begin
 	logic tt0, tt1, use_t;
+	logic [20:0] tg_a, tg_w;
 	x_ok = 1'b0; x_flt = 1'b0; x_walk = 1'b0;
 	x_pa = f1_pc; x_cm = 2'b00; x_upa = 2'b00;
 	tt0 = f1_tt0;
@@ -514,10 +518,17 @@ always_comb begin
 	// TTR or no translation) and the ATC's, and the translation selects
 	// the outcome (the ATC's address matters only
 	// with a hit, x_cach is clear without one)
+	// (three compares apart: the logical address, the ATC entry's, the
+	// page's last walk's -- the entry select is not ahead of them either)
 	use_t  = !(tt0 || tt1) && f1_tce;
+	tg_a   = {f1_ea.pa[19:1], tc_p ? f1_pc[12] : f1_ea.pa[0], f1_pc[11]};
+	tg_w   = {f1_ew.pa[19:1], tc_p ? f1_pc[12] : f1_ew.pa[0], f1_pc[11]};
 	for (int i = 0; i < 4; i++)
-		x_mj[i] = ivf_q[i] && (use_t ? (ct[i][20:0] == f1_tg) : (ct[i][20:0] == f1_pc[31:11]));
-	x_lb   = x_cach && lb_v && (use_t ? (lb_pa == {f1_tg, f1_pc[10:4]}) : (lb_pa == f1_pc[31:4]));
+		x_mj[i] = ivf_q[i] && (use_t ? (f1_ah ? (ct[i][20:0] == tg_a) : (ct[i][20:0] == tg_w))
+		                             : (ct[i][20:0] == f1_pc[31:11]));
+	x_lb   = x_cach && lb_v && (use_t ? (f1_ah ? (lb_pa == {tg_a, f1_pc[10:4]})
+	                                           : (lb_pa == {tg_w, f1_pc[10:4]}))
+	                                  : (lb_pa == f1_pc[31:4]));
 end
 
 // the BTB's taken branch: F0 goes to the target (a return's from the
@@ -590,7 +601,11 @@ wire [4:0] inflight = {f1_v, 1'b0} + {f2_v || md_v, 1'b0} + {3'd0, f3_n} +
 // (two words; the miss engine's), F3 F2's words, F4-F6 F3-F5's)
 logic      room_q;
 logic      m_setpc;            // the miss engine moves fpc on, a clock late
-wire [5:0] infl_b  = {(f1_v && !f2_miss) || (st != S_RUN), 2'b00} + {4'd0, o2_n} +
+// (at most: F1's fetch and F2's words as if F2 hits -- F2's outcome, a
+// tag compare, stays off the room; a miss only holds F0 a clock longer,
+// and F0 rolls back then anyway)
+wire [1:0] o2_ub   = f2_go ? (f2_pc[1] ? 2'd1 : 2'd2) : md_v ? md_n : 2'd0;
+wire [5:0] infl_b  = {f1_v || (st != S_RUN), 2'b00} + {4'd0, o2_ub} +
                      {4'd0, f3_n} + {4'd0, f4_n} + {4'd0, f5_n};
 logic [1:0] room_n [3];
 // the target FIFO cannot overflow: count the flagged words on their way
@@ -600,6 +615,28 @@ wire       bt_room  = ({1'b0, tq_n} + {4'd0, f1_v} + {4'd0, f2_btk} + {4'd0, |f3
 // (a redirect in the same clock overrides what F0 loads: it is not here)
 wire       f0_go    = (st == S_RUN) && !odd && !stop_q && !m_setpc &&
                       !iatc_flush_page && !fl_pg_q && !inv_busy && !sn_inv && room_q;
+
+// F0's next address: from the stages' registers (a redirect, F2's miss,
+// F0's own advance, the miss engine's), or a BTB slot's target -- each
+// slot's take, from its RAM's output, picks last, one LUT before fpc and
+// atc_la (kept nets: synthesis would otherwise select the target first)
+(* keep *) wire [31:0] fpc_b;
+(* keep *) wire [31:0] atc_b;
+(* keep *) wire [30:0] f1_t0;
+(* keep *) wire [30:0] f1_t1;
+(* keep *) wire        f1_tg0;
+(* keep *) wire        f1_tg1;
+assign fpc_b  = redir_any ? {redir_npc[31:1], 1'b0} : f2_miss ? f2_pc :
+                f0_go ? {fpc[31:2], 2'b00} + 32'd4 : m_setpc ? m_la : fpc;
+assign atc_b  = iatc_flush_page ? iatc_flush_la : fpc_b;
+assign f1_t0  = (bk0 == 2'd2) ? fras_top : btb_q0[30:0];
+assign f1_t1  = (bk1 == 2'd2) ? fras_top : btb_q1[30:0];
+assign f1_tg0 = f1_v && f1_btok && !f2_miss && !redir_any && tk0;
+assign f1_tg1 = f1_v && f1_btok && !f2_miss && !redir_any && tk1;
+(* keep *) wire        f1_ta0;     // (the ATC's: a page flush's address goes first)
+(* keep *) wire        f1_ta1;
+assign f1_ta0 = f1_tg0 && !iatc_flush_page;
+assign f1_ta1 = f1_tg1 && !iatc_flush_page;
 
 assign c_raddr = inv_busy ? inv_i[6:0] : fpc[10:4];
 
@@ -651,6 +688,12 @@ logic  [2:0] fits_n;
 // delivers, so this only sends an instruction just before it down D1's
 // general path; the bits past the count are clear)
 wire         qfany = (|qf) || (f6_n != 2'd0 && f6_f);
+// the count as a thermometer (bit j: j < cnt; a register, kept with the
+// count), and the count with F6's words (j < cnt + f6_n), to 31
+logic [QN-1:0] cth_q;
+logic   [31:0] cth, cthf;
+assign cth  = {{(32 - QN){1'b0}}, cth_q};
+assign cthf = (f6_n == 2'd2) ? {cth[29:0], 2'b11} : (f6_n == 2'd1) ? {cth[30:0], 1'b1} : cth;
 logic  [2:0] tk [3];
 assign tk[0] = 3'd0;
 assign tk[1] = qp0.tot[2:0];
@@ -674,14 +717,18 @@ always_comb begin
 		qs_n[c] = '0;
 		for (int i = 0; i < QN; i++) begin
 			logic [5:0] src;
-			logic [4:0] k;
-			src = 6'(i) + {3'b000, tk[c]};
-			k   = 5'(i) - keep;
+			logic       kept, k0;
+			src  = 6'(i) + {3'b000, tk[c]};
+			// i < keep and i < keep + F6's count, read off the count's
+			// thermometers at i + the take (no subtraction in the words'
+			// select); the F6 word's parity is i - keep's
+			kept = cth[src[4:0]];
+			k0   = i[0] ^ keep[0];
 			// (a word past the count is never read: the words and their
 			// flags but the fault flag take F6's there whether it brings
 			// them or not -- F6's count stays off the words' select; the
 			// fault flags past the count are clear: qfany)
-			if (5'(i) < keep) begin
+			if (kept) begin
 				qw_n[c][i]    = qw[src[3:0]];
 				qs_n[c].qf[i] = qf[src[3:0]];
 				qs_n[c].qd[i] = qd[src[3:0]];
@@ -689,11 +736,11 @@ always_comb begin
 				qs_n[c].qb[i] = qb[src[3:0]];
 			end
 			else begin
-				qw_n[c][i]    = f6_w[k[0]];
-				qs_n[c].qf[i] = (k < {3'b000, f6_n}) && f6_f;
+				qw_n[c][i]    = f6_w[k0];
+				qs_n[c].qf[i] = cthf[src[4:0]] && f6_f;
 				qs_n[c].qd[i] = f6_d;
 				qs_n[c].qa[i] = f6_a;
-				qs_n[c].qb[i] = f6_b[k[0]];
+				qs_n[c].qb[i] = f6_b[k0];
 			end
 		end
 		qs_n[c].cnt = keep + {3'b000, f6_n};
@@ -729,6 +776,7 @@ typedef struct packed {
 	logic                simple;
 	logic          [1:0] room;
 	logic          [3:0] qcnt;
+	logic       [QN-1:0] cth;
 } qc_t;
 qc_t qc [3];
 always_comb
@@ -739,6 +787,7 @@ always_comb
 		qc[c].simple = qp0_n[c].simple && fits_n[c] && !qfany;
 		qc[c].room   = room_n[c];
 		qc[c].qcnt   = (qs_n[c].cnt > 5'd8) ? 4'd8 : qs_n[c].cnt[3:0];
+		for (int j = 0; j < QN; j++) qc[c].cth[j] = (5'(j) < qs_n[c].cnt);
 	end
 (* keep *) wire [$bits(qc_t)-1:0] qk0;
 (* keep *) wire [$bits(qc_t)-1:0] qk1;
@@ -854,6 +903,7 @@ always_ff @(posedge clk) begin
 		qh  <= '0;
 		qsimp_q <= 1'b0;
 		qcnt_q  <= '0;
+		cth_q   <= '0;
 		room_q  <= 1'b1;
 		m_setpc <= 1'b0;
 	end
@@ -864,7 +914,9 @@ always_ff @(posedge clk) begin
 		sn_ihit     <= 1'b0;
 		inv_hold    <= 1'b0;
 		stop_q      <= stop;
-		atc_la      <= fpc;           // (fpc's copy: below, every fpc load)
+		// F0's address, and the ATC's (fpc's copy, or a page flush's)
+		fpc         <= f1_tg0 ? {f1_t0, 1'b0} : f1_tg1 ? {f1_t1, 1'b0} : fpc_b;
+		atc_la      <= f1_ta0 ? {f1_t0, 1'b0} : f1_ta1 ? {f1_t1, 1'b0} : atc_b;
 		atc_fc2     <= smode;
 		fl_all_q    <= iatc_flush_all;
 		fl_pg_q     <= iatc_flush_page;
@@ -893,6 +945,7 @@ always_ff @(posedge clk) begin
 		qh      <= qn.s.qh;
 		qsimp_q <= qn.simple;
 		qcnt_q  <= qn.qcnt;
+		cth_q   <= qn.cth;
 		room_q  <= qn.room[f0_go && !(f1_v && !f2_miss && f1_bt) && !f2_miss];
 		tq_n    <= qn.s.tq_n;
 		tq_h    <= tq_h + {2'b00, qn.s.tq_sh};
@@ -916,10 +969,6 @@ always_ff @(posedge clk) begin
 		// the miss engine's next long word: fpc follows m_la a clock late
 		// (F0 waits for it: m_setpc)
 		m_setpc <= 1'b0;
-		if (m_setpc) begin
-			fpc    <= m_la;
-			atc_la <= m_la;
-		end
 
 		//------------------------------------------------------------------
 		// F0 -> F1
@@ -949,8 +998,6 @@ always_ff @(posedge clk) begin
 				f1_wff <= !atc_hit && wm && !wf_ok;
 			end
 			fnew   <= 1'b0;
-			fpc    <= {fpc[31:2], 2'b00} + 32'd4;
-			atc_la <= {fpc[31:2], 2'b00} + 32'd4;
 		end
 
 		//------------------------------------------------------------------
@@ -996,8 +1043,6 @@ always_ff @(posedge clk) begin
 			f2_btk <= 1'b1;
 			f1_v    <= 1'b0;
 			f1_btok <= 1'b0;
-			fpc   <= {f1_t, 1'b0};
-			atc_la <= {f1_t, 1'b0};
 			fnew  <= 1'b0;
 			fspec <= 1'b1;
 			if (f1_bcall) begin
@@ -1023,8 +1068,6 @@ always_ff @(posedge clk) begin
 		if (f2_miss) begin
 			f1_v   <= 1'b0;
 			f1_btok <= 1'b0;
-			fpc    <= f2_pc;
-			atc_la <= f2_pc;
 			fnew   <= f2_dem;
 			m_la   <= f2_pc;
 			m_pa   <= f2_pa;
@@ -1250,6 +1293,7 @@ always_ff @(posedge clk) begin
 			cnt   <= '0;
 			qsimp_q <= 1'b0;
 			qcnt_q  <= '0;
+			cth_q   <= '0;
 			room_q  <= 1'b1;
 			m_setpc <= 1'b0;
 			f3_n  <= '0;
@@ -1267,8 +1311,6 @@ always_ff @(posedge clk) begin
 			f2_v  <= 1'b0;
 			rs_p1  <= 1'b1;
 			rs_p2  <= 1'b0;
-			fpc   <= {redir_npc[31:1], 1'b0};
-			atc_la <= {redir_npc[31:1], 1'b0};
 			fspec <= !redir_v;
 			odd   <= redir_npc[0];
 			fnew  <= 1'b1;
@@ -1286,10 +1328,7 @@ always_ff @(posedge clk) begin
 		end
 
 		// a page flush looks its page up a clock later (F0 issues nothing then)
-		if (iatc_flush_page) begin
-			atc_la  <= iatc_flush_la;
-			atc_fc2 <= iatc_flush_fc2;
-		end
+		if (iatc_flush_page) atc_fc2 <= iatc_flush_fc2;
 
 		//------------------------------------------------------------------
 		// CINV/CPUSH of the instruction cache
@@ -1375,8 +1414,14 @@ always_ff @(posedge clk) begin
 		if ((iwq_v && iwq_sn && (ivo_q & iwq_m) != 4'd0) || iwq_lbh) sn_ihit <= 1'b1;   // (ivo_ra: iwq_set)
 		if (iwq_v && iwq_fill && ivo_q == 4'hF) rr <= rr + 2'd1;
 	end
-	// the return stack's one write port (frw is clear in reset)
-	if (frw) fras[frwa] <= frwd;
+	// the return stack's one write port, a clock after its decision (from
+	// registers: a call's return address waits on the BTB's compare; a
+	// return predicted in the clock right after is read from the entry as
+	// it was -- a prediction D1 checks).  (frw_q is clear in reset.)
+	frw_q  <= frw && nrst;
+	frwa_q <= frwa;
+	frwd_q <= frwd;
+	if (frw_q) fras[frwa_q] <= frwd_q;
 	// the valid RAMs' one write (both copies; iwq_v is a register: a write
 	// decided before a reset completes in its first clock)
 	begin
@@ -1422,6 +1467,11 @@ always_ff @(posedge clk)
 	if (nreset && q_simple && !(qp0.legal && !qp0.slow && !qp0.x0 && !qp0.x1 && qp0.tot <= 4'd7 &&
 	                            {1'b0, qp0.tot} <= cnt && qf[7:0] == 8'd0)) begin
 		$display("FAIL: fetch: the head's one-pass flag");
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst) for (int j = 0; j < QN; j++) if (cth_q[j] != (5'(j) < cnt)) begin
+		$display("FAIL: fetch: the count's thermometer %b, the count %0d", cth_q, cnt);
 		$finish;
 	end
 always_ff @(posedge clk)
