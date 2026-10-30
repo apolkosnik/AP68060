@@ -607,8 +607,8 @@ always_ff @(posedge clk) if (rsti_n && prof) begin
 				hold[5]++;                            // useq busy / expanding
 				if (!dut.useq.a_v) us[0]++;           // first-word ROM read
 				else if (dut.useq.a_k.jmp) us[1]++;   // jump word
-				else if (!dut.useq.b_v) us[2]++;      // the uop stage is empty
-				else if (dut.useq.n_ptr_p) us[3]++;   // pointer load
+				else if (!dut.useq.c_v) us[2]++;      // the uop stage is empty
+				else if (dut.useq.n_ptr) us[3]++;     // pointer load
 				else us[4]++;
 			end
 			else if (dut.fetch.cnt != 0) hold[6]++;   // decode has words, no record
