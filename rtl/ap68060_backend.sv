@@ -242,9 +242,10 @@ logic [31:0] fv;
 // stays off the FPU's hold, and so the stall chain)
 logic ew_same;
 logic wb_ok;                  // WB's uop has no exception (wb_exc == 0), registered
+logic  [2:0] ex_kx;           // EX's uop is FPU, DIV, TRAPcc (registered as it enters)
 wire wb_fpchk = wb_v && !wb_u.last && wb_ok &&
                 (wb_u.mem == M_NONE || wb_u.mem == M_LD) &&
-                ex_v && ex_u.op == OP_FPU && ew_same;
+                ex_v && ex_kx[2] && ew_same;     // (ex_kx[2]: EX's uop is FPU, registered)
 // FPU interface outputs (ap68060_fpif)
 logic        fp_hold, fp_dkill, fp_taken, fp_xnext, fp_xcommit, fp_stkill;
 logic [31:0] fp_res, fp_xaddr;
@@ -903,7 +904,6 @@ logic  [7:0] ex_xvec;         // exception raised in EX
 // and, for a slow op, as its result is: not through the vector's
 // multiplexers and compare)
 logic        ex_xnz, xs_xnz;
-logic  [2:0] ex_kx;           // EX's uop is FPU, DIV, TRAPcc
 logic [31:0] ex_st;           // store data
 logic        ex_sr_we;
 logic [15:0] ex_sr_new;
