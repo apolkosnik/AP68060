@@ -1000,7 +1000,9 @@ always_ff @(posedge clk) begin
 		qcnt_q  <= qn.qcnt;
 		cth_q   <= qn.cth;
 		cthf_q  <= qn.cthf;
-		room_q  <= qn.room[f0_go && !(f1_v && !f2_miss && f1_bt) && !f2_miss];
+		// (F1 receives a fetch: F0 issues and no BTB take drops it -- the
+		// kept takes; a redirect overrides the room below)
+		room_q  <= qn.room[f0_go && !f1_tg0 && !f1_tg1 && !f2_miss];
 		tq_n    <= qn.s.tq_n;
 		tq_h    <= tq_h + {2'b00, qn.s.tq_sh};
 		f6_n  <= f5_n;

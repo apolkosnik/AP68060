@@ -607,6 +607,7 @@ logic [31:0] ir_pcs0;       // ... plus its PC-relative displacement (EA1 has no
 logic        ir_jj;         // JSR/JMP to a known target (absolute, PC-relative)
 logic  [1:0] ir_tsel;       // the record's target: 0 none, 1 ir_ntgt, 2 the return stack's
 logic [10:0] ir_fpk;        // FPU straight-line routine (valid, address)
+logic        ir_fpgk;       // ... a legal FPU instruction with one (one part)
 logic [18:0] ir_fpkk;       // ... its first word's kind
 logic [31:0] ir_imm;
 logic  [7:0] ir_exc;        // exception vector (a fault's included)
@@ -923,7 +924,12 @@ always_ff @(posedge clk) begin
 		end
 		ir_jsrk  <= (pd0.cls == CL_JSR) && u_go && !u_part &&
 		            (pd0.i0 == EM_ABSW || pd0.i0 == EM_ABSL || pd0.i0 == EM_PC16);
-		ir_fpk   <= fpu_k(win[1], pd0.i0);
+		begin
+			logic [10:0] fk;
+			fk = fpu_k(win[1], pd0.i0);
+			ir_fpk  <= fk;
+			ir_fpgk <= pd0.legal && !(q_odd && qcnt == 4'd0) && (pd0.cls == CL_FPU_GEN) && fk[10];
+		end
 		ir_fpkk  <= kind_fix(10'(fpu_k(win[1], pd0.i0)), 19'd0);
 		ir_ntgt  <= a_ntgt;
 		ir_dsign <= a_dsign;
@@ -1298,7 +1304,7 @@ always_comb begin
 		nrec_q.rt = UA_JSR_K;
 		nrec_q.k0 = UK_JSR_K;
 	end
-	else if (fpg && fpk[10]) begin
+	else if ((ir_ph == PH_IDLE) ? ir_fpgk : (part_fpg && part_fpk[10])) begin   // (fpg && fpk[10])
 		nrec_q.rt = fpk[9:0];
 		nrec_q.k0 = fpkk;
 	end
@@ -1666,6 +1672,11 @@ always_ff @(posedge clk)
 always_ff @(posedge clk)
 	if (nrst && ir_v && ir_ph == PH_IDLE && (bht_q[1] ? pred_h1 : pred_h0) != nrec.pred) begin
 		$display("FAIL: decode: the prediction by the history bit's two cases");
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst && ir_v && ir_ph == PH_IDLE && ir_fpgk != (fpg && fpk[10])) begin
+		$display("FAIL: decode: the FPU routine flag");
 		$finish;
 	end
 always_ff @(posedge clk)
