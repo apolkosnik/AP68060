@@ -28,6 +28,10 @@ module ap68060_alu
 	input  logic [31:0] b,
 	input  logic [31:0] ea,
 	input  logic  [4:0] flags_in,   // X N Z V C
+	input  logic [15:0] rk,         // the result's case, one-hot, decoded from op a stage
+	                                // early (alu_rk): MOV AND OR EOR NOT CLR EXT EXTB SWAP
+	                                // TAS BCHG BCLR BSET SCC EA DBCC, none: b
+	output logic [31:0] res_f,      // res for those ops, as one AND-OR of them
 	input  logic  [3:0] ac,         // the adder's controls, decoded from op a stage
 	                                // early (alu_ctl): {CMP, X in, subtract, NEG(X)}
 	output logic [31:0] res,
@@ -174,6 +178,29 @@ wire        chk_trap   = chk_dn_neg || chk_gt;
 //--------------------------------------------------------------------------
 // result and flags
 //--------------------------------------------------------------------------
+// the result's cases as one AND-OR, their selects registered (rk)
+always_comb begin
+	logic [31:0] c [16];
+	c[0]  = merge(am, b, szmask);
+	c[1]  = merge(bm & am, b, szmask);
+	c[2]  = merge(bm | am, b, szmask);
+	c[3]  = merge(bm ^ am, b, szmask);
+	c[4]  = merge(~bm & szmask, b, szmask);
+	c[5]  = merge(32'd0, b, szmask);
+	c[6]  = (sz == SZ_W) ? {b[31:16], {8{b[7]}}, b[7:0]} : {{16{b[15]}}, b[15:0]};
+	c[7]  = {{24{b[7]}}, b[7:0]};
+	c[8]  = {b[15:0], b[31:16]};
+	c[9]  = {b[31:8], 1'b1, b[6:0]};
+	c[10] = b ^ bit_mask;
+	c[11] = b & ~bit_mask;
+	c[12] = b | bit_mask;
+	c[13] = {b[31:8], {8{cc_true}}};
+	c[14] = ea;
+	c[15] = {b[31:16], b[15:0] - 16'd1};
+	res_f = (rk == 16'd0) ? b : 32'd0;
+	for (int k = 0; k < 16; k++) res_f = res_f | ({32{rk[k]}} & c[k]);
+end
+
 always_comb begin
 	logic [31:0] r;
 	r         = b;

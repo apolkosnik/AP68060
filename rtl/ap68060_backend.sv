@@ -608,7 +608,22 @@ end
 // flip-flops (ex_a/ex_b keep the register operands as they were)
 logic [31:0] ex_av, ex_bv;
 
-logic [31:0] alu_res, alu_sum, alu_sumo;
+logic [31:0] alu_res, alu_sum, alu_sumo, alu_resf;
+logic [15:0] ex_rk;            // the ALU result's case, one-hot (alu_rk), registered
+function automatic logic [15:0] alu_rk(input logic [6:0] op);
+	logic [15:0] r;
+	r = '0;
+	case (op)
+		OP_MOV:  r[0] = 1'b1;   OP_AND:  r[1] = 1'b1;   OP_OR:   r[2] = 1'b1;
+		OP_EOR:  r[3] = 1'b1;   OP_NOT:  r[4] = 1'b1;   OP_CLR:  r[5] = 1'b1;
+		OP_EXT:  r[6] = 1'b1;   OP_EXTB: r[7] = 1'b1;   OP_SWAP: r[8] = 1'b1;
+		OP_TAS:  r[9] = 1'b1;   OP_BCHG: r[10] = 1'b1;  OP_BCLR: r[11] = 1'b1;
+		OP_BSET: r[12] = 1'b1;  OP_SCC:  r[13] = 1'b1;  OP_EA:   r[14] = 1'b1;
+		OP_DBCC: r[15] = 1'b1;
+		default: ;
+	endcase
+	alu_rk = r;
+endfunction
 logic  [4:0] alu_flags, alu_sumfl;
 logic        alu_cc, alu_trap;
 // the adder's controls, decoded as the uop enters EX: {CMP, X in, subtract,
@@ -627,7 +642,7 @@ logic        ex_fs;
 ap68060_alu alu (
 	.op(ex_u.op), .sz(ex_u.sz), .cond(ex_u.cond),
 	.a(ex_av), .b(ex_bv), .ea(ex_ea),
-	.flags_in(ccr_f), .ac(ex_ac),
+	.flags_in(ccr_f), .ac(ex_ac), .rk(ex_rk), .res_f(alu_resf),
 	.res(alu_res), .res_sum(alu_sum), .sum_o(alu_sumo), .sum_fl(alu_sumfl), .flags_out(alu_flags),
 	.cc_true(alu_cc), .trap(alu_trap)
 );
@@ -1201,6 +1216,7 @@ logic        cas_cc, cas_tr;
 ap68060_alu cas_alu (
 	.op(OP_CMP), .sz(ex_u.sz), .cond(4'd0),
 	.a(cas_dc_m), .b(ex_bv), .ea(32'd0), .flags_in(ccr_f), .ac(alu_ctl(OP_CMP)),
+	.rk(16'd0), .res_f(),
 	.res(cas_res), .res_sum(), .sum_o(), .sum_fl(), .flags_out(cas_flags), .cc_true(cas_cc), .trap(cas_tr)
 );
 wire cas_eq = cas_flags[2];
@@ -1392,7 +1408,7 @@ always_comb begin
 	// (the sum at the size, ex_sk, in the last AND-OR; above it the
 	// destination's bits, from flip-flops)
 	exw_val = (ex_sk & alu_sumo) | ({32{ex_rs[RS_SUM]}} & ~ex_szm & ex_bv) |
-	          ({32{ex_rs[RS_ALU]}}   & alu_res)  |
+	          ({32{ex_rs[RS_ALU]}}   & alu_resf) |
 	          ({32{ex_rs[RS_SLOW]}}  & xs_q.res)  | ({32{ex_rs[RS_FP]}}    & fp_res)   |
 	          ({32{ex_rs[RS_MD]}}    & md_q_res)  | ({32{ex_rs[RS_MDLO]}}  & md_lol)   |
 	          ({32{ex_rs[RS_MDREM]}} & md_rem)    | ({32{ex_rs[RS_BV]}}    & ex_bv)    |
@@ -2051,6 +2067,7 @@ always_ff @(posedge clk) begin
 			ex_npc   <= dc2_u.pc + {27'd0, dc2_u.ilen, 1'b0};
 			ex_rs    <= rsel(dc2_u);
 			ex_ac    <= alu_ctl(dc2_u.op);
+			ex_rk    <= alu_rk(dc2_u.op);
 			ex_doh   <= 32'd1 << dc2_u.d_reg;
 			ex_br    <= (dc2_u.br != BR_NONE) || (dc2_u.op == OP_RTE);
 			if (nphase(dc2_u.op) != 2'd0) begin
