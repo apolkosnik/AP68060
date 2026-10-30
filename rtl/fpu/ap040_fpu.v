@@ -552,7 +552,8 @@ reg   [2:0] ur_g;
 always @* begin
 	case (1'b1)   // synthesis parallel_case
 		okh[0]: begin
-			ur_m = add_r[67] ? add_r[67:4] : add_r[66:3];
+			ur_m[63:32] = add_top[1] ? add_r[67:36] : add_r[66:35];
+			ur_m[31:0]  = add_top[0] ? add_r[35:4] : add_r[34:3];
 			ur_g = add_r[67] ? {add_r[3], add_r[2], add_r[1] | add_r[0]} : add_r[2:0];
 		end
 		okh[1]: begin
@@ -888,8 +889,14 @@ end
 // inverted for an effective subtraction ({b_m, GRS} >= the aligned value:
 // b is the larger magnitude)
 reg  [67:0] add_r;
-always @(posedge clk)
-	add_r <= {1'b0, b_m, 3'd0} + ({1'b0, shr_out} ^ {68{eff_sub}}) + {67'd0, eff_sub};
+wire [67:0] add_sum = {1'b0, b_m, 3'd0} + ({1'b0, shr_out} ^ {68{eff_sub}}) + {67'd0, eff_sub};
+// add_r[67] twice more, each the normalizing select of half of the
+// significand (kept apart: one flip-flop does not reach all 64 in one clock)
+(* preserve *) reg [1:0] add_top;
+always @(posedge clk) begin
+	add_r   <= add_sum;
+	add_top <= {2{add_sum[67]}};
+end
 
 // Normalization (an integer source in F_SRC, FINT's integer in F_INTN, a
 // cancellation's difference in F_ADDN): the leading zeros of the value's
@@ -1773,6 +1780,12 @@ always @(posedge clk)
 	if (nreset && (fst == F_BIN0 || fst == F_EXEC) && b_unsup != unsupported_x(b_e[14:0], b_m)) begin
 		$display("FAIL: FPU b_unsup %b, the destination classifies as %b", b_unsup,
 		         unsupported_x(b_e[14:0], b_m));
+		$finish;
+	end
+// the sum's normalizing selects are its top bit
+always @(posedge clk)
+	if (nreset && add_top != {2{add_r[67]}}) begin
+		$display("FAIL: FPU sum select copies %b, the sum's top bit %b", add_top, add_r[67]);
 		$finish;
 	end
 // the product's normalizing selects are its top bit
