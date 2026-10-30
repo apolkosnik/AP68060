@@ -255,6 +255,10 @@ logic  [2:0] fp_crslots;
 logic  [2:0] fwe, bwe;
 logic  [1:0] fwe_ag;           // fwe[0..1] without the advance (AG holds an update)
 logic  [4:0] fwa [3], bwa [3];
+logic [31:0] fwoh [3], bwoh [3];   // ... one-hot, from registers set as the uops enter
+logic [31:0] ag_uoh, ag_u2oh;      // AG's update registers
+logic [31:0] ex_doh;               // EX's destination
+logic [31:0] wb_uoh, wb_u2oh, wb_doh;
 logic [31:0] fwd [3], bwd [3];
 logic  [4:0] rra [5];
 logic [31:0] frd [5], brd [5], rrd [5];
@@ -418,8 +422,8 @@ wire [31:0] dc2_capv = dc2_u.a_sxw ? {{16{dm_ldata_al[15]}}, dm_ldata_al[15:0]} 
 
 assign ag_hold = ilk_q;
 
-ap68060_rf #(.NR(5)) rff (.clk(clk), .we(fwe), .wa(fwa), .wd(fwd), .ra(rra), .rd(frd));
-ap68060_rf #(.NR(5), .NW(2)) rfb (.clk(clk), .we(bwe), .wa(bwa), .wd(bwd), .ra(rra), .rd(brd));
+ap68060_rf #(.NR(5)) rff (.clk(clk), .we(fwe), .wa(fwa), .woh(fwoh), .wd(fwd), .ra(rra), .rd(frd));
+ap68060_rf #(.NR(5), .NW(2)) rfb (.clk(clk), .we(bwe), .wa(bwa), .woh(bwoh), .wd(bwd), .ra(rra), .rd(brd));
 // AG's base and index are read as the uop enters AG (ports 0/1 address
 // the incoming uop) and kept in registers, so AG's address adders, and the
 // data cache's set index after them, start from flip-flops
@@ -1550,6 +1554,7 @@ always_comb begin
 	logic wcom, wpost;
 	fwe[0] = adv_ag && ag_u.upd_v && !ag_dyncan;  fwa[0] = ag_u.upd_reg;  fwd[0] = ag_updv;
 	fwe[1] = adv_ag && ag_u.upd2_v && !ag_dyncan; fwa[1] = ag_u.upd2_reg; fwd[1] = ag_u2v;
+	fwoh[0] = ag_uoh; fwoh[1] = ag_u2oh; fwoh[2] = ex_doh;
 	fwe_ag[0] = ag_v && ag_u.upd_v && !ag_dyncan;
 	fwe_ag[1] = ag_v && ag_u.upd2_v && !ag_dyncan;
 	fwe[2] = exw_v;                 fwa[2] = exw_reg;       fwd[2] = exw_val;
@@ -1561,14 +1566,15 @@ always_comb begin
 	// (its destination is memory), and its upd2 yields to its upd on the
 	// same register.  So a result beats an update, and upd beats upd2.
 	bwe[0] = (wcom || wpost) && wb_u.upd_v;  bwa[0] = wb_u.upd_reg;  bwd[0] = wb_upd_val;
+	bwoh[0] = wb_uoh;
 	if (wcom && wb_dwe) begin
-		bwe[1] = 1'b1; bwa[1] = wb_u.d_reg; bwd[1] = wb_res;
+		bwe[1] = 1'b1; bwa[1] = wb_u.d_reg; bwd[1] = wb_res; bwoh[1] = wb_doh;
 	end
 	else begin
 		bwe[1] = (wcom || wpost) && wb_u.upd2_v && !(wb_u.upd_v && wb_u.upd_reg == wb_u.upd2_reg);
-		bwa[1] = wb_u.upd2_reg; bwd[1] = wb_upd2_val;
+		bwa[1] = wb_u.upd2_reg; bwd[1] = wb_upd2_val; bwoh[1] = wb_u2oh;
 	end
-	bwe[2] = 1'b0; bwa[2] = '0; bwd[2] = '0;
+	bwe[2] = 1'b0; bwa[2] = '0; bwd[2] = '0; bwoh[2] = '0;
 	case (xw_ph)
 		2'd1: begin
 			bwe = 3'b011;
@@ -1587,6 +1593,10 @@ always_comb begin
 		end
 		default: ;
 	endcase
+	if (xw_ph != 2'd0) begin
+		bwoh[0] = 32'd1 << bwa[0];      // (constants for each phase)
+		bwoh[1] = 32'd1 << bwa[1];
+	end
 end
 
 
@@ -2020,6 +2030,7 @@ always_ff @(posedge clk) begin
 			ex_npc   <= dc2_u.pc + {27'd0, dc2_u.ilen, 1'b0};
 			ex_rs    <= rsel(dc2_u);
 			ex_ac    <= alu_ctl(dc2_u.op);
+			ex_doh   <= 32'd1 << dc2_u.d_reg;
 			ex_br    <= (dc2_u.br != BR_NONE) || (dc2_u.op == OP_RTE);
 			if (nphase(dc2_u.op) != 2'd0) begin
 				ex_ts <= 5'b10000;
@@ -2141,6 +2152,9 @@ always_ff @(posedge clk) begin
 			wb_redir_pc <= ex_br ? ex_next : ex_npc;
 			wb_sr_we    <= ex_sr_we;
 			wb_crs      <= cr_sel(ex_u);
+			wb_uoh      <= 32'd1 << ex_u.upd_reg;
+			wb_u2oh     <= 32'd1 << ex_u.upd2_reg;
+			wb_doh      <= 32'd1 << ex_u.d_reg;
 			wb_reset    <= (ex_u.op == OP_MISC) && (ex_u.cond == 4'd1);
 			wb_mt       <= (ex_u.op == OP_MISC) && (ex_u.cond >= 4'd3) && (ex_u.cond <= 4'd5);
 			wb_is_stop  <= (ex_u.op == OP_MISC) && (ex_u.cond == 4'd2 || ex_u.cond == 4'd8);
@@ -2415,7 +2429,12 @@ always_ff @(posedge clk) begin
 
 		// front-valid bits: a front write makes the register's front copy
 		// current; a redirect, a refetch or an exception drops them all
-		for (int i = 0; i < 3; i++) if (fwe[i]) fv[fwa[i]] <= 1'b1;
+		begin
+			logic [31:0] fs;
+			fs = fv;
+			for (int i = 0; i < 3; i++) if (fwe[i]) fs = fs | fwoh[i];
+			fv <= fs;
+		end
 		if ((wb_commit && wb_redir) || wb_refetch || x_go) fv <= 32'd0;
 
 		// a store that took a bus error at WB becomes an access fault of
@@ -2469,6 +2488,8 @@ always_ff @(posedge clk) begin
 				ag_u      <= ain_u;
 				ag_u.disp <= ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp;
 				ag_bfh    <= (ain_u.mem != M_NONE) && (ain_u.op == OP_MOV) && (ain_u.cond == 4'hE);
+				ag_uoh    <= 32'd1 << ain_u.upd_reg;
+				ag_u2oh   <= 32'd1 << ain_u.upd2_reg;
 				ag_bft    <= (ain_u.mem != M_NONE) && (ain_u.op == OP_MOV) && (ain_u.cond == 4'hD);
 				ag_dm2    <= (ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp) - 32'd2;
 			end
