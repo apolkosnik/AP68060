@@ -1,0 +1,28 @@
+# Known deviations of the cputest oracle (WinUAE) from the 68060, where the
+# core follows the manual or the M68060SP (doc/STATUS.md).  One per line:
+#   <slice-name glob> <regex on a round's first mismatch>  <reason>
+# run_cputest.py --known reports a slice as KNOWN when every failing round's
+# first mismatch (as its log lists them) matches one of these.
+#
+# denormal/unnormal FP source: format $0 frame (6.5.2), WinUAE $3
+PackedFPU--*     exception\sframe:\sexpected\s00000030\sgot\s00000000   denormal-source-frame
+FILLG--*.S--*    exception\sframe:\sexpected\s00000030\sgot\s00000000   denormal-source-frame
+FILLG--*.D--*    exception\sframe:\sexpected\s00000030\sgot\s00000000   denormal-source-frame
+# unimplemented FP instruction, extended -(An): EA = An - 12 + 8, An kept
+# (M68060SP _dcalc_ea); WinUAE An - 12
+FILLG--*.X--*    exception\sframe:\sexpected\s000000[0-9a-f]{2}\sgot        unimp-ext-predec-ea
+# unimplemented integer instructions (CAS misaligned, CAS2, CHK2/CMP2,
+# 64-bit MULL/DIVL, MOVEP): vector 61 for the M68060ISP; a corpus generated
+# with cpu_no_unimplemented=0 executes them
+*--CAS*          got\s0000003d                                         unimp-integer
+*--CHK2*         got\s0000003d                                         unimp-integer
+*--CMP2*         got\s0000003d                                         unimp-integer
+*--DIVL.L*       got\s0000003d                                         unimp-integer
+*--MULL.L*       got\s0000003d                                         unimp-integer
+*--MVP*          got\s0000003d                                         unimp-integer
+# odd trace vector rounds: the generator runs the traced sequence without
+# the trace exceptions in between
+ODD_EXC--*       missing\strace                                        traced-sequence
+ODD_IRQ--*       missing\strace                                        traced-sequence
+# MOVEC2: rounds writing TCR/BUSCR across traced sequences (DWO, SL/SLE)
+*--MOVEC2--*     execution\stimeout                                    traced-sequence

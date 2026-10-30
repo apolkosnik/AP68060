@@ -18,6 +18,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -40,6 +41,7 @@ GROUPS = {
     "EXTDST": "FFEXT_DST", "EXTSRC": "FFEXT_SRC", "FBASIC": "BasicFPU",
     "FINT": "intFPU", "FPACK": "PackedFPU", "IRQ": "IRQ",
     "ODDEXC": "ODD_EXC", "ODDIRQ": "ODD_IRQ", "ODDSTK": "ODD_STK",
+    "FILLG": "FILLG",
 }
 
 
@@ -176,6 +178,9 @@ def main():
     ap.add_argument("--timeout", type=int, default=3600)
     ap.add_argument("--keep-jobs", action="store_true")
     ap.add_argument("--plusarg", action="append", default=[])
+    ap.add_argument("--known", type=Path, default=None,
+                    help="known oracle deviations (tb/cputest_known.txt): a slice "
+                         "whose first mismatch matches one is reported KNOWN")
     ap.add_argument("--skip-log", type=Path, action="append", default=[],
                     help="skip slices reported PASS in this earlier runner output")
     args = ap.parse_args()
@@ -193,18 +198,51 @@ def main():
     if passed:
         items = [it for it in items if "%s--%s--%s" % (
             it["group"], it["instr"].replace("/", "_"), it["slice"]) not in passed]
+    known = []
+    if args.known:
+        for line in args.known.read_text().splitlines():
+            if line.strip() and not line.lstrip().startswith("#"):
+                f = line.split()
+                known.append((f[0], re.compile(f[1]), f[2] if len(f) > 2 else ""))
     print("%d slices" % len(items), flush=True)
     results = []
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as ex:
         for r in ex.map(lambda it: run(it, args), items):
+            if r["status"] != "pass" and known:
+                # every mismatch of the slice must be a known one, not just its
+                # first (the slice's log has them all)
+                lg = args.work / "logs" / (r["name"] + ".log")
+                bad, seen = [], set()
+                for l in (lg.read_text(errors="replace").splitlines()
+                          if lg.exists() else [r["first"]]):
+                    # each round's first mismatch (the rest follow from it)
+                    f = l.split()
+                    if (l.startswith("MISMATCH") or l.startswith("FAIL j")) and len(f) > 1:
+                        if f[1] not in seen:
+                            seen.add(f[1])
+                            bad.append(l)
+                whys = set()
+                for l in bad or [r["first"]]:
+                    m = [why for g, rx, why in known
+                         if fnmatch.fnmatchcase(r["name"], g) and rx.search(l)]
+                    if not m:
+                        whys = None
+                        break
+                    whys.add(m[0])
+                if whys:
+                    r["status"] = "known"
+                    r["first"] = "[%s] %s" % (",".join(sorted(whys)), r["first"])
             results.append(r)
             print("%-6s %-44s %s %s" % (r["status"].upper(), r["name"], r["summary"],
                                         ("| " + r["first"]) if r["status"] != "pass" else ""),
                   flush=True)
     npass = sum(r["status"] == "pass" for r in results)
-    print("PASSED %d / %d slices" % (npass, len(results)))
+    nknown = sum(r["status"] == "known" for r in results)
+    print("PASSED %d / %d slices" % (npass, len(results)) +
+          (" (%d known oracle deviations, %d failing)" % (nknown, len(results) - npass - nknown)
+           if args.known else ""))
     (args.work / "summary.json").write_text(json.dumps(results, indent=1))
-    sys.exit(0 if npass == len(results) else 1)
+    sys.exit(0 if npass + nknown == len(results) else 1)
 
 
 if __name__ == "__main__":
