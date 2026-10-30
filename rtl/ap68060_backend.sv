@@ -197,6 +197,13 @@ logic [31:0] wb_upd_val, wb_upd2_val;
 logic        wb_redir;        // the uop redirects the front end
 logic [31:0] wb_redir_pc;
 logic  [7:0] wb_exc;          // exception vector, 0 none
+// (its cases the WB decisions use, registered with it: xflags)
+localparam int XF_POST = 0, XF_RF = 1, XF_23 = 2, XF_2 = 3;
+logic  [3:0] wb_xf;
+function automatic logic [3:0] xflags(input logic [7:0] v);
+	xflags = {v == 8'd2, v == 8'd2 || v == 8'd3, v == EXC_IFS || v == EXC_IFSA,
+	          (v >= 8'd32 && v < 8'd48) || v == 8'd5 || v == 8'd6 || v == 8'd7};
+endfunction
 logic        wb_exc_pcv;      // the frame PC is wb_exc_pc (odd change of flow)
 logic [31:0] wb_exc_pc;
 logic        wb_oddrte;       // RTE to an odd PC: its SR is committed first
@@ -1443,7 +1450,7 @@ wire wb_refetch;
 // Each decision in two forms from registers: if WB's uop advances this
 // cycle (*1) and if it does not (*0, the stopped processor's); WB's advance,
 // the end of the stall chain, picks last (checked against the direct forms)
-wire wb_rf1  = wb_v && (wb_exc == EXC_IFS || wb_exc == EXC_IFSA);   // a refetch
+wire wb_rf1  = wb_v && wb_xf[XF_RF];                                 // a refetch
 wire wb_ex1  = wb_is_exc && !wb_rf1;                                 // an exception
 wire bnd1    = wb_v && !wb_is_exc && wb_u.last;                      // a boundary
 wire stp0    = stopped && !wb_v;
@@ -1453,8 +1460,8 @@ wire trc1    = bnd1 && tr_now && !sbe1;
 wire irq1    = irq_pend && !(bnd1 && tr_now) && !sbe1 && bnd1 && !xstk;
 wire irq0    = irq_pend && !sbe0 && stp0;
 wire dbl1    = xr_dbl && !halted &&
-               ((wb_ex1 && ((xstk && (wb_exc == 8'd2 || wb_exc == 8'd3)) ||
-                            (x_first && wb_exc == 8'd2 && (wb_exc_fslw & FSLW_IO) != 32'd0))) ||
+               ((wb_ex1 && ((xstk && wb_xf[XF_23]) ||
+                            (x_first && wb_xf[XF_2] && (wb_exc_fslw & FSLW_IO) != 32'd0))) ||
                 (sbe1 && xstk && (sb_fslw & FSLW_SBE) != 32'd0));
 wire dbl0    = xr_dbl && !halted && sbe0 && xstk && (sb_fslw & FSLW_SBE) != 32'd0;
 wire xgo1    = (wb_ex1 || trc1 || irq1 || sbe1) && !dbl1 && !halted;
@@ -1470,8 +1477,9 @@ assign sb_err_ack = take_sbe;
 // instruction once on demand, and only a second fault there is an access
 // error (rt_armed/rt_pc)
 // exceptions that stack the next instruction: the instruction completed
-wire wb_post_trap = (wb_exc >= 8'd32 && wb_exc < 8'd48) ||
+wire wb_post_trap_c = (wb_exc >= 8'd32 && wb_exc < 8'd48) ||
                     wb_exc == 8'd5 || wb_exc == 8'd6 || wb_exc == 8'd7;
+wire wb_post_trap   = wb_xf[XF_POST];
 assign wb_refetch = adv_wb && wb_rf1;
 logic        rt_armed;
 logic [31:0] rt_pc;
@@ -1657,6 +1665,10 @@ always_ff @(posedge clk)
 		                                     bf_n3 != (bf_nb == 3'd3) ||
 		                                     bf_n35 != (bf_nb == 3'd3 || bf_nb == 3'd5))))) begin
 			$display("FAIL: AG's registered bit-field selects disagree (pc %h)", ag_u.pc);
+			$finish;
+		end
+		if (wb_v && wb_xf != xflags(wb_exc)) begin
+			$display("FAIL: WB's registered exception cases %b disagree with %0d (pc %h)", wb_xf, wb_exc, wb_u.pc);
 			$finish;
 		end
 		if (wb_v && wb_crs != cr_sel(wb_u)) begin
@@ -2092,6 +2104,7 @@ always_ff @(posedge clk) begin
 			wb_sr_new   <= ex_sr_new;
 			if (ex_u.exc == EXC_SNR || ex_snw) begin
 				wb_exc      <= EXC_IFS;     // refetched by WB, never an error
+				wb_xf       <= xflags(EXC_IFS);
 				wb_exc_addr <= ex_u.pc;
 				wb_exc_fslw <= 32'd0;
 			end
@@ -2102,12 +2115,18 @@ always_ff @(posedge clk) begin
 				// faults again at the same instruction
 				ifs = (ex_u.exc == EXC_IFS || ex_u.exc == EXC_IFSA);
 				ifa = (ex_u.exc == EXC_IFA || ex_u.exc == EXC_IFSA);
-				if (ifs && !(rt_armed && rt_pc == ex_u.pc))
+				if (ifs && !(rt_armed && rt_pc == ex_u.pc)) begin
 					wb_exc <= ex_u.exc;
-				else if (ifs || ex_u.exc == EXC_IFB || ex_u.exc == EXC_IFA)
+					wb_xf  <= xflags(ex_u.exc);
+				end
+				else if (ifs || ex_u.exc == EXC_IFB || ex_u.exc == EXC_IFA) begin
 					wb_exc <= 8'd2;
-				else
+					wb_xf  <= xflags(8'd2);
+				end
+				else begin
 					wb_exc <= ex_u.exc;
+					wb_xf  <= xflags(ex_u.exc);
+				end
 				// a faulted instruction fetch (MC68060UM 8.4.4): FA is the
 				// instruction's opword address; FSLW IO, MA when the faulted
 				// word was an extension word, read, long, TT normal, TM the
@@ -2127,11 +2146,13 @@ always_ff @(posedge clk) begin
 			end
 			else if (ex_fault) begin
 				wb_exc      <= ex_fvec;
+				wb_xf       <= xflags(ex_fvec);
 				wb_exc_addr <= ex_faddr;
 				wb_exc_fslw <= ex_fslw;
 			end
 			else if (!ex_xnz && ex_odd) begin
 				wb_exc      <= 8'd3;
+				wb_xf       <= xflags(8'd3);
 				wb_exc_addr <= {ex_otgt[31:1], 1'b0};
 				wb_exc_fslw <= 32'd0;
 			end
@@ -2139,11 +2160,13 @@ always_ff @(posedge clk) begin
 				// FPU exceptions bring their frame format, PC and address;
 				// the FPU-disabled frame ($4) has the instruction's PC at +$C
 				wb_exc      <= ex_xvec;
+				wb_xf       <= xflags(ex_xvec);
 				wb_exc_addr <= fp_xaddr;
 				wb_exc_fslw <= (fp_xfmt == 4'h4) ? ex_u.pc : 32'd0;
 			end
 			else begin
 				wb_exc      <= ex_xvec;
+				wb_xf       <= xflags(ex_xvec);
 				wb_exc_addr <= ex_u.pc;
 				wb_exc_fslw <= 32'd0;
 			end
@@ -2357,6 +2380,7 @@ always_ff @(posedge clk) begin
 			wb_stv      <= 1'b0;
 			wb_ok       <= 1'b0;
 			wb_exc      <= 8'd2;
+			wb_xf       <= xflags(8'd2);
 			wb_exc_addr <= dm_st_faddr;
 			wb_exc_fslw <= dm_st_fslw;
 		end
@@ -2371,6 +2395,7 @@ always_ff @(posedge clk) begin
 					wb_stv      <= 1'b0;
 					wb_ok       <= 1'b0;
 					wb_exc      <= 8'd2;
+					wb_xf       <= xflags(8'd2);
 					wb_exc_addr <= wb_res;
 					wb_exc_fslw <= mt_fslw;
 				end
