@@ -746,10 +746,21 @@ always_ff @(posedge clk)
 
 // a store with its translation known needs nothing from DC2 unless it must
 // allocate (copyback miss), is split, or is a MOVE16 destination
-wire st_simple = m2.r.v && (m2.r.mem == M_ST) && m2.x.ok && !m2.x.flt && !m2.split &&
-                 (m2.r.msz != SZ_Q) &&
-                 !(dc_en && m2.x.cm == 2'b01 && !m2.x.hit && !m2.r.noalloc && !m2.r.lock &&
-                   !dc_nad);
+// (decided in DT, registered with the access: m2_ss, cleared with its hit)
+function automatic logic st_simp(input req_t r, input xres_t x, input logic sp);
+	st_simp = (r.mem == M_ST) && x.ok && !x.flt && !sp && (r.msz != SZ_Q) &&
+	          !(dc_en && x.cm == 2'b01 && !x.hit && !r.noalloc && !r.lock && !dc_nad);
+endfunction
+logic m2_ss;
+logic [3:0] dt_inv;            // ways invalidated in the set of the access entering DC2
+wire st_simple = m2.r.v && m2_ss;
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && m2.r.v && !e_job && !e_dc2_done && m2_ss != st_simp(m2.r, m2.x, m2.split)) begin
+		$display("FAIL: DMU: DC2's simple-store decision %b disagrees", m2_ss);
+		$finish;
+	end
+// synthesis translate_on
 
 //--------------------------------------------------------------------------
 // engine
@@ -782,6 +793,11 @@ logic  [2:0] e_n;                 // bytes in the current part
 logic [31:0] e_acc;               // load: assembled operand; store: left aligned data
 logic        e_fromline;          // the operand comes from bo_line (inhibited fill)
 logic        e_fillhit;           // ... from the line a load's own fill just installed
+logic        e_falloc;            // a store's part has been allocated once: if a snoop
+                                  // takes the line before the lookup after the fill
+                                  // finds it, the part stays a miss (WB writes
+                                  // memory), never a second fill: a stream of snoops
+                                  // could close that window every time
 logic        e_kill;              // the DC2 job's uop was discarded
 logic        sp_job;              // the DC2 job is a fast split read
 logic        sp_dw;               // a write to the next set while its
@@ -791,6 +807,12 @@ logic        sp_dw;               // a write to the next set while its
 // DC1 set after its stolen read, steal_q)
 wire  e_quiet = (e_st == E_IDLE) || (e_st == E_S_START) || (e_st == E_SP_W) ||
                 (e_st == E_SP_2) || (e_st == E_SP_3) || (e_st == E_S_DONE && sp_job);
+// the engine's own lookup through the stolen ports: the ATC's part (an
+// asynchronous read) registered in the clock the tag RAM takes the stolen
+// set (E_S_XLW, E_SP_W), the tags compared from the RAM the clock after
+logic        lk_hit;
+atce_t       lk_e;
+logic  [3:0] lk_hv;
 logic        e_job;               // the engine owns the DC2 uop until it is done
 
 // bus operation built by a job, run by E_BUS
@@ -1153,7 +1175,7 @@ always_ff @(posedge clk) begin
 		e_st <= E_IDLE; e_ret <= E_IDLE; e_sret <= E_IDLE; e_wret <= E_IDLE;
 		e_dc2_done <= 1'b0; e_wst_done <= 1'b0;
 		e_ldata <= '0; e_flt <= 1'b0; e_faddr <= '0; e_fslw <= '0;
-		e_part <= 1'b0; e_x <= '0; e_va <= '0; e_n <= '0; e_acc <= '0; e_fromline <= 1'b0; e_fillhit <= 1'b0;
+		e_part <= 1'b0; e_x <= '0; e_va <= '0; e_n <= '0; e_acc <= '0; e_fromline <= 1'b0; e_fillhit <= 1'b0; e_falloc <= 1'b0;
 		e_breq <= 1'b0;
 		bo <= '0; bo_wd <= '0; bo_line <= '0; bo_err <= 1'b0; bo_rd <= '0;
 		bo_avec <= 1'b0; bo_tci <= 1'b0; bo_left <= '0; bo_pn <= '0; bo_pa <= '0;
@@ -1304,6 +1326,7 @@ always_ff @(posedge clk) begin
 			m2.fast  <= tk_fast;
 			m2.sfast <= tk_sfast;
 			m2_bsel  <= tk_bsel;
+			m2_ss    <= st_simp(mt, x_tk, tk_split);
 		end
 		else begin
 			if (adv_dc2) m2.r.v <= 1'b0;
@@ -1415,6 +1438,7 @@ always_ff @(posedge clk) begin
 			e_flt  <= 1'b0;
 			e_fromline <= 1'b0;
 			e_fillhit  <= 1'b0;
+			e_falloc   <= 1'b0;
 			e_n    <= m2.split ? 3'(5'd16 - {1'b0, m2.r.a[3:0]}) : nbytes(m2.r.msz);
 			sp_dw  <= 1'b0;
 			sp_job <= m2.sfast;
@@ -1431,7 +1455,10 @@ always_ff @(posedge clk) begin
 			else
 				e_st   <= m2.x.ok ? E_S_ACT : E_S_XL;
 		end
-		E_SP_W: e_st <= E_SP_2;         // the RAMs register the stolen address
+		E_SP_W: begin                   // the RAMs register the stolen address
+			lk_hit <= atc_hit; lk_e <= atc_e; lk_hv <= atc_hv;
+			e_st   <= E_SP_2;
+		end
 		E_SP_3: begin
 			logic [2:0] n0;
 			n0 = 3'(5'd16 - {1'b0, m2.r.a[3:0]});
@@ -1464,7 +1491,7 @@ always_ff @(posedge clk) begin
 		E_SP_2: begin
 			xres_t x;
 			x  = xlate({m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode, (m2.r.mem != M_LD),
-			           fc_tt(m2.r.fc) == TT_ALT, atc_hit, atc_e,
+			           fc_tt(m2.r.fc) == TT_ALT, lk_hit, lk_e,
 			           tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_q);
 			// the second part's translation and lookup, registered (the
 			// decision and the data next cycle; the RAM keeps reading the
@@ -1481,14 +1508,17 @@ always_ff @(posedge clk) begin
 			st_set <= e_va[10:4];
 			e_st   <= E_S_XLW;
 		end
-		E_S_XLW: e_st <= E_S_XL2;      // the RAMs register the stolen address
+		E_S_XLW: begin                 // the RAMs register the stolen address
+			lk_hit <= atc_hit; lk_e <= atc_e; lk_hv <= atc_hv;
+			e_st   <= E_S_XL2;
+		end
 		E_S_XL2: begin
 			xres_t x;
 			// after a search: its result, not the ATC's (a failed search
 			// leaves no entry, nor does one in the no-allocate mode)
 			x = xlate(e_va, m2.r.smode, (m2.r.mem != M_LD), fc_tt(m2.r.fc) == TT_ALT,
-			          atc_hit || tw_use,
-			          tw_use ? tw_e : atc_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_q);
+			          lk_hit || tw_use,
+			          tw_use ? tw_e : lk_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_q);
 			if (tw_use && tw_fail) begin
 				x.ok  = 1'b1;
 				x.flt = 1'b1;
@@ -1520,8 +1550,8 @@ always_ff @(posedge clk) begin
 			else if (x.walk) begin
 				tw_va <= e_va; tw_s <= m2.r.smode; tw_wr <= (m2.r.mem != M_LD);
 				tw_pt <= 1'b0; tw_i <= 1'b0;
-				tw_upd <= atc_hit;          // a first write: the entry's M
-				tw_hw  <= atc_hv;           // (its way: the install rewrites it)
+				tw_upd <= lk_hit;           // a first write: the entry's M
+				tw_hw  <= lk_hv;            // (its way: the install rewrites it)
 				e_ret <= E_S_XL;            // look up again after the walk
 				e_st  <= E_TW_START;
 			end
@@ -1598,7 +1628,7 @@ always_ff @(posedge clk) begin
 			end
 			else if (m2.r.mem == M_ST) begin
 				// a store: a copyback miss allocates the line for WB
-				if (alloc && e_x.cm == 2'b01 && !e_x.hit) begin
+				if (alloc && e_x.cm == 2'b01 && !e_x.hit && !e_falloc) begin
 					f_set  <= e_va[10:4];
 					f_tag  <= e_x.pa[31:11];
 					f_way  <= victim(lve_q, rrc, dc_foc);
@@ -1718,6 +1748,7 @@ always_ff @(posedge clk) begin
 			if (m2.split && !e_part) begin
 				m2.x   <= e_x;                 // part 0, for WB
 				e_part <= 1'b1;
+				e_falloc <= 1'b0;
 				e_va   <= {m2.r.a[31:4] + 28'd1, 4'd0};
 				e_n    <= nbytes(m2.r.msz) - e_n;
 				e_st   <= E_S_XL;
@@ -2136,6 +2167,7 @@ always_ff @(posedge clk) begin
 				e_st      <= E_S_ACT;
 			end
 			else e_st <= e_sret;
+			if (!bo_err && !bo_tci && m2.r.mem == M_ST && e_sret == E_S_XL) e_falloc <= 1'b1;
 		end
 
 		//==============================================================
@@ -2609,15 +2641,35 @@ always_ff @(posedge clk) begin
 		// the stage before (DC1's lookup read the valid bits before this
 		// write lands), both parts of a split, and the engine's own
 		//--------------------------------------------------------------
-		// (the record DC1 loads now loses its hit on any invalidation in its
-		// set, whatever the way: its way and translation come late, and its
-		// set is the untranslated page offset; a lost hit sends the access
-		// to the engine, which looks the line up again)
-		if (vp_lwe && !vp_lv && (|vp_wm) && adv_dt && mt.a[10:4] == vp_set) m2.x.hit <= 1'b0;
+		// (the record DC2 takes now loses its hit if its way is invalidated
+		// in this cycle: the way is late in DT, so the ways invalidated in
+		// its set are registered (dt_inv) and the hit cleared a cycle later,
+		// in DC2 or, if it moved on, in EX.  Its data was read before: a
+		// fast load completes with it, as if before the invalidation; a store
+		// must lose the hit, or WB would write the line it no longer has)
+		dt_inv <= (vp_lwe && !vp_lv && adv_dt && mt.a[10:4] == vp_set) ? vp_wm : 4'd0;
+		if (dt_inv[m2.x.way] && m2.x.hit) begin
+			if (!adv_dc2) begin
+				xres_t xm;
+				xm = m2.x;
+				xm.hit = 1'b0;
+				m2.x.hit <= 1'b0;
+				m2_ss    <= st_simp(m2.r, xm, m2.split);
+			end
+			else m3.x.hit <= 1'b0;
+			// (the engine taking the access this cycle copies its record)
+			if (e_st == E_S_START && !sn_frz) e_x.hit <= 1'b0;
+		end
 		if (vp_lwe && !vp_lv) begin
 			for (int j = 0; j < 4; j++) if (vp_wm[j]) begin
 				if (!adv_dt) begin
-					if (m2.x.hit && m2.x.pa[10:4] == vp_set && m2.x.way == 2'(j)) m2.x.hit <= 1'b0;
+					if (m2.x.hit && m2.x.pa[10:4] == vp_set && m2.x.way == 2'(j)) begin
+						xres_t xm;
+						xm = m2.x;
+						xm.hit = 1'b0;
+						m2.x.hit <= 1'b0;
+						m2_ss    <= st_simp(m2.r, xm, m2.split);
+					end
 					if (m2.x1.hit && m2.x1.pa[10:4] == vp_set && m2.x1.way == 2'(j)) m2.x1.hit <= 1'b0;
 				end
 				if (adv_dc2) begin
