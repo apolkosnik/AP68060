@@ -9,7 +9,10 @@
 // on the fill's completion clock (+race), or an invalidation first      //
 // (+invalidate), a TCI line must come from a new transfer ($7002); the   //
 // cachable control hits the cache ($7001, one transfer).  (From the       //
-// October 12 core audit's probe.)                                         //
+// October 12 core audit's probe.)  +specwalk: a stream D1 predicted does  //
+// not search the tables (a speculative ATC fault; the back end's refetch //
+// searches).  +takes: D1's takes of the head instruction and of a length //
+// decided a clock before.                                                 //
 //--------------------------------------------------------------------------//
 module tb_fetch_tci;
 import ap68060_pkg::*;
@@ -34,10 +37,12 @@ logic  [7:0] win_fatc;
 logic  [7:0] win_bt;
 logic [31:0] bt_tgt;
 pd_t         pd0;
-pd_t         pd0_n;
 logic  [3:0] qcnt;
 logic [31:0] qpc;
-logic  [2:0] consume;
+logic        cs_fire;
+logic        cr_fire;
+logic  [2:0] cr_use;
+logic        q_simple;
 logic        q_odd;
 logic        bc_clr;
 logic        btb_we;
@@ -106,7 +111,8 @@ task fill(input logic [15:0] opcode);
  if ($test$plusargs("race") && reads==1) begin redir_v=1; redir_pc=32'h2000; end
  tick(); b_done=0; redir_v=0;
  tick(); stop=0; tick(); stop=1;
- repeat(6) tick();
+ // (the fetch pipeline's depth: F0 to the queue, the stop a clock late)
+ repeat(12) tick();
 endtask
 initial begin
 clk = '0;
@@ -123,7 +129,9 @@ itt0 = '0;
 itt1 = '0;
 cdis = '0;
 mdis = '0;
-consume = '0;
+cs_fire = '0;
+cr_fire = '0;
+cr_use = '0;
 bc_clr = '0;
 btb_we = '0;
 btb_wi = '0;
@@ -163,12 +171,59 @@ b_rtci = '0;
  stop=1; reads=0; inhibit=$test$plusargs("tci");
  repeat(4) tick(); nreset=1; cacr=32'h00008000; smode=1;
  repeat(150) tick();
+ if ($test$plusargs("specwalk")) begin
+  // A stream D1 predicted (d_redir_v) to a page the I-ATC does not hold:
+  // the fetch must not search the tables (older stores may not be done);
+  // its words carry a speculative ATC fault.  The back end's refetch of
+  // the same address (redir_v) then searches, and the line is filled.
+  int k;
+  bit walked;
+  tc=32'h00008000;                 // TCR.E: paging on, the ATC empty
+  d_redir_v=1; d_redir_pc=32'h2000; tick(); d_redir_v=0; stop=0;
+  walked=0;
+  for (k = 0; k < 40 && qcnt == 0; k++) begin tick(); if (iw_req) walked=1; end
+  repeat(10) begin tick(); if (iw_req) walked=1; end
+  if (walked || b_req) $fatal(1,"FAIL a predicted stream searched the tables or fetched (iw_req=%b b_req=%b)", walked, b_req);
+  if (qcnt==0 || !win_flt[0] || !win_fatc[0] || win_fdem[0])
+   $fatal(1,"FAIL expected a speculative ATC fault: qcnt=%0d flt=%b atc=%b dem=%b", qcnt, win_flt[0], win_fatc[0], win_fdem[0]);
+  $display("SPEC fault queued without a search");
+  redir_v=1; redir_pc=32'h2000; tick(); redir_v=0;
+  for (k = 0; k < 40 && !iw_req; k++) tick();
+  if (!iw_req || iw_va != 32'h2000) $fatal(1,"FAIL the refetch did not search (iw_req=%b va=%h)", iw_req, iw_va);
+  iw_ent='0; iw_ent.pa=20'h00002; iw_ent.r=1'b1;
+  iw_done=1; tick(); iw_done=0;
+  fill(16'h7001);
+  for (k = 0; k < 40 && qcnt == 0; k++) tick();
+  if (qcnt==0 || win[0]!=16'h7001 || win_flt[0]) $fatal(1,"FAIL after the search: qcnt=%0d data=%h flt=%b", qcnt, win[0], win_flt[0]);
+  $display("PASS predicted stream: speculative ATC fault, search on demand");
+  $finish;
+ end
  redir_v=1; redir_pc=32'h2000; tick(); redir_v=0; stop=0;
  fill(16'h7001);
+ if ($test$plusargs("takes")) begin
+  // D1's two takes: the head instruction (cs_fire, pd0.tot words: MOVEQ
+  // and NOP, one word each) and a length decided a clock before (cr_fire,
+  // cr_use words); the window and its address follow each
+  for (int k = 0; k < 40 && qcnt < 8; k++) begin stop=0; tick(); end
+  stop=1;
+  if (qcnt < 8 || qpc != 32'h2000 || win[0]!=16'h7001 || pd0.tot != 4'd1)
+   $fatal(1,"FAIL before the takes: qcnt=%0d qpc=%h w0=%h tot=%0d", qcnt, qpc, win[0], pd0.tot);
+  cs_fire=1; tick(); cs_fire=0;
+  if (qpc != 32'h2002 || win[0]!=16'h4e71 || pd0.tot != 4'd1)
+   $fatal(1,"FAIL after the head's take: qpc=%h w0=%h tot=%0d", qpc, win[0], pd0.tot);
+  cr_fire=1; cr_use=3'd3; tick(); cr_fire=0;
+  if (qpc != 32'h2008 || win[0]!=16'h7001 || win[1]!=16'h4e71)
+   $fatal(1,"FAIL after a decided take of 3: qpc=%h w0=%h w1=%h", qpc, win[0], win[1]);
+  cs_fire=1; tick(); tick(); cs_fire=0;
+  if (qpc != 32'h200c || win[0]!=16'h7001)
+   $fatal(1,"FAIL after two head takes: qpc=%h w0=%h", qpc, win[0]);
+  $display("PASS queue takes");
+  $finish;
+ end
  if ($test$plusargs("race")) begin
   for (int k = 0; k < 4 && (qcnt == 0 || win[0] != 16'h7002); k++) begin
    if (b_req) fill(16'h7002);
-   else begin stop=0; tick(); stop=1; repeat(5) tick(); end
+   else begin stop=0; tick(); stop=1; repeat(12) tick(); end
   end
   $display("RACE data=%h reads=%0d",win[0],reads);
   if (win[0]!=16'h7002 || reads<2) $display("FAIL TCI completion and redirect retain stale data");
@@ -184,15 +239,15 @@ b_rtci = '0;
   ic_inv=0; repeat(3) tick();
  end
  // A new sequential or redirected IFU request after burst completion and a memory update.
- if ($test$plusargs("sequential")) begin consume=2; tick(); consume=0; end
+ if ($test$plusargs("sequential")) begin cr_fire=1; cr_use=2; tick(); cr_fire=0; end
  else begin redir_v=1; redir_pc=32'h2000; tick(); redir_v=0; end
  stop=0; tick(); stop=1;
- repeat(5) tick();
+ repeat(12) tick();
  // (the unit may have asked for the next long word already: every request
  // is answered from memory as it now is, until words arrive)
  for (int k = 0; k < 4 && qcnt == 0; k++) begin
   if (b_req) fill(16'h7002);
-  else begin stop=0; tick(); stop=1; repeat(5) tick(); end
+  else begin stop=0; tick(); stop=1; repeat(12) tick(); end
  end
  if (qcnt==0) $fatal(1,"FAIL no words after redirect");
  $display("SECOND data=%h reads=%0d lb_valid=%b",win[0],reads,dut.lb_v);

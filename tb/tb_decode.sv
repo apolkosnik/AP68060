@@ -1,7 +1,8 @@
 // Exhaustive decoder check: every operation word through the generated
 // parallel decoder, against tools/ucode.py's model of the hardware rule
 // (most specific pattern, then that entry's EA legality), which
-// tools/check_isa.py checks against WinUAE.
+// tools/check_isa.py checks against WinUAE; and the predecoder's
+// any-pattern match (dec_match) against the selection.
 module tb_decode;
 	import ap68060_pkg::*, ap68060_upkg::*;
 	`include "gen/ap68060_dec_pla.svh"
@@ -30,6 +31,12 @@ module tb_decode;
 			if ($countones(s) > 1) begin
 				bad++;
 				if (bad < 10) $display("op %04x: %0d entries selected", op, $countones(s));
+			end
+			// the predecoder's match, formed from the word apart from the
+			// entry selection, against the selection
+			if (dec_match(16'(op)) != (|s)) begin
+				bad++;
+				if (bad < 10) $display("op %04x: dec_match %b, an entry selected %b", op, dec_match(16'(op)), |s);
 			end
 			got = (|s) ? {1'b0, legal, 1'b0, 9'(sel_index(s) + 9'd1)} : 12'd0;
 			if (got != expect_t[op]) begin

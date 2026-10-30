@@ -130,6 +130,7 @@ module ap68060_rf #(
 	input  logic        clk,
 	input  logic  [2:0] we,
 	input  logic  [4:0] wa [3],
+	input  logic [31:0] woh [3],      // wa one-hot (the caller's registers)
 	input  logic [31:0] wd [3],
 	input  logic  [4:0] ra [NR],
 	output logic [31:0] rd [NR]
@@ -148,9 +149,21 @@ module ap68060_rf #(
 		end
 	endgenerate
 	initial for (int i = 0; i < 32; i++) lvt[i] = 2'd0;
+	// (the live value table's entries written by the one-hot selects, not a
+	// decode of the address after the late write enables)
 	always_ff @(posedge clk)
 		for (int w = 0; w < NW; w++)
-			if (we[w]) lvt[wa[w]] <= 2'(w);
+			if (we[w])
+				for (int i = 0; i < 32; i++)
+					if (woh[w][i]) lvt[i] <= 2'(w);
+	// synthesis translate_off
+	always_ff @(posedge clk)
+		for (int w = 0; w < NW; w++)
+			if (we[w] && woh[w] != (32'd1 << wa[w])) begin
+				$display("FAIL: register file: port %0d's one-hot select %h, its address %0d", w, woh[w], wa[w]);
+				$finish;
+			end
+	// synthesis translate_on
 	always_comb
 		for (int r = 0; r < NR; r++)
 			rd[r] = q[lvt[ra[r]]][r];

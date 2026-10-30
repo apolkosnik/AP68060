@@ -28,7 +28,13 @@ module ap68060_alu
 	input  logic [31:0] b,
 	input  logic [31:0] ea,
 	input  logic  [4:0] flags_in,   // X N Z V C
+	input  logic  [3:0] ac,         // the adder's controls, decoded from op a stage
+	                                // early (alu_ctl): {CMP, X in, subtract, NEG(X)}
 	output logic [31:0] res,
+	output logic [31:0] res_sum,    // the adder's result merged at the size (ADD SUB
+	                                // ADDX SUBX NEGX NEG)
+	output logic [31:0] sum_o,      // the adder's sum (its size's bits; the user merges)
+	output logic  [4:0] sum_fl,     // the flags of ADD SUB ADDX SUBX NEG NEGX CMP
 	output logic  [4:0] flags_out,
 	output logic        cc_true,    // cond evaluated on flags_in
 	output logic        trap        // CHK / CHK2 / TRAPcc exception
@@ -106,29 +112,37 @@ function automatic logic [31:0] merge(input logic [31:0] r, input logic [31:0] b
 endfunction
 
 //--------------------------------------------------------------------------
-// adder: one shared add/subtract with optional X-in
+// adder: one shared add/subtract with optional X-in, l + (r ^ sub) + cin,
+// its controls registered (ac).  The operands enter unmasked, so each
+// adder bit's inputs are four signals and fit the adder's own LUTs (no
+// level in front of the carry chain): the bits above the size are
+// garbage, and the carry out at the size is recovered from the sum's next
+// bit and that bit's inputs
 //--------------------------------------------------------------------------
-logic        is_sub, use_x, b_zero;
-always_comb begin
-	is_sub = (op == OP_SUB) || (op == OP_SUBX) || (op == OP_CMP) ||
-	         (op == OP_NEG) || (op == OP_NEGX);
-	use_x  = (op == OP_ADDX) || (op == OP_SUBX) || (op == OP_NEGX);
-	b_zero = (op == OP_NEG) || (op == OP_NEGX);
-end
+wire        a_cmp  = ac[3];
+wire        use_x  = ac[2];
+wire        is_sub = ac[1];
+wire        b_zero = ac[0];
 
 // NEG is 0 - b: the subtrahend is b, the minuend zero
-wire [31:0] add_l  = b_zero ? 32'd0 : bm;
-wire [31:0] add_r  = b_zero ? bm    : am;
-wire        cin    = use_x & f_x;
-wire [32:0] sum    = is_sub ? ({1'b0, add_l} - {1'b0, add_r} - {32'd0, cin})
-                            : ({1'b0, add_l} + {1'b0, add_r} + {32'd0, cin});
-wire        sum_c  = carry_of(sum, sz);
+wire [31:0] add_l  = b_zero ? 32'd0 : b;
+wire [31:0] add_r  = (b_zero ? b : a) ^ {32{is_sub}};
+wire        cin    = (use_x & f_x) ^ is_sub;
+wire [32:0] sum    = {1'b0, add_l} + {1'b0, add_r} + {32'd0, cin};
+// the carry into bit 8 or 16, or out of bit 31 (subtracting: no borrow)
+wire        c_out  = (sz == SZ_B) ? (sum[8]  ^ add_l[8]  ^ add_r[8])  :
+                     (sz == SZ_W) ? (sum[16] ^ add_l[16] ^ add_r[16]) : sum[32];
+wire        sum_c  = c_out ^ is_sub;
 wire        sum_n  = msb_of(sum[31:0], sz);
 wire        sum_z  = (sum[31:0] & szmask) == 32'd0;
 wire        l_msb  = b_zero ? 1'b0  : b_msb;
 wire        r_msb  = b_zero ? b_msb : a_msb;
 wire        sum_v  = is_sub ? ((l_msb != r_msb) && (sum_n != l_msb))
                             : ((l_msb == r_msb) && (sum_n != l_msb));
+assign      res_sum = merge(sum[31:0], b, szmask);
+assign      sum_o   = sum[31:0];
+// (CMP keeps X; ADDX SUBX NEGX clear Z only)
+assign      sum_fl  = {a_cmp ? f_x : sum_c, sum_n, use_x ? (f_z & sum_z) : sum_z, sum_v, sum_c};
 
 //--------------------------------------------------------------------------
 // bit operations: a holds the bit number, already reduced mod 32 (register)
