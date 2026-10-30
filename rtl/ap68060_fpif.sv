@@ -309,7 +309,7 @@ ap040_fpu #(.PIPE(FPU_PIPE)) fpu (
 	.fm_sel(f_fmsel), .fm_we(f_fmwe), .fm_wdata(f_din), .fm_rdata(f_fmrd),
 	.fpu_used(f_used), .pbusy(f_pbusy), .pdone(f_pdone),
 	.okv_next(f_okvn), .sel_x(1'b1), .aok_x(f_aok), .bok_x(f_bok),
-	.rfl_next(f_rfln), .sfl_x(f_sfl), .dfl_x(f_dfl),
+	.rfl_next(f_rfln), .sfl_x(f_sfl), .dfl_x(f_dfl), .src_r_n(n_srcr), .dst_r_n(n_dstr),
 	.opmode_n(n_opm), .op_class_n(n_class), .src_fmt_n(n_fmt),
 	.fstate_et(f_xop), .frestore_idle(f_rest_idle),
 	.frestore_we(f_rwe), .frestore_wd({rs_w0, rs_w1, f_rwd}),
@@ -348,6 +348,7 @@ logic [95:0] fmr_q;            // a flip-flop, not the register file's read path
 logic        st_q;             // the latched instruction is a store (ext_q opclass 011)
 logic        q_bcc, q_fdbcc;   // ... FBcc, FDBcc
 logic        q_fsccm;          // ... FScc of a memory operand (its frame address)
+logic  [2:0] q_dsrc;           // ... its DISP's source register (a store's FPn)
 logic        crr_wait;         // CRR: the control register read's cycle
 logic [95:0] get_q;            // the long words GET returns
 logic  [1:0] sv_kind;          // FSAVE frame: 0 NULL, 1 IDLE, 2 EXCP
@@ -933,7 +934,7 @@ always_comb begin
 			n_fmt   = fmt;
 		end
 		FC_DISP: begin
-			n_srcr  = st_q ? ext_q[9:7] : ext_q[12:10];
+			n_srcr  = q_dsrc;
 			n_dstr  = ext_q[9:7];
 			n_class = ext_q[15:13];
 			n_opm   = ext_q[6:0];
@@ -1176,7 +1177,7 @@ end
 always_ff @(posedge clk) begin : dat
 	if (!nreset) begin
 		opw_q <= '0; ext_q <= '0; fsr_q <= 1'b0; lst_q <= '0; st_q <= 1'b0;
-		q_bcc <= 1'b0; q_fdbcc <= 1'b0; q_fsccm <= 1'b0;
+		q_bcc <= 1'b0; q_fdbcc <= 1'b0; q_fsccm <= 1'b0; q_dsrc <= '0;
 		eaa <= '0; eav <= 1'b0;
 		f_din <= '0; f_dnice <= 1'b0; f_dcls <= '0; f_iapc <= '0; f_fmsel <= '0;
 		f_crsel <= '0; f_crwd <= '0; get_q <= '0;
@@ -1193,6 +1194,7 @@ always_ff @(posedge clk) begin : dat
 			lst_q  <= lst_of(opw, ext);
 			ext_q  <= ext;
 			st_q   <= (ext[15:13] == 3'b011);
+			q_dsrc  <= (ext[15:13] == 3'b011) ? ext[9:7] : ext[12:10];
 			q_bcc   <= is_bcc;
 			q_fdbcc <= is_fdbcc;
 			q_fsccm <= is_cc && eam >= 3'd2 && !(eam == 3'd7 && ear >= 3'd2);
@@ -1231,7 +1233,9 @@ always_ff @(posedge clk) begin : dat
 			mv_rev <= 1'b0;
 		end
 		FC_MVR: if (mvr_ok) get_q <= mv_rev ? {fmr_q[31:0], fmr_q[63:32], fmr_q[95:64]} : fmr_q;
-		FC_MVW: if (cur_on) begin
+		// (the register and its image: used only with the write strobe,
+		// which the list bit gates)
+		FC_MVW: begin
 			f_fmsel <= cur_reg;
 			f_din   <= {av, bv, latch};
 		end

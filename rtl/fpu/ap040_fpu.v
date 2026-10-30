@@ -114,6 +114,10 @@ module ap040_fpu
 	output     [31:0] rfl_next,
 	input       [3:0] sfl_x,
 	input       [3:0] dfl_x,
+	// with sel_x: src_r and dst_r as they will be next cycle (the register
+	// file compares its pending write's address with them a cycle ahead)
+	input       [2:0] src_r_n,
+	input       [2:0] dst_r_n,
 	output            pbusy,       // pipelined operations in flight: FPU state
 	                               // (registers, FPSR, condition codes) is not
 	                               // current until they complete
@@ -511,13 +515,15 @@ reg  [16:0] a_e;
 reg  [63:0] a_m;
 reg   [1:0] a_t;
 // The arithmetic's result significand has a register of its own: the add,
-// multiply, divide, square root, normalize and round states write z_m,
-// the dispatch, conversion and special-case states a_m -- two narrower
-// input selects instead of one wide one.  The rounding reads z_m after
-// arithmetic (zr), a_m after a move or an exact special case; writeback
-// reads z_m after rounding (wz), a_m otherwise.
-reg  [63:0] z_m;
-reg         zr, wz;
+// multiply, divide, square root and normalize states write z_m, the
+// dispatch, conversion and special-case states a_m, the rounding w_m --
+// narrow input selects instead of one wide one.  The rounding reads z_m
+// after arithmetic (zr), a_m after a move or an exact special case;
+// writeback reads w_m after rounding, z_m after FINT's normalization, a_m
+// otherwise (wsrc).
+reg  [63:0] z_m, w_m;
+reg         zr;
+reg   [1:0] wsrc;
 // The arithmetic units' result as the significand and GRS of a value to
 // round, by the operation (op_kind, a register): the sum, renormalized by
 // its carry; the product by its top bit; the quotient by its integer bit;
@@ -1676,7 +1682,8 @@ wire [14:0] fr_wb_e = (a_t == T_ZERO) ? 15'd0 :
                        (a_t == T_INF || a_t == T_NAN) ? 15'h7FFF : a_e[14:0];
 // the 68060 writes every infinity with a zero mantissa (WinUAE
 // infinity_clear_intbit: move, abs, neg, add, sub, mul, div, sqrt, int)
-wire [63:0] fr_wb_m = (a_t == T_ZERO || a_t == T_INF) ? 64'd0 : wz ? z_m : a_m;
+wire [63:0] fr_wb_m = (a_t == T_ZERO || a_t == T_INF) ? 64'd0 :
+                      wsrc[1] ? w_m : wsrc[0] ? z_m : a_m;
 wire [79:0] p6_wd   = {p6_s, p6_z ? 15'd0 : p6_e[14:0], p6_z ? 64'd0 : p6_m};
 wire [79:0] fm_wd   = {fm_wdata[95], fm_wdata[94:80], fm_wdata[63:0]};
 wire        fr_bank_we = fm_we || fr_wb_we || p6_v;
@@ -1816,7 +1823,8 @@ ap040_fp_regfile fpregs
 	.clk(clk), .ce(ce), .we(fr_bank_we),
 	.waddr(fr_bank_wa), .wdata(fr_bank_wd),
 	.raddr_a(src_r), .rdata_a(fr_src_raw),
-	.raddr_b(dst_r), .rdata_b(fr_dst_raw)
+	.raddr_b(dst_r), .rdata_b(fr_dst_raw),
+	.sel_n(sel_x), .raddr_a_n(src_r_n), .raddr_b_n(dst_r_n)
 );
 
 integer k;
@@ -1960,7 +1968,7 @@ always @(posedge clk) begin : fsm
 		r_ae7 <= 0;
 		r_bin <= 0; r_mov <= 0; r_fsub <= 0; r_sgl <= 0; r_kind <= 0; r_prec <= 0;
 		r_dcls <= 0;
-		a_s <= 0; a_e <= 0; a_m <= 0; a_t <= 0; z_m <= 0; zr <= 0; wz <= 0;
+		a_s <= 0; a_e <= 0; a_m <= 0; a_t <= 0; z_m <= 0; w_m <= 0; zr <= 0; wsrc <= 0;
 		sh_v <= 0; sh_cnt <= 0;
 		pk_neg <= 0; pk_isz <= 0; pk_mg <= 0; pk_sat <= 0; r_lde <= 0; pk_lo <= 0; pk_ovf <= 0; int_z <= 0; unp_m <= 0;
 		b_s <= 0; b_e <= 0; b_m <= 0; b_t <= 0; b_unsup <= 0;
@@ -2095,7 +2103,7 @@ always @(posedge clk) begin : fsm
 				grs <= 3'd0;
 				e_w <= $signed({3'd0, fr_src_e});
 				zr  <= 1'b0;
-				wz  <= 1'b0;
+				wsrc <= 2'd0;
 				sh_src <= (!cd_st && (cd_mcr || !cd_hw)) ? 96'd0 :
 				          (!cd_st && !cd_reg && cd_pk) ? {32'd0, din[63:0]} :
 				          {fr_src_s, fr_src_e, 16'd0, fr_src_m};
@@ -2396,9 +2404,9 @@ always @(posedge clk) begin : fsm
 						n_acc = 1'b1;
 					end
 					default: begin
-						// FINT's integer: written back from z_m (wz)
+						// FINT's integer: written back from z_m (wsrc)
 						a_e <= a_e - {10'd0, n_lz};
-						wz  <= 1'b1;
+						wsrc <= 2'd1;
 						n_fst = F_WB; n1h = 26'd1 << F_WB; n_acc = 1'b1; n_wbok = fpcr_en0;
 					end
 				endcase
@@ -2753,7 +2761,7 @@ always @(posedge clk) begin : fsm
 				// the result, written whatever the range check decides (an
 				// underflow keeps the destination: x_kill), and the
 				// underflow's denormalizing shift set up beside it
-				z_m <= !ovf ? mr : !tomax ? 64'd0 :      // created infinity: all-zero
+				w_m <= !ovf ? mr : !tomax ? 64'd0 :      // created infinity: all-zero
 				       r_sgl ? 64'hFFFF_FFFF_FFFF_FFFF :
 				       (r_prec == 2'd1) ? 64'hFFFF_FF00_0000_0000 :
 				       (r_prec == 2'd2) ? 64'hFFFF_FFFF_FFFF_F800 :
@@ -2762,7 +2770,7 @@ always @(posedge clk) begin : fsm
 				a_t <= (ovf && !tomax) ? T_INF : T_NUM;
 				sh_v   <= {rin, grs};
 				sh_cnt <= carry ? rn_x1 : rn_x0;
-				wz     <= 1'b1;
+				wsrc   <= 2'd2;
 				e_w    <= emin;
 				r_pr   <= r_prec;
 				sh_ret <= F_UNFL;
@@ -3146,7 +3154,12 @@ module ap040_fp_regfile
 	input       [2:0] raddr_a,
 	output     [79:0] rdata_a,
 	input       [2:0] raddr_b,
-	output     [79:0] rdata_b
+	output     [79:0] rdata_b,
+	// sel_n: raddr_a_n/raddr_b_n are the read addresses as they will be next
+	// cycle -- the pending write's address compares registered (hit_*_q)
+	input             sel_n,
+	input       [2:0] raddr_a_n,
+	input       [2:0] raddr_b_n
 );
 
 // READ DURING WRITE.  no_rw_check does not promise the accesses never
@@ -3172,8 +3185,18 @@ reg        pend_we;
 reg  [2:0] pend_waddr;
 reg [79:0] pend_wdata;
 
-wire hit_a = pend_we && (pend_waddr == raddr_a);
-wire hit_b = pend_we && (pend_waddr == raddr_b);
+reg  hit_a_q, hit_b_q;
+wire hit_a = sel_n ? hit_a_q : pend_we && (pend_waddr == raddr_a);
+wire hit_b = sel_n ? hit_b_q : pend_we && (pend_waddr == raddr_b);
+// synthesis translate_off
+always @(posedge clk)
+	if (sel_n && $time > 0 && (hit_a_q !== (pend_we && pend_waddr == raddr_a) ||
+	                           hit_b_q !== (pend_we && pend_waddr == raddr_b))) begin
+		$display("FAIL: FPU register file read bypass %b%b, the addresses' %b%b", hit_a_q, hit_b_q,
+		         pend_we && pend_waddr == raddr_a, pend_we && pend_waddr == raddr_b);
+		$finish;
+	end
+// synthesis translate_on
 assign rdata_a = hit_a ? pend_wdata : bank_a[raddr_a];
 assign rdata_b = hit_b ? pend_wdata : bank_b[raddr_b];
 
@@ -3187,6 +3210,8 @@ always @(posedge clk) begin
 		pend_we    <= we;
 		pend_waddr <= waddr;
 		pend_wdata <= wdata;
+		hit_a_q    <= we && (waddr == raddr_a_n);
+		hit_b_q    <= we && (waddr == raddr_b_n);
 	end
 end
 
