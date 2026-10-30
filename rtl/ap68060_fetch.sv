@@ -126,7 +126,8 @@ module ap68060_fetch
 	input  logic        iw_done,
 	input  atce_t       iw_ent,       // the walk's entry (r clear: it failed)
 	input  logic [31:0] iw_cause,     // ... and the failure's FSLW cause
-	output logic [31:0] if_cause,     // FSLW cause of the last faulted fetch translation
+	output logic [31:0] if_cause,     // FSLW cause of the last faulted fetch (its translation
+	                                  // fault; a bus error: TTR when an ITT maps it)
 	input  logic        iatc_wr,
 	input  logic [31:0] iatc_wla,
 	input  logic        iatc_wfc2,
@@ -483,6 +484,7 @@ logic [31:0] m_la;             // the fetch address
 logic [31:0] m_pa;
 logic  [1:0] m_upa;
 logic        m_s, m_dem, m_ci, m_alloc;
+logic        f2_tt, m_tt;      // the fetch is mapped by ITT0/ITT1 (its bus error's FSLW.TTR)
 logic  [1:0] m_way;
 
 // invalidation
@@ -925,7 +927,7 @@ always_ff @(posedge clk) begin
 		f3_b  <= '0; f4_b <= '0; f5_b <= '0; f6_b <= '0;
 		lb_v  <= 1'b0; lb_pa <= '0; m_tci <= 1'b0;
 		busy  <= 1'b0; stale <= 1'b0; b_req_r <= 1'b0;
-		m_la  <= '0; m_pa <= '0; m_upa <= '0; m_s <= 1'b0; m_dem <= 1'b0; m_ci <= 1'b0;
+		m_la  <= '0; m_pa <= '0; m_upa <= '0; m_s <= 1'b0; m_dem <= 1'b0; m_ci <= 1'b0; m_tt <= 1'b0;
 		m_alloc <= 1'b0; m_way <= '0; m_line <= '0;
 		iw_req <= 1'b0;
 		c_we  <= 1'b0; c_waddr <= '0; c_wway <= '0; c_wtag <= '0;
@@ -1073,6 +1075,7 @@ always_ff @(posedge clk) begin
 		f2_walk <= x_walk;
 		f2_pa   <= x_pa;
 		f2_cm   <= x_cm;
+		f2_tt   <= f1_tt0 || f1_tt1;
 		f2_upa  <= x_upa;
 		f2_vv   <= ivf_q;
 		f2_btk  <= 1'b0;
@@ -1118,6 +1121,7 @@ always_ff @(posedge clk) begin
 			m_s    <= f2_s;
 			m_dem  <= f2_dem;
 			m_ci   <= f2_cm[1];
+			m_tt   <= f2_tt;
 			if (f2_rop == 2'd1) begin
 				fras_tp <= fras_tp - 3'd1;
 				fras_n  <= fras_n - 4'd1;
@@ -1263,6 +1267,8 @@ always_ff @(posedge clk) begin
 					md_n <= m_la[1] ? 2'd1 : 2'd2;
 					for (int i = 0; i < 2; i++) md_w[i] <= 16'd0;
 					md_f <= 1'b1; md_d <= m_dem; md_a <= 1'b0;
+					// (a bus error's cause: the fetch mapped by a TTR, 8.4.4)
+					if_cause <= m_tt ? FSLW_TTR : 32'd0;
 					st   <= S_HALT;
 				end
 			end
@@ -1306,6 +1312,7 @@ always_ff @(posedge clk) begin
 					md_w[0] <= 16'd0;
 					md_w[1] <= 16'd0;
 					md_f <= 1'b1; md_d <= m_dem; md_a <= 1'b0;
+					if_cause <= m_tt ? FSLW_TTR : 32'd0;
 					st   <= S_HALT;
 				end
 				else st <= S_RUN;
