@@ -794,6 +794,7 @@ logic [31:0] e_acc;               // load: assembled operand; store: left aligne
 logic        e_fromline;          // the operand comes from bo_line (inhibited fill)
 logic        e_fillhit;           // ... from the line a load's own fill just installed
 logic        wd_push, wd_wtp, wd_upd, wd_cb, wd_sb;   // E_W_DEC's decisions
+logic        fv_lv, fv_ld, fv_bad;   // the fill's victim / the pushed line: valid, dirty
 logic [15:0] wd_be;
 logic        e_falloc;            // a store's part has been allocated once: if a snoop
                                   // takes the line before the lookup after the fill
@@ -2105,9 +2106,16 @@ always_ff @(posedge clk) begin
 				e_st   <= E_FILLW;
 			end
 		end
-		E_FILLW: e_st <= E_FILL_W;
-		E_FILL_W: begin
-			if (lve_q[f_way] && ld_q[f_way]) begin     // (ld_ra, lv_ra: f_set)
+		E_FILLW: begin
+			// (the victim's valid and dirty bits, registered for E_FILL_W)
+			fv_lv <= lve_q[f_way];
+			fv_ld <= ld_q[f_way];
+			fv_bad <= 1'b0;
+			e_st  <= E_FILL_W;
+		end
+		E_FILL_W: if (fv_bad) e_st <= E_FILLW;   // a snoop came between: read them again
+		else begin
+			if (fv_lv && fv_ld) begin
 				pv_v     <= 1'b1;
 				pv_line  <= dq_rn[f_way];
 				pv_lpa   <= {tq_b[f_way], f_set};
@@ -2200,9 +2208,16 @@ always_ff @(posedge clk) begin
 			tset_b <= f_set;
 			e_st   <= E_PUSHVW;
 		end
-		E_PUSHVW: e_st <= E_PUSHV_W;
-		E_PUSHV_W: begin
-			if (lve_q[f_way] && ld_q[f_way]) begin     // (ld_ra, lv_ra: f_set)
+		E_PUSHVW: begin
+			// (the line's valid and dirty bits, registered for E_PUSHV_W)
+			fv_lv  <= lve_q[f_way];
+			fv_ld  <= ld_q[f_way];
+			fv_bad <= 1'b0;
+			e_st   <= E_PUSHV_W;
+		end
+		E_PUSHV_W: if (fv_bad) e_st <= E_PUSHVW;  // a snoop came between: read them again
+		else begin
+			if (fv_lv && fv_ld) begin
 				pv_v     <= 1'b1;
 				pv_line  <= dq_rn[f_way];
 				pv_lpa   <= {tq_b[f_way], f_set};
@@ -2213,7 +2228,7 @@ always_ff @(posedge clk) begin
 			else e_st <= e_sret;
 			// invalidated, or (pv_keep) left valid and clean
 			vp_set = f_set; vp_wm[f_way] = 1'b1;
-			vp_lwe = 1'b1; vp_lv = pv_keep && lve_q[f_way]; vp_dwe = 1'b1; vp_dv = 1'b0;
+			vp_lwe = 1'b1; vp_lv = pv_keep && fv_lv; vp_dwe = 1'b1; vp_dv = 1'b0;
 		end
 		E_PUSHV_B: begin
 			bo.line <= 1'b1; bo.rd <= 1'b0; bo.tt <= TT_NORMAL; bo.tm <= TM_PUSH;
@@ -2545,6 +2560,8 @@ always_ff @(posedge clk) begin
 		endcase
 
 		if ((e_st == E_SP_W || e_st == E_SP_2) && dw && dw_set == st_set) sp_dw <= 1'b1;
+		// a snoop (the engine frozen) between the victim's bits and their use
+		if (sn_frz && (e_st == E_FILL_W || e_st == E_PUSHV_W)) fv_bad <= 1'b1;
 
 		if (kill_now) begin
 			// a kill comes with the WB uop leaving (or WB empty): every
@@ -2801,7 +2818,7 @@ wire  [7:0] lse_q = lse[lv_ra];
 assign lve_q = lse_q[3:0];
 always_comb
 	lv_ra = (sn_ph == SN_B)                            ? sn_pa[10:4] :
-	        (e_st == E_SP_2)                           ? m2.r.a[10:4] + 7'd1 :
+	        (e_st == E_SP_2)                           ? st_set :     // (the next set)
 	        (e_st == E_S_XL2 || e_st == E_S_ACT ||
 	         e_st == E_W_DEC)                          ? e_va[10:4] :
 	        (e_st == E_M_SCANW || e_st == E_M_SCAN2)   ? sc_set : f_set;

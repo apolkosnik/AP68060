@@ -376,13 +376,21 @@ assign rra[3] = ag_u.a_reg;
 assign rra[4] = ag_u.b_reg;
 always_comb for (int i = 0; i < 5; i++) rrd[i] = fv[rra[i]] ? frd[i] : brd[i];
 
-logic [31:0] agb_q, agx_q;     // the base, and the index sign-extended and scaled
+logic [31:0] agb_q, agx_q;     // the base, and the index sign-extended
 wire  [31:0] ag_base = agb_q;
-wire  [31:0] ag_ix   = agx_q;
+// (the index is scaled here, a multiplexer before the carry-save step: the
+// register file read as the uop enters AG has no room for it)
+wire  [31:0] ag_ix   = agx_q << ag_u.scale;
 function automatic logic [31:0] ixf(input logic [31:0] v, input uop_t u);
-	ixf = u.idx_v ? ((u.idx_l ? v : {{16{v[15]}}, v[15:0]}) << u.scale) : 32'd0;
+	ixf = u.idx_v ? (u.idx_l ? v : {{16{v[15]}}, v[15:0]}) : 32'd0;
 endfunction
-wire [31:0] ag_ea   = ag_base + ag_ix + ag_u.disp;
+// three operands in one carry chain: a carry-save step (one LUT) and one
+// adder, not two adders in a row
+function automatic logic [31:0] add3(input logic [31:0] a, input logic [31:0] b,
+                                     input logic [31:0] c);
+	add3 = (a ^ b ^ c) + {((a & b) | (a & c) | (b & c)), 1'b0};
+endfunction
+wire [31:0] ag_ea   = add3(ag_base, ag_ix, ag_u.disp);
 wire [31:0] ag_pinc = ag_base + {{24{ag_u.upd_amt[7]}}, ag_u.upd_amt};
 wire [31:0] ag_updv = ag_u.pinc ? ag_pinc : ag_ea;
 wire [31:0] ag_u2v  = rrd[2] + {{24{ag_u.upd2_amt[7]}}, ag_u.upd2_amt};
@@ -399,8 +407,10 @@ wire  [1:0] ag_msz    = ag_bfh ? ((bf_nb == 3'd1) ? SZ_B : (bf_nb <= 3'd3) ? SZ_
 // the memory address: the cases are folded into the adder's operands
 // (their selects are registers), so nothing follows the sum on its way
 // to the data cache's set index
-wire [31:0] ag_mdisp  = (ag_bft && bf_nb == 3'd3) ? ag_u.disp - 32'd2 : ag_u.disp;
-wire [31:0] ag_maddr  = ag_base + ag_ix + ag_mdisp;
+// (disp - 2 formed as the uop enters AG: ag_dm2)
+logic [31:0] ag_dm2;
+wire [31:0] ag_mdisp  = (ag_bft && bf_nb == 3'd3) ? ag_dm2 : ag_u.disp;
+wire [31:0] ag_maddr  = add3(ag_base, ag_ix, ag_mdisp);
 
 // operand read with the EX broadcast of this cycle (see the snoop below)
 logic        exw_v;           // EX writes the front file this cycle
@@ -2158,6 +2168,7 @@ always_ff @(posedge clk) begin
 			if (ag_take && ain_v) begin
 				ag_u      <= ain_u;
 				ag_u.disp <= ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp;
+				ag_dm2    <= (ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp) - 32'd2;
 			end
 			// the skid: emptied when AG takes it; filled by a popped uop AG
 			// did not take
@@ -2290,24 +2301,32 @@ always_ff @(posedge clk) begin
 	cb_o = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.base;
 	cx_o = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.idx;
 	if (ag_new) begin
+		// the value: the register file (front or back copy), AG's own
+		// updates of this cycle, EX's result of this cycle (the file's read
+		// is a cycle early), the load leaving DC2 (younger than EX's writer:
+		// it wins), youngest first.  One-hot selects from register compares
+		// over all but the load, which picks last (adv_dc2 comes late); the
+		// index sign-extended on each source in parallel
 		logic [31:0] b, x;
-		b = rrd[0];
-		x = rrd[1];
-		// (AG's own updates: here AG advances, so fwe[0..1] is just whether
-		// it holds one -- adv_ag, the end of the stall chain, stays off the
-		// data select)
-		for (int i = 0; i < 2; i++) begin
-			if (fwe_ag[i] && fwa[i] == ain_u.base) b = fwd[i];
-			if (fwe_ag[i] && fwa[i] == ain_u.idx)  x = fwd[i];
-		end
-		// EX's result of this cycle: the register file read is a cycle early
-		if (exw_ag && exw_reg == ain_u.base) b = exw_val;
-		if (exw_ag && exw_reg == ain_u.idx)  x = exw_val;
-		// the load leaving DC2 (younger than EX's writer: it wins)
-		if (cb_n) b = dc2_capv;
-		if (cx_n) x = dc2_capv;
-		agb_q <= ain_u.base_v ? b : 32'd0;
-		agx_q <= ixf(x, ain_u);
+		logic        be, b1, b0, xe, x1, x0;
+		be = exw_ag && exw_reg == ain_u.base;
+		b1 = fwe_ag[1] && fwa[1] == ain_u.base;
+		b0 = fwe_ag[0] && fwa[0] == ain_u.base;
+		xe = exw_ag && exw_reg == ain_u.idx;
+		x1 = fwe_ag[1] && fwa[1] == ain_u.idx;
+		x0 = fwe_ag[0] && fwa[0] == ain_u.idx;
+		b = ({32{be}}                         & exw_val) |
+		    ({32{!be && b1}}                  & fwd[1])  |
+		    ({32{!be && !b1 && b0}}           & fwd[0])  |
+		    ({32{!be && !b1 && !b0 &&  fv[rra[0]]}} & frd[0]) |
+		    ({32{!be && !b1 && !b0 && !fv[rra[0]]}} & brd[0]);
+		x = ({32{xe}}                         & ixf(exw_val, ain_u)) |
+		    ({32{!xe && x1}}                  & ixf(fwd[1], ain_u))  |
+		    ({32{!xe && !x1 && x0}}           & ixf(fwd[0], ain_u))  |
+		    ({32{!xe && !x1 && !x0 &&  fv[rra[1]]}} & ixf(frd[1], ain_u)) |
+		    ({32{!xe && !x1 && !x0 && !fv[rra[1]]}} & ixf(brd[1], ain_u));
+		agb_q <= !ain_u.base_v ? 32'd0 : cb_n ? dc2_capv : b;
+		agx_q <= cx_n ? ixf(dc2_capv, ain_u) : x;
 		wf_b  <= ain_u.base_v ? wf_next(wm(ain_u.base), wmatch(ag_v, ag_u, ain_u.base), cb_n) : 4'd0;
 		wf_x  <= ain_u.idx_v  ? wf_next(wm(ain_u.idx),  wmatch(ag_v, ag_u, ain_u.idx),  cx_n) : 4'd0;
 		wf_u  <= ain_u.upd_v  ? wf_next(wm(ain_u.upd_reg),  wmatch(ag_v, ag_u, ain_u.upd_reg),  1'b0) : 4'd0;

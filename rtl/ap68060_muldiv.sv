@@ -86,10 +86,6 @@ always @(posedge clk) begin
 		res_lo  <= 0;
 		ovf     <= 0;
 	end
-	else if (kill) begin
-		running <= 1'b0;
-		done    <= 1'b0;
-	end
 	else begin
 		done <= 0;
 
@@ -144,6 +140,12 @@ always @(posedge clk) begin
 					ovf    <= 0;
 				end
 			end
+		end
+		// a kill only stops the unit: the data registers go on as they
+		// would (the late kill reaches two flip-flops, not every one)
+		if (kill) begin
+			running <= 1'b0;
+			done    <= 1'b0;
 		end
 	end
 end
