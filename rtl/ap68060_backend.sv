@@ -2576,36 +2576,44 @@ end
 always_ff @(posedge clk) begin
 	logic ag_new, cb_n, cx_n, cb_o, cx_o, agv_n, qb_o, qx_o;
 	logic [4:0] nb, nx, nu, nu2;
+	logic [31:0] b, x, bh, xh;
+	logic        b1, b0, x1, x0;
 	ag_new = !flush && !stall_ag && ain_v && !stopped;
 	// a plain load leaving DC2 whose data a base or index takes
 	cb_n = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.base;
 	cx_n = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.idx;
 	cb_o = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.base;
 	cx_o = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.idx;
+	// the value entering: the register file (front or back copy), AG's own
+	// updates of this cycle, the load leaving DC2 (younger than any writer
+	// still in EX: it wins), youngest first.  One-hot selects from register
+	// compares over all but the load, which picks last (adv_dc2 comes
+	// late); the index sign-extended on each source in parallel.  (EX's
+	// result of this cycle is written into the file at this edge: the flags
+	// wait for it, and exw_q brings it next clock.)
+	b1 = fwe_ag[1] && fwa[1] == ain_u.base;
+	b0 = fwe_ag[0] && fwa[0] == ain_u.base;
+	x1 = fwe_ag[1] && fwa[1] == ain_u.idx;
+	x0 = fwe_ag[0] && fwa[0] == ain_u.idx;
+	b = ({32{ain_u.base_v && b1}}                  & fwd[1])  |
+	    ({32{ain_u.base_v && !b1 && b0}}           & fwd[0])  |
+	    ({32{ain_u.base_v && !b1 && !b0 &&  fv[rra[0]]}} & frd[0]) |
+	    ({32{ain_u.base_v && !b1 && !b0 && !fv[rra[0]]}} & brd[0]);
+	x = ({32{x1}}                  & ixf(fwd[1], ain_u))  |
+	    ({32{!x1 && x0}}           & ixf(fwd[0], ain_u))  |
+	    ({32{!x1 && !x0 &&  fv[rra[1]]}} & ixf(frd[1], ain_u)) |
+	    ({32{!x1 && !x0 && !fv[rra[1]]}} & ixf(brd[1], ain_u));
+	// the value staying: EX's result of last clock (exw_q), else its own
+	qb_o = exw_qv && exw_qreg == ag_u.base && !cbl;
+	qx_o = exw_qv && exw_qreg == ag_u.idx  && !cxl;
+	bh = (ag_v && ag_u.base_v && qb_o) ? exw_q : agb_q;
+	xh = (ag_v && ag_u.idx_v && qx_o) ? ixf(exw_q, ag_u) : agx_q;
+	// the load's capture, then the advance, select last
+	agb_q <= ag_new ? ((cb_n && ain_u.base_v) ? dc2_capv : b)
+	                : ((cb_o && ag_v && ag_u.base_v) ? dc2_capv : bh);
+	agx_q <= ag_new ? (cx_n ? ixf(dc2_capv, ain_u) : x)
+	                : ((cx_o && ag_v && ag_u.idx_v) ? ixf(dc2_capv, ag_u) : xh);
 	if (ag_new) begin
-		// the value: the register file (front or back copy), AG's own
-		// updates of this cycle, the load leaving DC2 (younger than any
-		// writer still in EX: it wins), youngest first.  One-hot selects
-		// from register compares over all but the load, which picks last
-		// (adv_dc2 comes late); the index sign-extended on each source in
-		// parallel.  (EX's result of this cycle is written into the file at
-		// this edge: the flags wait for it, and exw_q brings it next clock.)
-		logic [31:0] b, x;
-		logic        b1, b0, x1, x0;
-		b1 = fwe_ag[1] && fwa[1] == ain_u.base;
-		b0 = fwe_ag[0] && fwa[0] == ain_u.base;
-		x1 = fwe_ag[1] && fwa[1] == ain_u.idx;
-		x0 = fwe_ag[0] && fwa[0] == ain_u.idx;
-		b = ({32{b1}}                  & fwd[1])  |
-		    ({32{!b1 && b0}}           & fwd[0])  |
-		    ({32{!b1 && !b0 &&  fv[rra[0]]}} & frd[0]) |
-		    ({32{!b1 && !b0 && !fv[rra[0]]}} & brd[0]);
-		x = ({32{x1}}                  & ixf(fwd[1], ain_u))  |
-		    ({32{!x1 && x0}}           & ixf(fwd[0], ain_u))  |
-		    ({32{!x1 && !x0 &&  fv[rra[1]]}} & ixf(frd[1], ain_u)) |
-		    ({32{!x1 && !x0 && !fv[rra[1]]}} & ixf(brd[1], ain_u));
-		agb_q <= !ain_u.base_v ? 32'd0 : cb_n ? dc2_capv : b;
-		agx_q <= cx_n ? ixf(dc2_capv, ain_u) : x;
 		cbl   <= cb_n;
 		cxl   <= cx_n;
 		nb  = ain_u.base_v ? wf_next(wm(ain_u.base), wmatch(ag_v, ag_u, ain_u.base), cb_n) : 4'd0;
@@ -2616,16 +2624,6 @@ always_ff @(posedge clk) begin
 	else begin
 		// AG holds (or is empty): the flags follow their stages, nothing
 		// enters DC1 from AG
-		qb_o = exw_qv && exw_qreg == ag_u.base && !cbl;
-		qx_o = exw_qv && exw_qreg == ag_u.idx  && !cxl;
-		if (ag_v && ag_u.base_v) begin
-			if (qb_o) agb_q <= exw_q;
-			if (cb_o) agb_q <= dc2_capv;
-		end
-		if (ag_v && ag_u.idx_v) begin
-			if (qx_o) agx_q <= ixf(exw_q, ag_u);
-			if (cx_o) agx_q <= ixf(dc2_capv, ag_u);
-		end
 		cbl <= cb_o;
 		cxl <= cx_o;
 		nb  = wf_next(wf_b[3:0],  1'b0, cb_o);
