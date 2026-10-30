@@ -23,6 +23,11 @@ typedef struct packed {
 	logic ea1v;
 	logic [1:0] fea;
 	logic t0;
+	logic [3:0] cls;
+	logic [9:0] rtn;
+	logic [18:0] k0;
+	logic [18:0] kn;
+	logic [18:0] kj;
 } pla_t;
 function automatic logic [NENT-1:0] dec_sel(input logic [15:0] op);
 	logic [NENT-1:0] m, s;
@@ -587,288 +592,571 @@ function automatic logic [NENT-1:0] dec_sel(input logic [15:0] op);
 	dec_sel = s;
 endfunction
 
+function automatic logic dec_match(input logic [15:0] op);
+	dec_match = 1'b0;
+	if (((op & 16'hffc0) == 16'h0000) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0200) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0400) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0600) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0a00) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0c00) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0e00) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0040) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0240) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0440) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0640) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0a40) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0c40) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0e40) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0080) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0280) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0480) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0680) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0a80) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0c80) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0e80) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h003c)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h007c)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h023c)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h027c)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h0a3c)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h0a7c)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h00c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h02c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h04c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0ac0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0cc0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0ec0)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h0cfc)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h0efc)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0800)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0840)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h0880)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h08c0)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h0100)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h0140)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h0180)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h01c0)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h0108)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h0148)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h0188)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h01c8)) dec_match = 1'b1;
+	if (((op & 16'hf000) == 16'h1000)) dec_match = 1'b1;
+	if (((op & 16'hf000) == 16'h3000)) dec_match = 1'b1;
+	if (((op & 16'hf000) == 16'h2000)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h3040)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h2040)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4000) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4200) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4400) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4600) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4a00) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4040) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4240) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4440) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4640) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4a40) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4080) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4280) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4480) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4680) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4a80) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h40c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h42c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h44c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h46c0)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'h4808)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4800)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'h4848)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'h4840)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4840)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'h4880)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'h48c0)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'h49c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4880)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h48c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4c80)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4cc0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4ac0)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4afc)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4ac8)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4acc)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4c00)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4c40)) dec_match = 1'b1;
+	if (((op & 16'hfff0) == 16'h4e40)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'h4e50)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'h4e58)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'h4e60)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'h4e68)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4e70)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4e71)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4e72)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4e73)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4e74)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4e75)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4e76)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4e77)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4e7a)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'h4e7b)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4e80)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'h4ec0)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h4100)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h4180)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h41c0)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h5000) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h5100) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h5040) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h5140) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h5080) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h5180) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h5048)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h5088)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h5148)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h5188)) dec_match = 1'b1;
+	if (((op & 16'hf0c0) == 16'h50c0)) dec_match = 1'b1;
+	if (((op & 16'hf0f8) == 16'h50c8)) dec_match = 1'b1;
+	if (((op & 16'hf0ff) == 16'h50fa)) dec_match = 1'b1;
+	if (((op & 16'hf0ff) == 16'h50fb)) dec_match = 1'b1;
+	if (((op & 16'hf0ff) == 16'h50fc)) dec_match = 1'b1;
+	if (((op & 16'hff00) == 16'h6100)) dec_match = 1'b1;
+	if (((op & 16'hf000) == 16'h6000)) dec_match = 1'b1;
+	if (((op & 16'hf100) == 16'h7000)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h8000) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h8100) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hc000) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hc100) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h9000) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h9100) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hd000) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hd100) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hb000) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hb100) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hb108) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h9100) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h9108) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hd100) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hd108) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h8040) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h8140) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hc040) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hc140) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h9040) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h9140) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hd040) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hd140) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hb040) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hb140) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hb148) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h9140) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h9148) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hd140) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hd148) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h8080) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h8180) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hc080) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hc180) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h9080) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h9180) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hd080) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hd180) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hb080) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hb180) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hb188) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h9180) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h9188) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hd180) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hd188) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h80c0)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h81c0)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hc0c0)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hc1c0)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h8100)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h8108)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hc100)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hc108)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h8140)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h8148)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h8180)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'h8188)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h90c0)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'h91c0)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hd0c0)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hd1c0)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hb0c0)) dec_match = 1'b1;
+	if (((op & 16'hf1c0) == 16'hb1c0)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hc140)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hc148)) dec_match = 1'b1;
+	if (((op & 16'hf1f8) == 16'hc188)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he000) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he100) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he008) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he108) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he010) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he110) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he018) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he118) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he040) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he140) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he048) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he148) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he050) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he150) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he058) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he158) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he080) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he180) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he088) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he188) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he090) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he190) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he098) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hf1d8) == 16'he198) && (op[7:6] != 2'b11)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'he0c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'he1c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'he2c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'he3c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'he4c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'he5c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'he6c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'he7c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'he8c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'he9c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'heac0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'hebc0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'hecc0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'hedc0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'heec0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'hefc0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'hf200)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'hf240)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf248)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'hf27a)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'hf27b)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'hf27c)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'hf280)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'hf2c0)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'hf300)) dec_match = 1'b1;
+	if (((op & 16'hffc0) == 16'hf340)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf408)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf410)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf418)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf428)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf430)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf438)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf448)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf450)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf458)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf468)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf470)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf478)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf488)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf490)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf498)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf4a8)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf4b0)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf4b8)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf4c8)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf4d0)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf4d8)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf4e8)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf4f0)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf4f8)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf500)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf508)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf510)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf518)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf588)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf5c8)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf600)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf608)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf610)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf618)) dec_match = 1'b1;
+	if (((op & 16'hfff8) == 16'hf620)) dec_match = 1'b1;
+	if (((op & 16'hffff) == 16'hf800)) dec_match = 1'b1;
+endfunction
+
 function automatic pla_t ent_attr(input logic [8:0] ent, input logic hit);
 	ent_attr = '0;
 	case (ent)
-		9'd0: ent_attr = '{1'b1, 9'd0, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR IMM_OP
-		9'd1: ent_attr = '{1'b1, 9'd1, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND IMM_OP
-		9'd2: ent_attr = '{1'b1, 9'd2, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB IMM_OP
-		9'd3: ent_attr = '{1'b1, 9'd3, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD IMM_OP
-		9'd4: ent_attr = '{1'b1, 9'd4, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR IMM_OP
-		9'd5: ent_attr = '{1'b1, 9'd5, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP IMM_CMP
-		9'd6: ent_attr = '{1'b1, 9'd6, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0};  // MOVES MOVES
-		9'd7: ent_attr = '{1'b1, 9'd7, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR IMM_OP
-		9'd8: ent_attr = '{1'b1, 9'd8, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND IMM_OP
-		9'd9: ent_attr = '{1'b1, 9'd9, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB IMM_OP
-		9'd10: ent_attr = '{1'b1, 9'd10, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD IMM_OP
-		9'd11: ent_attr = '{1'b1, 9'd11, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR IMM_OP
-		9'd12: ent_attr = '{1'b1, 9'd12, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP IMM_CMP
-		9'd13: ent_attr = '{1'b1, 9'd13, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0};  // MOVES MOVES
-		9'd14: ent_attr = '{1'b1, 9'd14, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR IMM_OP
-		9'd15: ent_attr = '{1'b1, 9'd15, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND IMM_OP
-		9'd16: ent_attr = '{1'b1, 9'd16, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB IMM_OP
-		9'd17: ent_attr = '{1'b1, 9'd17, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD IMM_OP
-		9'd18: ent_attr = '{1'b1, 9'd18, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR IMM_OP
-		9'd19: ent_attr = '{1'b1, 9'd19, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP IMM_CMP
-		9'd20: ent_attr = '{1'b1, 9'd20, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0};  // MOVES MOVES
-		9'd21: ent_attr = '{1'b1, 9'd21, 10'd102, 7'd42, 4'd1, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ORSR CCR_LOG
-		9'd22: ent_attr = '{1'b1, 9'd22, 10'd103, 7'd42, 4'd1, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ORSR SR_LOG
-		9'd23: ent_attr = '{1'b1, 9'd23, 10'd102, 7'd42, 4'd0, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ANDSR CCR_LOG
-		9'd24: ent_attr = '{1'b1, 9'd24, 10'd103, 7'd42, 4'd0, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ANDSR SR_LOG
-		9'd25: ent_attr = '{1'b1, 9'd25, 10'd102, 7'd42, 4'd2, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EORSR CCR_LOG
-		9'd26: ent_attr = '{1'b1, 9'd26, 10'd103, 7'd42, 4'd2, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EORSR SR_LOG
-		9'd27: ent_attr = '{1'b1, 9'd27, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CHK2 UNIMPL
-		9'd28: ent_attr = '{1'b1, 9'd28, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CHK2 UNIMPL
-		9'd29: ent_attr = '{1'b1, 9'd29, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CHK2 UNIMPL
-		9'd30: ent_attr = '{1'b1, 9'd30, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CAS CAS
-		9'd31: ent_attr = '{1'b1, 9'd31, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CAS CAS
-		9'd32: ent_attr = '{1'b1, 9'd32, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CAS CAS
-		9'd33: ent_attr = '{1'b1, 9'd33, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd2, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CAS2 UNIMPL
-		9'd34: ent_attr = '{1'b1, 9'd34, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd2, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CAS2 UNIMPL
-		9'd35: ent_attr = '{1'b1, 9'd35, 10'd43, 7'd30, 4'd0, 1'b0, 5'h0, 2'd0, 12'h7fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd45, 1'b1, 1'b0, 2'd0, 1'b0};  // BTST BTST_IMM
-		9'd36: ent_attr = '{1'b1, 9'd36, 10'd37, 7'd31, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0};  // BCHG BIT_IMM
-		9'd37: ent_attr = '{1'b1, 9'd37, 10'd37, 7'd32, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0};  // BCLR BIT_IMM
-		9'd38: ent_attr = '{1'b1, 9'd38, 10'd37, 7'd33, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0};  // BSET BIT_IMM
-		9'd39: ent_attr = '{1'b1, 9'd39, 10'd46, 7'd30, 4'd0, 1'b0, 5'h0, 2'd0, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd48, 1'b1, 1'b0, 2'd0, 1'b0};  // BTST BTST_DYN
-		9'd40: ent_attr = '{1'b1, 9'd40, 10'd40, 7'd31, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0};  // BCHG BIT_DYN
-		9'd41: ent_attr = '{1'b1, 9'd41, 10'd40, 7'd32, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0};  // BCLR BIT_DYN
-		9'd42: ent_attr = '{1'b1, 9'd42, 10'd40, 7'd33, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0};  // BSET BIT_DYN
-		9'd43: ent_attr = '{1'b1, 9'd43, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVPMR UNIMPL
-		9'd44: ent_attr = '{1'b1, 9'd44, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVPMR UNIMPL
-		9'd45: ent_attr = '{1'b1, 9'd45, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVPRM UNIMPL
-		9'd46: ent_attr = '{1'b1, 9'd46, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVPRM UNIMPL
-		9'd47: ent_attr = '{1'b1, 9'd47, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'hffd, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0};  // MOVE MOVE
-		9'd48: ent_attr = '{1'b1, 9'd48, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0};  // MOVE MOVE
-		9'd49: ent_attr = '{1'b1, 9'd49, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0};  // MOVE MOVE
-		9'd50: ent_attr = '{1'b1, 9'd50, 10'd30, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd32, 1'b1, 1'b0, 2'd0, 1'b0};  // MOVEA MOVEA
-		9'd51: ent_attr = '{1'b1, 9'd51, 10'd30, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd32, 1'b1, 1'b0, 2'd0, 1'b0};  // MOVEA MOVEA
-		9'd52: ent_attr = '{1'b1, 9'd52, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEGX UNARY
-		9'd53: ent_attr = '{1'b1, 9'd53, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CLR CLR_W
-		9'd54: ent_attr = '{1'b1, 9'd54, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEG UNARY
-		9'd55: ent_attr = '{1'b1, 9'd55, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NOT UNARY
-		9'd56: ent_attr = '{1'b1, 9'd56, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // TST TST
-		9'd57: ent_attr = '{1'b1, 9'd57, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEGX UNARY
-		9'd58: ent_attr = '{1'b1, 9'd58, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CLR CLR_W
-		9'd59: ent_attr = '{1'b1, 9'd59, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEG UNARY
-		9'd60: ent_attr = '{1'b1, 9'd60, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NOT UNARY
-		9'd61: ent_attr = '{1'b1, 9'd61, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // TST TST
-		9'd62: ent_attr = '{1'b1, 9'd62, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEGX UNARY
-		9'd63: ent_attr = '{1'b1, 9'd63, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CLR CLR_W
-		9'd64: ent_attr = '{1'b1, 9'd64, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEG UNARY
-		9'd65: ent_attr = '{1'b1, 9'd65, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NOT UNARY
-		9'd66: ent_attr = '{1'b1, 9'd66, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // TST TST
-		9'd67: ent_attr = '{1'b1, 9'd67, 10'd98, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MVSR2 MOVE_FROM_SR
-		9'd68: ent_attr = '{1'b1, 9'd68, 10'd99, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MVSR2 MOVE_FROM_CCR
-		9'd69: ent_attr = '{1'b1, 9'd69, 10'd100, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MV2SR MOVE_TO_CCR
-		9'd70: ent_attr = '{1'b1, 9'd70, 10'd101, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MV2SR MOVE_TO_SR
-		9'd71: ent_attr = '{1'b1, 9'd71, 10'd94, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LINK LINK
-		9'd72: ent_attr = '{1'b1, 9'd72, 10'd11, 7'd19, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NBCD UNARY
-		9'd73: ent_attr = '{1'b1, 9'd73, 10'd107, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // BKPT BKPT
-		9'd74: ent_attr = '{1'b1, 9'd74, 10'd15, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SWAP SWAP
-		9'd75: ent_attr = '{1'b1, 9'd75, 10'd28, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // PEA PEA
-		9'd76: ent_attr = '{1'b1, 9'd76, 10'd16, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXT EXT
-		9'd77: ent_attr = '{1'b1, 9'd77, 10'd16, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXT EXT
-		9'd78: ent_attr = '{1'b1, 9'd78, 10'd17, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXT EXTB
-		9'd79: ent_attr = '{1'b1, 9'd79, 10'd122, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1f4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd124, 1'b1, 1'b0, 2'd0, 1'b0};  // MVMLE MOVEM_RM
-		9'd80: ent_attr = '{1'b1, 9'd80, 10'd122, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1f4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd124, 1'b1, 1'b0, 2'd0, 1'b0};  // MVMLE MOVEM_RM
-		9'd81: ent_attr = '{1'b1, 9'd81, 10'd125, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h7ec, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd127, 1'b1, 1'b0, 2'd0, 1'b0};  // MVMEL MOVEM_MR
-		9'd82: ent_attr = '{1'b1, 9'd82, 10'd125, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7ec, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd127, 1'b1, 1'b0, 2'd0, 1'b0};  // MVMEL MOVEM_MR
-		9'd83: ent_attr = '{1'b1, 9'd83, 10'd18, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // TAS TAS
-		9'd84: ent_attr = '{1'b1, 9'd84, 10'd0, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ILLG ILLEGAL
-		9'd85: ent_attr = '{1'b1, 9'd85, 10'd114, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // HALT HALT
-		9'd86: ent_attr = '{1'b1, 9'd86, 10'd115, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PULSE PULSE
-		9'd87: ent_attr = '{1'b1, 9'd87, 10'd68, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MULL MULL
-		9'd88: ent_attr = '{1'b1, 9'd88, 10'd69, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // DIVL DIVL
-		9'd89: ent_attr = '{1'b1, 9'd89, 10'd106, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // TRAP TRAP
-		9'd90: ent_attr = '{1'b1, 9'd90, 10'd94, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LINK LINK
-		9'd91: ent_attr = '{1'b1, 9'd91, 10'd97, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // UNLK UNLK
-		9'd92: ent_attr = '{1'b1, 9'd92, 10'd104, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVR2USP MOVE_TO_USP
-		9'd93: ent_attr = '{1'b1, 9'd93, 10'd105, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVUSP2R MOVE_FROM_USP
-		9'd94: ent_attr = '{1'b1, 9'd94, 10'd110, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // RESET RESET
-		9'd95: ent_attr = '{1'b1, 9'd95, 10'd109, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // NOP NOP
-		9'd96: ent_attr = '{1'b1, 9'd96, 10'd111, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // STOP STOP
-		9'd97: ent_attr = '{1'b1, 9'd97, 10'd165, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // RTE RTE
-		9'd98: ent_attr = '{1'b1, 9'd98, 10'd90, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // RTD RTD
-		9'd99: ent_attr = '{1'b1, 9'd99, 10'd89, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // RTS RTS
-		9'd100: ent_attr = '{1'b1, 9'd100, 10'd93, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // TRAPV TRAPV
-		9'd101: ent_attr = '{1'b1, 9'd101, 10'd171, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // RTR RTR
-		9'd102: ent_attr = '{1'b1, 9'd102, 10'd116, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b1, 6'd16, 10'd118, 1'b0, 1'b0, 2'd0, 1'b0};  // MOVEC2 MOVEC_RD
-		9'd103: ent_attr = '{1'b1, 9'd103, 10'd119, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b1, 6'd16, 10'd121, 1'b0, 1'b0, 2'd0, 1'b0};  // MOVE2C MOVEC_WR
-		9'd104: ent_attr = '{1'b1, 9'd104, 10'd86, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // JSR JSR
-		9'd105: ent_attr = '{1'b1, 9'd105, 10'd85, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // JMP JMP
-		9'd106: ent_attr = '{1'b1, 9'd106, 10'd72, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CHK CHK
-		9'd107: ent_attr = '{1'b1, 9'd107, 10'd72, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CHK CHK
-		9'd108: ent_attr = '{1'b1, 9'd108, 10'd27, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // LEA LEA
-		9'd109: ent_attr = '{1'b1, 9'd109, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD QUICK
-		9'd110: ent_attr = '{1'b1, 9'd110, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB QUICK
-		9'd111: ent_attr = '{1'b1, 9'd111, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD QUICK
-		9'd112: ent_attr = '{1'b1, 9'd112, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB QUICK
-		9'd113: ent_attr = '{1'b1, 9'd113, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD QUICK
-		9'd114: ent_attr = '{1'b1, 9'd114, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB QUICK
-		9'd115: ent_attr = '{1'b1, 9'd115, 10'd25, 7'd1, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ADDA QUICK_A
-		9'd116: ent_attr = '{1'b1, 9'd116, 10'd25, 7'd1, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ADDA QUICK_A
-		9'd117: ent_attr = '{1'b1, 9'd117, 10'd26, 7'd3, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SUBA QUICK_SA
-		9'd118: ent_attr = '{1'b1, 9'd118, 10'd26, 7'd3, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SUBA QUICK_SA
-		9'd119: ent_attr = '{1'b1, 9'd119, 10'd13, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // Scc SCC
-		9'd120: ent_attr = '{1'b1, 9'd120, 10'd84, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // DBcc DBCC
-		9'd121: ent_attr = '{1'b1, 9'd121, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // TRAPcc TRAPCC
-		9'd122: ent_attr = '{1'b1, 9'd122, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // TRAPcc TRAPCC
-		9'd123: ent_attr = '{1'b1, 9'd123, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // TRAPcc TRAPCC
-		9'd124: ent_attr = '{1'b1, 9'd124, 10'd83, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd5, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // BSR BSR
-		9'd125: ent_attr = '{1'b1, 9'd125, 10'd82, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd5, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // Bcc BCC
-		9'd126: ent_attr = '{1'b1, 9'd126, 10'd10, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MOVE MOVEQ
-		9'd127: ent_attr = '{1'b1, 9'd127, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_EA_DN
-		9'd128: ent_attr = '{1'b1, 9'd128, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_DN_EA
-		9'd129: ent_attr = '{1'b1, 9'd129, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_EA_DN
-		9'd130: ent_attr = '{1'b1, 9'd130, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_DN_EA
-		9'd131: ent_attr = '{1'b1, 9'd131, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_EA_DN
-		9'd132: ent_attr = '{1'b1, 9'd132, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_DN_EA
-		9'd133: ent_attr = '{1'b1, 9'd133, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_EA_DN
-		9'd134: ent_attr = '{1'b1, 9'd134, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_DN_EA
-		9'd135: ent_attr = '{1'b1, 9'd135, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP CMP_EA_DN
-		9'd136: ent_attr = '{1'b1, 9'd136, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR OP_DN_EA
-		9'd137: ent_attr = '{1'b1, 9'd137, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0};  // CMPM CMPM
-		9'd138: ent_attr = '{1'b1, 9'd138, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SUBX ADDX_R
-		9'd139: ent_attr = '{1'b1, 9'd139, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // SUBX ADDX_M
-		9'd140: ent_attr = '{1'b1, 9'd140, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ADDX ADDX_R
-		9'd141: ent_attr = '{1'b1, 9'd141, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // ADDX ADDX_M
-		9'd142: ent_attr = '{1'b1, 9'd142, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_EA_DN
-		9'd143: ent_attr = '{1'b1, 9'd143, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_DN_EA
-		9'd144: ent_attr = '{1'b1, 9'd144, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_EA_DN
-		9'd145: ent_attr = '{1'b1, 9'd145, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_DN_EA
-		9'd146: ent_attr = '{1'b1, 9'd146, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_EA_DN
-		9'd147: ent_attr = '{1'b1, 9'd147, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_DN_EA
-		9'd148: ent_attr = '{1'b1, 9'd148, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_EA_DN
-		9'd149: ent_attr = '{1'b1, 9'd149, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_DN_EA
-		9'd150: ent_attr = '{1'b1, 9'd150, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP CMP_EA_DN
-		9'd151: ent_attr = '{1'b1, 9'd151, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR OP_DN_EA
-		9'd152: ent_attr = '{1'b1, 9'd152, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0};  // CMPM CMPM
-		9'd153: ent_attr = '{1'b1, 9'd153, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SUBX ADDX_R
-		9'd154: ent_attr = '{1'b1, 9'd154, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // SUBX ADDX_M
-		9'd155: ent_attr = '{1'b1, 9'd155, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ADDX ADDX_R
-		9'd156: ent_attr = '{1'b1, 9'd156, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // ADDX ADDX_M
-		9'd157: ent_attr = '{1'b1, 9'd157, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_EA_DN
-		9'd158: ent_attr = '{1'b1, 9'd158, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_DN_EA
-		9'd159: ent_attr = '{1'b1, 9'd159, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_EA_DN
-		9'd160: ent_attr = '{1'b1, 9'd160, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_DN_EA
-		9'd161: ent_attr = '{1'b1, 9'd161, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_EA_DN
-		9'd162: ent_attr = '{1'b1, 9'd162, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_DN_EA
-		9'd163: ent_attr = '{1'b1, 9'd163, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_EA_DN
-		9'd164: ent_attr = '{1'b1, 9'd164, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_DN_EA
-		9'd165: ent_attr = '{1'b1, 9'd165, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP CMP_EA_DN
-		9'd166: ent_attr = '{1'b1, 9'd166, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR OP_DN_EA
-		9'd167: ent_attr = '{1'b1, 9'd167, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0};  // CMPM CMPM
-		9'd168: ent_attr = '{1'b1, 9'd168, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SUBX ADDX_R
-		9'd169: ent_attr = '{1'b1, 9'd169, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // SUBX ADDX_M
-		9'd170: ent_attr = '{1'b1, 9'd170, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ADDX ADDX_R
-		9'd171: ent_attr = '{1'b1, 9'd171, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // ADDX ADDX_M
-		9'd172: ent_attr = '{1'b1, 9'd172, 10'd67, 7'd49, 4'd0, 1'b0, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // DIVU DIVW
-		9'd173: ent_attr = '{1'b1, 9'd173, 10'd67, 7'd49, 4'd1, 1'b1, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // DIVS DIVW
-		9'd174: ent_attr = '{1'b1, 9'd174, 10'd66, 7'd48, 4'd0, 1'b0, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MULU MULW
-		9'd175: ent_attr = '{1'b1, 9'd175, 10'd66, 7'd48, 4'd1, 1'b1, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MULS MULW
-		9'd176: ent_attr = '{1'b1, 9'd176, 10'd51, 7'd18, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SBCD ADDX_R
-		9'd177: ent_attr = '{1'b1, 9'd177, 10'd52, 7'd18, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // SBCD ADDX_M
-		9'd178: ent_attr = '{1'b1, 9'd178, 10'd51, 7'd17, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ABCD ADDX_R
-		9'd179: ent_attr = '{1'b1, 9'd179, 10'd52, 7'd17, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // ABCD ADDX_M
-		9'd180: ent_attr = '{1'b1, 9'd180, 10'd56, 7'd20, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PACK PACK_R
-		9'd181: ent_attr = '{1'b1, 9'd181, 10'd58, 7'd20, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // PACK PACK_M
-		9'd182: ent_attr = '{1'b1, 9'd182, 10'd61, 7'd21, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // UNPK UNPK_R
-		9'd183: ent_attr = '{1'b1, 9'd183, 10'd63, 7'd21, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // UNPK UNPK_M
-		9'd184: ent_attr = '{1'b1, 9'd184, 10'd22, 7'd3, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd7, 10'd24, 1'b1, 1'b0, 2'd0, 1'b0};  // SUBA SUBA
-		9'd185: ent_attr = '{1'b1, 9'd185, 10'd22, 7'd3, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd7, 10'd24, 1'b1, 1'b0, 2'd0, 1'b0};  // SUBA SUBA
-		9'd186: ent_attr = '{1'b1, 9'd186, 10'd19, 7'd1, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd21, 1'b1, 1'b0, 2'd0, 1'b0};  // ADDA ADDA
-		9'd187: ent_attr = '{1'b1, 9'd187, 10'd19, 7'd1, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd21, 1'b1, 1'b0, 2'd0, 1'b0};  // ADDA ADDA
-		9'd188: ent_attr = '{1'b1, 9'd188, 10'd8, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMPA CMPA
-		9'd189: ent_attr = '{1'b1, 9'd189, 10'd8, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMPA CMPA
-		9'd190: ent_attr = '{1'b1, 9'd190, 10'd73, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXG EXG_DD
-		9'd191: ent_attr = '{1'b1, 9'd191, 10'd76, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXG EXG_AA
-		9'd192: ent_attr = '{1'b1, 9'd192, 10'd79, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXG EXG_DA
-		9'd193: ent_attr = '{1'b1, 9'd193, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASR SHIFT_R
-		9'd194: ent_attr = '{1'b1, 9'd194, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASL SHIFT_R
-		9'd195: ent_attr = '{1'b1, 9'd195, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSR SHIFT_R
-		9'd196: ent_attr = '{1'b1, 9'd196, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSL SHIFT_R
-		9'd197: ent_attr = '{1'b1, 9'd197, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXR SHIFT_R
-		9'd198: ent_attr = '{1'b1, 9'd198, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXL SHIFT_R
-		9'd199: ent_attr = '{1'b1, 9'd199, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROR SHIFT_R
-		9'd200: ent_attr = '{1'b1, 9'd200, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROL SHIFT_R
-		9'd201: ent_attr = '{1'b1, 9'd201, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASR SHIFT_R
-		9'd202: ent_attr = '{1'b1, 9'd202, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASL SHIFT_R
-		9'd203: ent_attr = '{1'b1, 9'd203, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSR SHIFT_R
-		9'd204: ent_attr = '{1'b1, 9'd204, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSL SHIFT_R
-		9'd205: ent_attr = '{1'b1, 9'd205, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXR SHIFT_R
-		9'd206: ent_attr = '{1'b1, 9'd206, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXL SHIFT_R
-		9'd207: ent_attr = '{1'b1, 9'd207, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROR SHIFT_R
-		9'd208: ent_attr = '{1'b1, 9'd208, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROL SHIFT_R
-		9'd209: ent_attr = '{1'b1, 9'd209, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASR SHIFT_R
-		9'd210: ent_attr = '{1'b1, 9'd210, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASL SHIFT_R
-		9'd211: ent_attr = '{1'b1, 9'd211, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSR SHIFT_R
-		9'd212: ent_attr = '{1'b1, 9'd212, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSL SHIFT_R
-		9'd213: ent_attr = '{1'b1, 9'd213, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXR SHIFT_R
-		9'd214: ent_attr = '{1'b1, 9'd214, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXL SHIFT_R
-		9'd215: ent_attr = '{1'b1, 9'd215, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROR SHIFT_R
-		9'd216: ent_attr = '{1'b1, 9'd216, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROL SHIFT_R
-		9'd217: ent_attr = '{1'b1, 9'd217, 10'd50, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ASRW SHIFT_M
-		9'd218: ent_attr = '{1'b1, 9'd218, 10'd50, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ASLW SHIFT_M
-		9'd219: ent_attr = '{1'b1, 9'd219, 10'd50, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // LSRW SHIFT_M
-		9'd220: ent_attr = '{1'b1, 9'd220, 10'd50, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // LSLW SHIFT_M
-		9'd221: ent_attr = '{1'b1, 9'd221, 10'd50, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ROXRW SHIFT_M
-		9'd222: ent_attr = '{1'b1, 9'd222, 10'd50, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ROXLW SHIFT_M
-		9'd223: ent_attr = '{1'b1, 9'd223, 10'd50, 7'd27, 4'd0, 1'b0, 5'hf, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // RORW SHIFT_M
-		9'd224: ent_attr = '{1'b1, 9'd224, 10'd50, 7'd26, 4'd0, 1'b0, 5'hf, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ROLW SHIFT_M
-		9'd225: ent_attr = '{1'b1, 9'd225, 10'd130, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd138, 1'b1, 1'b0, 2'd0, 1'b0};  // BFTST BF_TST
-		9'd226: ent_attr = '{1'b1, 9'd226, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0};  // BFEXTU BF_EXT
-		9'd227: ent_attr = '{1'b1, 9'd227, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0};  // BFCHG BF_MOD
-		9'd228: ent_attr = '{1'b1, 9'd228, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0};  // BFEXTS BF_EXT
-		9'd229: ent_attr = '{1'b1, 9'd229, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0};  // BFCLR BF_MOD
-		9'd230: ent_attr = '{1'b1, 9'd230, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0};  // BFFFO BF_EXT
-		9'd231: ent_attr = '{1'b1, 9'd231, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0};  // BFSET BF_MOD
-		9'd232: ent_attr = '{1'b1, 9'd232, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0};  // BFINS BF_MOD
-		9'd233: ent_attr = '{1'b1, 9'd233, 10'd187, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd1, 3'd0, 1'b0, 6'd19, 10'd196, 1'b1, 1'b0, 2'd0, 1'b0};  // FPP FPU_GEN
-		9'd234: ent_attr = '{1'b1, 9'd234, 10'd441, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // FScc FSCC
-		9'd235: ent_attr = '{1'b1, 9'd235, 10'd443, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd1, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FDBcc FDBCC
-		9'd236: ent_attr = '{1'b1, 9'd236, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FTRAPcc FTRAPCC
-		9'd237: ent_attr = '{1'b1, 9'd237, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FTRAPcc FTRAPCC
-		9'd238: ent_attr = '{1'b1, 9'd238, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FTRAPcc FTRAPCC
-		9'd239: ent_attr = '{1'b1, 9'd239, 10'd439, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd7, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FBcc FBCC
-		9'd240: ent_attr = '{1'b1, 9'd240, 10'd439, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd7, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FBcc FBCC
-		9'd241: ent_attr = '{1'b1, 9'd241, 10'd447, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1f4, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // FSAVE FSAVE
-		9'd242: ent_attr = '{1'b1, 9'd242, 10'd460, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7ec, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // FRESTORE FRESTORE
-		9'd243: ent_attr = '{1'b1, 9'd243, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVL CACHE_OP
-		9'd244: ent_attr = '{1'b1, 9'd244, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVP CACHE_OP
-		9'd245: ent_attr = '{1'b1, 9'd245, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVA CACHE_OP
-		9'd246: ent_attr = '{1'b1, 9'd246, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHL CACHE_OP
-		9'd247: ent_attr = '{1'b1, 9'd247, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHP CACHE_OP
-		9'd248: ent_attr = '{1'b1, 9'd248, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHA CACHE_OP
-		9'd249: ent_attr = '{1'b1, 9'd249, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVL CACHE_OP
-		9'd250: ent_attr = '{1'b1, 9'd250, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVP CACHE_OP
-		9'd251: ent_attr = '{1'b1, 9'd251, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVA CACHE_OP
-		9'd252: ent_attr = '{1'b1, 9'd252, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHL CACHE_OP
-		9'd253: ent_attr = '{1'b1, 9'd253, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHP CACHE_OP
-		9'd254: ent_attr = '{1'b1, 9'd254, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHA CACHE_OP
-		9'd255: ent_attr = '{1'b1, 9'd255, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVL CACHE_OP
-		9'd256: ent_attr = '{1'b1, 9'd256, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVP CACHE_OP
-		9'd257: ent_attr = '{1'b1, 9'd257, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVA CACHE_OP
-		9'd258: ent_attr = '{1'b1, 9'd258, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHL CACHE_OP
-		9'd259: ent_attr = '{1'b1, 9'd259, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHP CACHE_OP
-		9'd260: ent_attr = '{1'b1, 9'd260, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHA CACHE_OP
-		9'd261: ent_attr = '{1'b1, 9'd261, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVL CACHE_OP
-		9'd262: ent_attr = '{1'b1, 9'd262, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVP CACHE_OP
-		9'd263: ent_attr = '{1'b1, 9'd263, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVA CACHE_OP
-		9'd264: ent_attr = '{1'b1, 9'd264, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHL CACHE_OP
-		9'd265: ent_attr = '{1'b1, 9'd265, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHP CACHE_OP
-		9'd266: ent_attr = '{1'b1, 9'd266, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHA CACHE_OP
-		9'd267: ent_attr = '{1'b1, 9'd267, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PFLUSHN PFLUSH
-		9'd268: ent_attr = '{1'b1, 9'd268, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PFLUSH PFLUSH
-		9'd269: ent_attr = '{1'b1, 9'd269, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PFLUSHAN PFLUSH
-		9'd270: ent_attr = '{1'b1, 9'd270, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PFLUSHA PFLUSH
-		9'd271: ent_attr = '{1'b1, 9'd271, 10'd186, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PLPAW PLPA
-		9'd272: ent_attr = '{1'b1, 9'd272, 10'd186, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PLPAR PLPA
-		9'd273: ent_attr = '{1'b1, 9'd273, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0};  // MOVE16 MOVE16
-		9'd274: ent_attr = '{1'b1, 9'd274, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0};  // MOVE16 MOVE16
-		9'd275: ent_attr = '{1'b1, 9'd275, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0};  // MOVE16 MOVE16
-		9'd276: ent_attr = '{1'b1, 9'd276, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0};  // MOVE16 MOVE16
-		9'd277: ent_attr = '{1'b1, 9'd277, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0};  // MOVE16 MOVE16
-		9'd278: ent_attr = '{1'b1, 9'd278, 10'd112, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LPSTOP LPSTOP
+		9'd0: ent_attr = '{1'b1, 9'd0, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // OR IMM_OP
+		9'd1: ent_attr = '{1'b1, 9'd1, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // AND IMM_OP
+		9'd2: ent_attr = '{1'b1, 9'd2, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // SUB IMM_OP
+		9'd3: ent_attr = '{1'b1, 9'd3, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // ADD IMM_OP
+		9'd4: ent_attr = '{1'b1, 9'd4, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // EOR IMM_OP
+		9'd5: ent_attr = '{1'b1, 9'd5, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd6, 19'h40000, 19'h40000, 19'h40000};  // CMP IMM_CMP
+		9'd6: ent_attr = '{1'b1, 9'd6, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd175, 19'h22dc9, 19'h22c51, 19'h40000};  // MOVES MOVES
+		9'd7: ent_attr = '{1'b1, 9'd7, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // OR IMM_OP
+		9'd8: ent_attr = '{1'b1, 9'd8, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // AND IMM_OP
+		9'd9: ent_attr = '{1'b1, 9'd9, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // SUB IMM_OP
+		9'd10: ent_attr = '{1'b1, 9'd10, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // ADD IMM_OP
+		9'd11: ent_attr = '{1'b1, 9'd11, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // EOR IMM_OP
+		9'd12: ent_attr = '{1'b1, 9'd12, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd6, 19'h40000, 19'h40000, 19'h40000};  // CMP IMM_CMP
+		9'd13: ent_attr = '{1'b1, 9'd13, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd175, 19'h22dc9, 19'h22c51, 19'h40000};  // MOVES MOVES
+		9'd14: ent_attr = '{1'b1, 9'd14, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // OR IMM_OP
+		9'd15: ent_attr = '{1'b1, 9'd15, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // AND IMM_OP
+		9'd16: ent_attr = '{1'b1, 9'd16, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // SUB IMM_OP
+		9'd17: ent_attr = '{1'b1, 9'd17, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // ADD IMM_OP
+		9'd18: ent_attr = '{1'b1, 9'd18, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // EOR IMM_OP
+		9'd19: ent_attr = '{1'b1, 9'd19, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd6, 19'h40000, 19'h40000, 19'h40000};  // CMP IMM_CMP
+		9'd20: ent_attr = '{1'b1, 9'd20, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd175, 19'h22dc9, 19'h22c51, 19'h40000};  // MOVES MOVES
+		9'd21: ent_attr = '{1'b1, 9'd21, 10'd102, 7'd42, 4'd1, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd102, 19'h40000, 19'h40000, 19'h40000};  // ORSR CCR_LOG
+		9'd22: ent_attr = '{1'b1, 9'd22, 10'd103, 7'd42, 4'd1, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd103, 19'h40000, 19'h40000, 19'h40000};  // ORSR SR_LOG
+		9'd23: ent_attr = '{1'b1, 9'd23, 10'd102, 7'd42, 4'd0, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd102, 19'h40000, 19'h40000, 19'h40000};  // ANDSR CCR_LOG
+		9'd24: ent_attr = '{1'b1, 9'd24, 10'd103, 7'd42, 4'd0, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd103, 19'h40000, 19'h40000, 19'h40000};  // ANDSR SR_LOG
+		9'd25: ent_attr = '{1'b1, 9'd25, 10'd102, 7'd42, 4'd2, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd102, 19'h40000, 19'h40000, 19'h40000};  // EORSR CCR_LOG
+		9'd26: ent_attr = '{1'b1, 9'd26, 10'd103, 7'd42, 4'd2, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd103, 19'h40000, 19'h40000, 19'h40000};  // EORSR SR_LOG
+		9'd27: ent_attr = '{1'b1, 9'd27, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // CHK2 UNIMPL
+		9'd28: ent_attr = '{1'b1, 9'd28, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // CHK2 UNIMPL
+		9'd29: ent_attr = '{1'b1, 9'd29, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // CHK2 UNIMPL
+		9'd30: ent_attr = '{1'b1, 9'd30, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd163, 19'h0, 19'h0, 19'h40000};  // CAS CAS
+		9'd31: ent_attr = '{1'b1, 9'd31, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd163, 19'h0, 19'h0, 19'h40000};  // CAS CAS
+		9'd32: ent_attr = '{1'b1, 9'd32, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd163, 19'h0, 19'h0, 19'h40000};  // CAS CAS
+		9'd33: ent_attr = '{1'b1, 9'd33, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd2, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // CAS2 UNIMPL
+		9'd34: ent_attr = '{1'b1, 9'd34, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd2, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // CAS2 UNIMPL
+		9'd35: ent_attr = '{1'b1, 9'd35, 10'd43, 7'd30, 4'd0, 1'b0, 5'h0, 2'd0, 12'h7fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd45, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd44, 19'h20b45, 19'h40000, 19'h40000};  // BTST BTST_IMM
+		9'd36: ent_attr = '{1'b1, 9'd36, 10'd37, 7'd31, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd38, 19'h209c5, 19'h40000, 19'h40000};  // BCHG BIT_IMM
+		9'd37: ent_attr = '{1'b1, 9'd37, 10'd37, 7'd32, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd38, 19'h209c5, 19'h40000, 19'h40000};  // BCLR BIT_IMM
+		9'd38: ent_attr = '{1'b1, 9'd38, 10'd37, 7'd33, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd38, 19'h209c5, 19'h40000, 19'h40000};  // BSET BIT_IMM
+		9'd39: ent_attr = '{1'b1, 9'd39, 10'd46, 7'd30, 4'd0, 1'b0, 5'h0, 2'd0, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd48, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd47, 19'h20c05, 19'h40000, 19'h40000};  // BTST BTST_DYN
+		9'd40: ent_attr = '{1'b1, 9'd40, 10'd40, 7'd31, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd41, 19'h20a85, 19'h40000, 19'h40000};  // BCHG BIT_DYN
+		9'd41: ent_attr = '{1'b1, 9'd41, 10'd40, 7'd32, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd41, 19'h20a85, 19'h40000, 19'h40000};  // BCLR BIT_DYN
+		9'd42: ent_attr = '{1'b1, 9'd42, 10'd40, 7'd33, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd41, 19'h20a85, 19'h40000, 19'h40000};  // BSET BIT_DYN
+		9'd43: ent_attr = '{1'b1, 9'd43, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // MVPMR UNIMPL
+		9'd44: ent_attr = '{1'b1, 9'd44, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // MVPMR UNIMPL
+		9'd45: ent_attr = '{1'b1, 9'd45, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // MVPRM UNIMPL
+		9'd46: ent_attr = '{1'b1, 9'd46, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // MVPRM UNIMPL
+		9'd47: ent_attr = '{1'b1, 9'd47, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'hffd, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0, 4'd0, 10'd34, 19'h208cc, 19'h40000, 19'h0};  // MOVE MOVE
+		9'd48: ent_attr = '{1'b1, 9'd48, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0, 4'd0, 10'd34, 19'h208cc, 19'h40000, 19'h0};  // MOVE MOVE
+		9'd49: ent_attr = '{1'b1, 9'd49, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0, 4'd0, 10'd34, 19'h208cc, 19'h40000, 19'h0};  // MOVE MOVE
+		9'd50: ent_attr = '{1'b1, 9'd50, 10'd30, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd32, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd31, 19'h20802, 19'h40000, 19'h40000};  // MOVEA MOVEA
+		9'd51: ent_attr = '{1'b1, 9'd51, 10'd30, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd32, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd31, 19'h20802, 19'h40000, 19'h40000};  // MOVEA MOVEA
+		9'd52: ent_attr = '{1'b1, 9'd52, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEGX UNARY
+		9'd53: ent_attr = '{1'b1, 9'd53, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd14, 19'h40000, 19'h40000, 19'h40000};  // CLR CLR_W
+		9'd54: ent_attr = '{1'b1, 9'd54, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEG UNARY
+		9'd55: ent_attr = '{1'b1, 9'd55, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NOT UNARY
+		9'd56: ent_attr = '{1'b1, 9'd56, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd12, 19'h40000, 19'h40000, 19'h40000};  // TST TST
+		9'd57: ent_attr = '{1'b1, 9'd57, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEGX UNARY
+		9'd58: ent_attr = '{1'b1, 9'd58, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd14, 19'h40000, 19'h40000, 19'h40000};  // CLR CLR_W
+		9'd59: ent_attr = '{1'b1, 9'd59, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEG UNARY
+		9'd60: ent_attr = '{1'b1, 9'd60, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NOT UNARY
+		9'd61: ent_attr = '{1'b1, 9'd61, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd12, 19'h40000, 19'h40000, 19'h40000};  // TST TST
+		9'd62: ent_attr = '{1'b1, 9'd62, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEGX UNARY
+		9'd63: ent_attr = '{1'b1, 9'd63, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd14, 19'h40000, 19'h40000, 19'h40000};  // CLR CLR_W
+		9'd64: ent_attr = '{1'b1, 9'd64, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEG UNARY
+		9'd65: ent_attr = '{1'b1, 9'd65, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NOT UNARY
+		9'd66: ent_attr = '{1'b1, 9'd66, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd12, 19'h40000, 19'h40000, 19'h40000};  // TST TST
+		9'd67: ent_attr = '{1'b1, 9'd67, 10'd98, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd98, 19'h40000, 19'h40000, 19'h40000};  // MVSR2 MOVE_FROM_SR
+		9'd68: ent_attr = '{1'b1, 9'd68, 10'd99, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd99, 19'h40000, 19'h40000, 19'h40000};  // MVSR2 MOVE_FROM_CCR
+		9'd69: ent_attr = '{1'b1, 9'd69, 10'd100, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd100, 19'h40000, 19'h40000, 19'h40000};  // MV2SR MOVE_TO_CCR
+		9'd70: ent_attr = '{1'b1, 9'd70, 10'd101, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd101, 19'h40000, 19'h40000, 19'h40000};  // MV2SR MOVE_TO_SR
+		9'd71: ent_attr = '{1'b1, 9'd71, 10'd94, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd94, 19'h0, 19'h0, 19'h40000};  // LINK LINK
+		9'd72: ent_attr = '{1'b1, 9'd72, 10'd11, 7'd19, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NBCD UNARY
+		9'd73: ent_attr = '{1'b1, 9'd73, 10'd107, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd107, 19'h0, 19'h0, 19'h40000};  // BKPT BKPT
+		9'd74: ent_attr = '{1'b1, 9'd74, 10'd15, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd15, 19'h40000, 19'h40000, 19'h40000};  // SWAP SWAP
+		9'd75: ent_attr = '{1'b1, 9'd75, 10'd28, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd28, 19'h0, 19'h0, 19'h40000};  // PEA PEA
+		9'd76: ent_attr = '{1'b1, 9'd76, 10'd16, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd16, 19'h40000, 19'h40000, 19'h40000};  // EXT EXT
+		9'd77: ent_attr = '{1'b1, 9'd77, 10'd16, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd16, 19'h40000, 19'h40000, 19'h40000};  // EXT EXT
+		9'd78: ent_attr = '{1'b1, 9'd78, 10'd17, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd17, 19'h40000, 19'h40000, 19'h40000};  // EXT EXTB
+		9'd79: ent_attr = '{1'b1, 9'd79, 10'd122, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1f4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd124, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd123, 19'h21f0d, 19'h40000, 19'h40000};  // MVMLE MOVEM_RM
+		9'd80: ent_attr = '{1'b1, 9'd80, 10'd122, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1f4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd124, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd123, 19'h21f0d, 19'h40000, 19'h40000};  // MVMLE MOVEM_RM
+		9'd81: ent_attr = '{1'b1, 9'd81, 10'd125, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h7ec, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd127, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd126, 19'h21fcd, 19'h40000, 19'h40000};  // MVMEL MOVEM_MR
+		9'd82: ent_attr = '{1'b1, 9'd82, 10'd125, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7ec, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd127, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd126, 19'h21fcd, 19'h40000, 19'h40000};  // MVMEL MOVEM_MR
+		9'd83: ent_attr = '{1'b1, 9'd83, 10'd18, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd18, 19'h40000, 19'h40000, 19'h40000};  // TAS TAS
+		9'd84: ent_attr = '{1'b1, 9'd84, 10'd0, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd13, 10'd0, 19'h40000, 19'h40000, 19'h40000};  // ILLG ILLEGAL
+		9'd85: ent_attr = '{1'b1, 9'd85, 10'd114, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd114, 19'h40000, 19'h40000, 19'h40000};  // HALT HALT
+		9'd86: ent_attr = '{1'b1, 9'd86, 10'd115, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd115, 19'h40000, 19'h40000, 19'h40000};  // PULSE PULSE
+		9'd87: ent_attr = '{1'b1, 9'd87, 10'd68, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd68, 19'h40000, 19'h40000, 19'h40000};  // MULL MULL
+		9'd88: ent_attr = '{1'b1, 9'd88, 10'd69, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd69, 19'h0, 19'h0, 19'h40000};  // DIVL DIVL
+		9'd89: ent_attr = '{1'b1, 9'd89, 10'd106, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd12, 10'd106, 19'h40000, 19'h40000, 19'h40000};  // TRAP TRAP
+		9'd90: ent_attr = '{1'b1, 9'd90, 10'd94, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd94, 19'h0, 19'h0, 19'h40000};  // LINK LINK
+		9'd91: ent_attr = '{1'b1, 9'd91, 10'd97, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd97, 19'h40000, 19'h40000, 19'h40000};  // UNLK UNLK
+		9'd92: ent_attr = '{1'b1, 9'd92, 10'd104, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd104, 19'h40000, 19'h40000, 19'h40000};  // MVR2USP MOVE_TO_USP
+		9'd93: ent_attr = '{1'b1, 9'd93, 10'd105, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd105, 19'h40000, 19'h40000, 19'h40000};  // MVUSP2R MOVE_FROM_USP
+		9'd94: ent_attr = '{1'b1, 9'd94, 10'd110, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd110, 19'h40000, 19'h40000, 19'h40000};  // RESET RESET
+		9'd95: ent_attr = '{1'b1, 9'd95, 10'd109, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd109, 19'h40000, 19'h40000, 19'h40000};  // NOP NOP
+		9'd96: ent_attr = '{1'b1, 9'd96, 10'd111, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd15, 10'd111, 19'h40000, 19'h40000, 19'h40000};  // STOP STOP
+		9'd97: ent_attr = '{1'b1, 9'd97, 10'd165, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd165, 19'h0, 19'h0, 19'h40000};  // RTE RTE
+		9'd98: ent_attr = '{1'b1, 9'd98, 10'd90, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd90, 19'h0, 19'h0, 19'h40000};  // RTD RTD
+		9'd99: ent_attr = '{1'b1, 9'd99, 10'd89, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd5, 10'd89, 19'h40000, 19'h40000, 19'h40000};  // RTS RTS
+		9'd100: ent_attr = '{1'b1, 9'd100, 10'd93, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd93, 19'h40000, 19'h40000, 19'h40000};  // TRAPV TRAPV
+		9'd101: ent_attr = '{1'b1, 9'd101, 10'd171, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd171, 19'h0, 19'h0, 19'h40000};  // RTR RTR
+		9'd102: ent_attr = '{1'b1, 9'd102, 10'd116, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b1, 6'd16, 10'd118, 1'b0, 1'b0, 2'd0, 1'b0, 4'd10, 10'd117, 19'h21d90, 19'h40000, 19'h40000};  // MOVEC2 MOVEC_RD
+		9'd103: ent_attr = '{1'b1, 9'd103, 10'd119, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b1, 6'd16, 10'd121, 1'b0, 1'b0, 2'd0, 1'b0, 4'd10, 10'd120, 19'h21e50, 19'h40000, 19'h40000};  // MOVE2C MOVEC_WR
+		9'd104: ent_attr = '{1'b1, 9'd104, 10'd86, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd3, 10'd86, 19'h0, 19'h0, 19'h40000};  // JSR JSR
+		9'd105: ent_attr = '{1'b1, 9'd105, 10'd85, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd4, 10'd85, 19'h40000, 19'h40000, 19'h40000};  // JMP JMP
+		9'd106: ent_attr = '{1'b1, 9'd106, 10'd72, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd72, 19'h40000, 19'h40000, 19'h40000};  // CHK CHK
+		9'd107: ent_attr = '{1'b1, 9'd107, 10'd72, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd72, 19'h40000, 19'h40000, 19'h40000};  // CHK CHK
+		9'd108: ent_attr = '{1'b1, 9'd108, 10'd27, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd27, 19'h40000, 19'h40000, 19'h40000};  // LEA LEA
+		9'd109: ent_attr = '{1'b1, 9'd109, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // ADD QUICK
+		9'd110: ent_attr = '{1'b1, 9'd110, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // SUB QUICK
+		9'd111: ent_attr = '{1'b1, 9'd111, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // ADD QUICK
+		9'd112: ent_attr = '{1'b1, 9'd112, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // SUB QUICK
+		9'd113: ent_attr = '{1'b1, 9'd113, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // ADD QUICK
+		9'd114: ent_attr = '{1'b1, 9'd114, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // SUB QUICK
+		9'd115: ent_attr = '{1'b1, 9'd115, 10'd25, 7'd1, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd25, 19'h40000, 19'h40000, 19'h40000};  // ADDA QUICK_A
+		9'd116: ent_attr = '{1'b1, 9'd116, 10'd25, 7'd1, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd25, 19'h40000, 19'h40000, 19'h40000};  // ADDA QUICK_A
+		9'd117: ent_attr = '{1'b1, 9'd117, 10'd26, 7'd3, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd26, 19'h40000, 19'h40000, 19'h40000};  // SUBA QUICK_SA
+		9'd118: ent_attr = '{1'b1, 9'd118, 10'd26, 7'd3, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd26, 19'h40000, 19'h40000, 19'h40000};  // SUBA QUICK_SA
+		9'd119: ent_attr = '{1'b1, 9'd119, 10'd13, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd13, 19'h40000, 19'h40000, 19'h40000};  // Scc SCC
+		9'd120: ent_attr = '{1'b1, 9'd120, 10'd84, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd6, 10'd84, 19'h40000, 19'h40000, 19'h40000};  // DBcc DBCC
+		9'd121: ent_attr = '{1'b1, 9'd121, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd92, 19'h40000, 19'h40000, 19'h40000};  // TRAPcc TRAPCC
+		9'd122: ent_attr = '{1'b1, 9'd122, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd92, 19'h40000, 19'h40000, 19'h40000};  // TRAPcc TRAPCC
+		9'd123: ent_attr = '{1'b1, 9'd123, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd92, 19'h40000, 19'h40000, 19'h40000};  // TRAPcc TRAPCC
+		9'd124: ent_attr = '{1'b1, 9'd124, 10'd83, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd5, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd2, 10'd83, 19'h40000, 19'h40000, 19'h40000};  // BSR BSR
+		9'd125: ent_attr = '{1'b1, 9'd125, 10'd82, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd5, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd1, 10'd82, 19'h40000, 19'h40000, 19'h40000};  // Bcc BCC
+		9'd126: ent_attr = '{1'b1, 9'd126, 10'd10, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd10, 19'h40000, 19'h40000, 19'h40000};  // MOVE MOVEQ
+		9'd127: ent_attr = '{1'b1, 9'd127, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // OR OP_EA_DN
+		9'd128: ent_attr = '{1'b1, 9'd128, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // OR OP_DN_EA
+		9'd129: ent_attr = '{1'b1, 9'd129, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // AND OP_EA_DN
+		9'd130: ent_attr = '{1'b1, 9'd130, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // AND OP_DN_EA
+		9'd131: ent_attr = '{1'b1, 9'd131, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_EA_DN
+		9'd132: ent_attr = '{1'b1, 9'd132, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_DN_EA
+		9'd133: ent_attr = '{1'b1, 9'd133, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_EA_DN
+		9'd134: ent_attr = '{1'b1, 9'd134, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_DN_EA
+		9'd135: ent_attr = '{1'b1, 9'd135, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd7, 19'h40000, 19'h40000, 19'h40000};  // CMP CMP_EA_DN
+		9'd136: ent_attr = '{1'b1, 9'd136, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // EOR OP_DN_EA
+		9'd137: ent_attr = '{1'b1, 9'd137, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0, 4'd0, 10'd54, 19'h0, 19'h0, 19'h40000};  // CMPM CMPM
+		9'd138: ent_attr = '{1'b1, 9'd138, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // SUBX ADDX_R
+		9'd139: ent_attr = '{1'b1, 9'd139, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // SUBX ADDX_M
+		9'd140: ent_attr = '{1'b1, 9'd140, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // ADDX ADDX_R
+		9'd141: ent_attr = '{1'b1, 9'd141, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // ADDX ADDX_M
+		9'd142: ent_attr = '{1'b1, 9'd142, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // OR OP_EA_DN
+		9'd143: ent_attr = '{1'b1, 9'd143, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // OR OP_DN_EA
+		9'd144: ent_attr = '{1'b1, 9'd144, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // AND OP_EA_DN
+		9'd145: ent_attr = '{1'b1, 9'd145, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // AND OP_DN_EA
+		9'd146: ent_attr = '{1'b1, 9'd146, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_EA_DN
+		9'd147: ent_attr = '{1'b1, 9'd147, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_DN_EA
+		9'd148: ent_attr = '{1'b1, 9'd148, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_EA_DN
+		9'd149: ent_attr = '{1'b1, 9'd149, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_DN_EA
+		9'd150: ent_attr = '{1'b1, 9'd150, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd7, 19'h40000, 19'h40000, 19'h40000};  // CMP CMP_EA_DN
+		9'd151: ent_attr = '{1'b1, 9'd151, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // EOR OP_DN_EA
+		9'd152: ent_attr = '{1'b1, 9'd152, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0, 4'd0, 10'd54, 19'h0, 19'h0, 19'h40000};  // CMPM CMPM
+		9'd153: ent_attr = '{1'b1, 9'd153, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // SUBX ADDX_R
+		9'd154: ent_attr = '{1'b1, 9'd154, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // SUBX ADDX_M
+		9'd155: ent_attr = '{1'b1, 9'd155, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // ADDX ADDX_R
+		9'd156: ent_attr = '{1'b1, 9'd156, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // ADDX ADDX_M
+		9'd157: ent_attr = '{1'b1, 9'd157, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // OR OP_EA_DN
+		9'd158: ent_attr = '{1'b1, 9'd158, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // OR OP_DN_EA
+		9'd159: ent_attr = '{1'b1, 9'd159, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // AND OP_EA_DN
+		9'd160: ent_attr = '{1'b1, 9'd160, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // AND OP_DN_EA
+		9'd161: ent_attr = '{1'b1, 9'd161, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_EA_DN
+		9'd162: ent_attr = '{1'b1, 9'd162, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_DN_EA
+		9'd163: ent_attr = '{1'b1, 9'd163, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_EA_DN
+		9'd164: ent_attr = '{1'b1, 9'd164, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_DN_EA
+		9'd165: ent_attr = '{1'b1, 9'd165, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd7, 19'h40000, 19'h40000, 19'h40000};  // CMP CMP_EA_DN
+		9'd166: ent_attr = '{1'b1, 9'd166, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // EOR OP_DN_EA
+		9'd167: ent_attr = '{1'b1, 9'd167, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0, 4'd0, 10'd54, 19'h0, 19'h0, 19'h40000};  // CMPM CMPM
+		9'd168: ent_attr = '{1'b1, 9'd168, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // SUBX ADDX_R
+		9'd169: ent_attr = '{1'b1, 9'd169, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // SUBX ADDX_M
+		9'd170: ent_attr = '{1'b1, 9'd170, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // ADDX ADDX_R
+		9'd171: ent_attr = '{1'b1, 9'd171, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // ADDX ADDX_M
+		9'd172: ent_attr = '{1'b1, 9'd172, 10'd67, 7'd49, 4'd0, 1'b0, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd67, 19'h40000, 19'h40000, 19'h40000};  // DIVU DIVW
+		9'd173: ent_attr = '{1'b1, 9'd173, 10'd67, 7'd49, 4'd1, 1'b1, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd67, 19'h40000, 19'h40000, 19'h40000};  // DIVS DIVW
+		9'd174: ent_attr = '{1'b1, 9'd174, 10'd66, 7'd48, 4'd0, 1'b0, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd66, 19'h40000, 19'h40000, 19'h40000};  // MULU MULW
+		9'd175: ent_attr = '{1'b1, 9'd175, 10'd66, 7'd48, 4'd1, 1'b1, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd66, 19'h40000, 19'h40000, 19'h40000};  // MULS MULW
+		9'd176: ent_attr = '{1'b1, 9'd176, 10'd51, 7'd18, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // SBCD ADDX_R
+		9'd177: ent_attr = '{1'b1, 9'd177, 10'd52, 7'd18, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // SBCD ADDX_M
+		9'd178: ent_attr = '{1'b1, 9'd178, 10'd51, 7'd17, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // ABCD ADDX_R
+		9'd179: ent_attr = '{1'b1, 9'd179, 10'd52, 7'd17, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // ABCD ADDX_M
+		9'd180: ent_attr = '{1'b1, 9'd180, 10'd56, 7'd20, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd56, 19'h0, 19'h0, 19'h40000};  // PACK PACK_R
+		9'd181: ent_attr = '{1'b1, 9'd181, 10'd58, 7'd20, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd58, 19'h0, 19'h0, 19'h40000};  // PACK PACK_M
+		9'd182: ent_attr = '{1'b1, 9'd182, 10'd61, 7'd21, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd61, 19'h0, 19'h0, 19'h40000};  // UNPK UNPK_R
+		9'd183: ent_attr = '{1'b1, 9'd183, 10'd63, 7'd21, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd63, 19'h0, 19'h0, 19'h40000};  // UNPK UNPK_M
+		9'd184: ent_attr = '{1'b1, 9'd184, 10'd22, 7'd3, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd7, 10'd24, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd23, 19'h20607, 19'h40000, 19'h40000};  // SUBA SUBA
+		9'd185: ent_attr = '{1'b1, 9'd185, 10'd22, 7'd3, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd7, 10'd24, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd23, 19'h20607, 19'h40000, 19'h40000};  // SUBA SUBA
+		9'd186: ent_attr = '{1'b1, 9'd186, 10'd19, 7'd1, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd21, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd20, 19'h20542, 19'h40000, 19'h40000};  // ADDA ADDA
+		9'd187: ent_attr = '{1'b1, 9'd187, 10'd19, 7'd1, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd21, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd20, 19'h20542, 19'h40000, 19'h40000};  // ADDA ADDA
+		9'd188: ent_attr = '{1'b1, 9'd188, 10'd8, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd8, 19'h40000, 19'h40000, 19'h40000};  // CMPA CMPA
+		9'd189: ent_attr = '{1'b1, 9'd189, 10'd8, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd8, 19'h40000, 19'h40000, 19'h40000};  // CMPA CMPA
+		9'd190: ent_attr = '{1'b1, 9'd190, 10'd73, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd73, 19'h0, 19'h0, 19'h40000};  // EXG EXG_DD
+		9'd191: ent_attr = '{1'b1, 9'd191, 10'd76, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd76, 19'h0, 19'h0, 19'h40000};  // EXG EXG_AA
+		9'd192: ent_attr = '{1'b1, 9'd192, 10'd79, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd79, 19'h0, 19'h0, 19'h40000};  // EXG EXG_DA
+		9'd193: ent_attr = '{1'b1, 9'd193, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASR SHIFT_R
+		9'd194: ent_attr = '{1'b1, 9'd194, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASL SHIFT_R
+		9'd195: ent_attr = '{1'b1, 9'd195, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSR SHIFT_R
+		9'd196: ent_attr = '{1'b1, 9'd196, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSL SHIFT_R
+		9'd197: ent_attr = '{1'b1, 9'd197, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXR SHIFT_R
+		9'd198: ent_attr = '{1'b1, 9'd198, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXL SHIFT_R
+		9'd199: ent_attr = '{1'b1, 9'd199, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROR SHIFT_R
+		9'd200: ent_attr = '{1'b1, 9'd200, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROL SHIFT_R
+		9'd201: ent_attr = '{1'b1, 9'd201, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASR SHIFT_R
+		9'd202: ent_attr = '{1'b1, 9'd202, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASL SHIFT_R
+		9'd203: ent_attr = '{1'b1, 9'd203, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSR SHIFT_R
+		9'd204: ent_attr = '{1'b1, 9'd204, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSL SHIFT_R
+		9'd205: ent_attr = '{1'b1, 9'd205, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXR SHIFT_R
+		9'd206: ent_attr = '{1'b1, 9'd206, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXL SHIFT_R
+		9'd207: ent_attr = '{1'b1, 9'd207, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROR SHIFT_R
+		9'd208: ent_attr = '{1'b1, 9'd208, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROL SHIFT_R
+		9'd209: ent_attr = '{1'b1, 9'd209, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASR SHIFT_R
+		9'd210: ent_attr = '{1'b1, 9'd210, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASL SHIFT_R
+		9'd211: ent_attr = '{1'b1, 9'd211, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSR SHIFT_R
+		9'd212: ent_attr = '{1'b1, 9'd212, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSL SHIFT_R
+		9'd213: ent_attr = '{1'b1, 9'd213, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXR SHIFT_R
+		9'd214: ent_attr = '{1'b1, 9'd214, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXL SHIFT_R
+		9'd215: ent_attr = '{1'b1, 9'd215, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROR SHIFT_R
+		9'd216: ent_attr = '{1'b1, 9'd216, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROL SHIFT_R
+		9'd217: ent_attr = '{1'b1, 9'd217, 10'd50, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // ASRW SHIFT_M
+		9'd218: ent_attr = '{1'b1, 9'd218, 10'd50, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // ASLW SHIFT_M
+		9'd219: ent_attr = '{1'b1, 9'd219, 10'd50, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // LSRW SHIFT_M
+		9'd220: ent_attr = '{1'b1, 9'd220, 10'd50, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // LSLW SHIFT_M
+		9'd221: ent_attr = '{1'b1, 9'd221, 10'd50, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // ROXRW SHIFT_M
+		9'd222: ent_attr = '{1'b1, 9'd222, 10'd50, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // ROXLW SHIFT_M
+		9'd223: ent_attr = '{1'b1, 9'd223, 10'd50, 7'd27, 4'd0, 1'b0, 5'hf, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // RORW SHIFT_M
+		9'd224: ent_attr = '{1'b1, 9'd224, 10'd50, 7'd26, 4'd0, 1'b0, 5'hf, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // ROLW SHIFT_M
+		9'd225: ent_attr = '{1'b1, 9'd225, 10'd130, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd138, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd131, 19'h22285, 19'h0, 19'h0};  // BFTST BF_TST
+		9'd226: ent_attr = '{1'b1, 9'd226, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd141, 19'h22505, 19'h0, 19'h0};  // BFEXTU BF_EXT
+		9'd227: ent_attr = '{1'b1, 9'd227, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd151, 19'h22845, 19'h0, 19'h0};  // BFCHG BF_MOD
+		9'd228: ent_attr = '{1'b1, 9'd228, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd141, 19'h22505, 19'h0, 19'h0};  // BFEXTS BF_EXT
+		9'd229: ent_attr = '{1'b1, 9'd229, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd151, 19'h22845, 19'h0, 19'h0};  // BFCLR BF_MOD
+		9'd230: ent_attr = '{1'b1, 9'd230, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd141, 19'h22505, 19'h0, 19'h0};  // BFFFO BF_EXT
+		9'd231: ent_attr = '{1'b1, 9'd231, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd151, 19'h22845, 19'h0, 19'h0};  // BFSET BF_MOD
+		9'd232: ent_attr = '{1'b1, 9'd232, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd151, 19'h22845, 19'h0, 19'h0};  // BFINS BF_MOD
+		9'd233: ent_attr = '{1'b1, 9'd233, 10'd187, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd1, 3'd0, 1'b0, 6'd19, 10'd196, 1'b1, 1'b0, 2'd0, 1'b0, 4'd9, 10'd188, 19'h23113, 19'h0, 19'h40000};  // FPP FPU_GEN
+		9'd234: ent_attr = '{1'b1, 9'd234, 10'd441, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd441, 19'h0, 19'h0, 19'h40000};  // FScc FSCC
+		9'd235: ent_attr = '{1'b1, 9'd235, 10'd443, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd1, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd8, 10'd443, 19'h0, 19'h0, 19'h40000};  // FDBcc FDBCC
+		9'd236: ent_attr = '{1'b1, 9'd236, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd445, 19'h0, 19'h0, 19'h40000};  // FTRAPcc FTRAPCC
+		9'd237: ent_attr = '{1'b1, 9'd237, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd445, 19'h0, 19'h0, 19'h40000};  // FTRAPcc FTRAPCC
+		9'd238: ent_attr = '{1'b1, 9'd238, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd445, 19'h0, 19'h0, 19'h40000};  // FTRAPcc FTRAPCC
+		9'd239: ent_attr = '{1'b1, 9'd239, 10'd439, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd7, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd7, 10'd439, 19'h0, 19'h0, 19'h40000};  // FBcc FBCC
+		9'd240: ent_attr = '{1'b1, 9'd240, 10'd439, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd7, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd7, 10'd439, 19'h0, 19'h0, 19'h40000};  // FBcc FBCC
+		9'd241: ent_attr = '{1'b1, 9'd241, 10'd447, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1f4, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd447, 19'h0, 19'h0, 19'h40000};  // FSAVE FSAVE
+		9'd242: ent_attr = '{1'b1, 9'd242, 10'd460, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7ec, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd460, 19'h0, 19'h0, 19'h40000};  // FRESTORE FRESTORE
+		9'd243: ent_attr = '{1'b1, 9'd243, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVL CACHE_OP
+		9'd244: ent_attr = '{1'b1, 9'd244, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVP CACHE_OP
+		9'd245: ent_attr = '{1'b1, 9'd245, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVA CACHE_OP
+		9'd246: ent_attr = '{1'b1, 9'd246, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHL CACHE_OP
+		9'd247: ent_attr = '{1'b1, 9'd247, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHP CACHE_OP
+		9'd248: ent_attr = '{1'b1, 9'd248, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHA CACHE_OP
+		9'd249: ent_attr = '{1'b1, 9'd249, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVL CACHE_OP
+		9'd250: ent_attr = '{1'b1, 9'd250, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVP CACHE_OP
+		9'd251: ent_attr = '{1'b1, 9'd251, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVA CACHE_OP
+		9'd252: ent_attr = '{1'b1, 9'd252, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHL CACHE_OP
+		9'd253: ent_attr = '{1'b1, 9'd253, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHP CACHE_OP
+		9'd254: ent_attr = '{1'b1, 9'd254, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHA CACHE_OP
+		9'd255: ent_attr = '{1'b1, 9'd255, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVL CACHE_OP
+		9'd256: ent_attr = '{1'b1, 9'd256, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVP CACHE_OP
+		9'd257: ent_attr = '{1'b1, 9'd257, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVA CACHE_OP
+		9'd258: ent_attr = '{1'b1, 9'd258, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHL CACHE_OP
+		9'd259: ent_attr = '{1'b1, 9'd259, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHP CACHE_OP
+		9'd260: ent_attr = '{1'b1, 9'd260, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHA CACHE_OP
+		9'd261: ent_attr = '{1'b1, 9'd261, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVL CACHE_OP
+		9'd262: ent_attr = '{1'b1, 9'd262, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVP CACHE_OP
+		9'd263: ent_attr = '{1'b1, 9'd263, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVA CACHE_OP
+		9'd264: ent_attr = '{1'b1, 9'd264, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHL CACHE_OP
+		9'd265: ent_attr = '{1'b1, 9'd265, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHP CACHE_OP
+		9'd266: ent_attr = '{1'b1, 9'd266, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHA CACHE_OP
+		9'd267: ent_attr = '{1'b1, 9'd267, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd185, 19'h40000, 19'h40000, 19'h40000};  // PFLUSHN PFLUSH
+		9'd268: ent_attr = '{1'b1, 9'd268, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd185, 19'h40000, 19'h40000, 19'h40000};  // PFLUSH PFLUSH
+		9'd269: ent_attr = '{1'b1, 9'd269, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd185, 19'h40000, 19'h40000, 19'h40000};  // PFLUSHAN PFLUSH
+		9'd270: ent_attr = '{1'b1, 9'd270, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd185, 19'h40000, 19'h40000, 19'h40000};  // PFLUSHA PFLUSH
+		9'd271: ent_attr = '{1'b1, 9'd271, 10'd186, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd186, 19'h40000, 19'h40000, 19'h40000};  // PLPAW PLPA
+		9'd272: ent_attr = '{1'b1, 9'd272, 10'd186, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd186, 19'h40000, 19'h40000, 19'h40000};  // PLPAR PLPA
+		9'd273: ent_attr = '{1'b1, 9'd273, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0, 4'd0, 10'd128, 19'h0, 19'h0, 19'h40000};  // MOVE16 MOVE16
+		9'd274: ent_attr = '{1'b1, 9'd274, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0, 4'd0, 10'd128, 19'h0, 19'h0, 19'h40000};  // MOVE16 MOVE16
+		9'd275: ent_attr = '{1'b1, 9'd275, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0, 4'd0, 10'd128, 19'h0, 19'h0, 19'h40000};  // MOVE16 MOVE16
+		9'd276: ent_attr = '{1'b1, 9'd276, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0, 4'd0, 10'd128, 19'h0, 19'h0, 19'h40000};  // MOVE16 MOVE16
+		9'd277: ent_attr = '{1'b1, 9'd277, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0, 4'd0, 10'd128, 19'h0, 19'h0, 19'h40000};  // MOVE16 MOVE16
+		9'd278: ent_attr = '{1'b1, 9'd278, 10'd112, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd11, 10'd112, 19'h0, 19'h0, 19'h40000};  // LPSTOP LPSTOP
 		default: ;
 	endcase
 	if (!hit) ent_attr = '0;
@@ -877,285 +1165,285 @@ endfunction
 function automatic pla_t ent_attr_oh(input logic [NENT-1:0] s);
 	pla_t a;
 	a = '0;
-	if (s[0]) a = a | {1'b1, 9'd0, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR IMM_OP
-	if (s[1]) a = a | {1'b1, 9'd1, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND IMM_OP
-	if (s[2]) a = a | {1'b1, 9'd2, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB IMM_OP
-	if (s[3]) a = a | {1'b1, 9'd3, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD IMM_OP
-	if (s[4]) a = a | {1'b1, 9'd4, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR IMM_OP
-	if (s[5]) a = a | {1'b1, 9'd5, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP IMM_CMP
-	if (s[6]) a = a | {1'b1, 9'd6, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0};  // MOVES MOVES
-	if (s[7]) a = a | {1'b1, 9'd7, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR IMM_OP
-	if (s[8]) a = a | {1'b1, 9'd8, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND IMM_OP
-	if (s[9]) a = a | {1'b1, 9'd9, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB IMM_OP
-	if (s[10]) a = a | {1'b1, 9'd10, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD IMM_OP
-	if (s[11]) a = a | {1'b1, 9'd11, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR IMM_OP
-	if (s[12]) a = a | {1'b1, 9'd12, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP IMM_CMP
-	if (s[13]) a = a | {1'b1, 9'd13, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0};  // MOVES MOVES
-	if (s[14]) a = a | {1'b1, 9'd14, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR IMM_OP
-	if (s[15]) a = a | {1'b1, 9'd15, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND IMM_OP
-	if (s[16]) a = a | {1'b1, 9'd16, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB IMM_OP
-	if (s[17]) a = a | {1'b1, 9'd17, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD IMM_OP
-	if (s[18]) a = a | {1'b1, 9'd18, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR IMM_OP
-	if (s[19]) a = a | {1'b1, 9'd19, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP IMM_CMP
-	if (s[20]) a = a | {1'b1, 9'd20, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0};  // MOVES MOVES
-	if (s[21]) a = a | {1'b1, 9'd21, 10'd102, 7'd42, 4'd1, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ORSR CCR_LOG
-	if (s[22]) a = a | {1'b1, 9'd22, 10'd103, 7'd42, 4'd1, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ORSR SR_LOG
-	if (s[23]) a = a | {1'b1, 9'd23, 10'd102, 7'd42, 4'd0, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ANDSR CCR_LOG
-	if (s[24]) a = a | {1'b1, 9'd24, 10'd103, 7'd42, 4'd0, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ANDSR SR_LOG
-	if (s[25]) a = a | {1'b1, 9'd25, 10'd102, 7'd42, 4'd2, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EORSR CCR_LOG
-	if (s[26]) a = a | {1'b1, 9'd26, 10'd103, 7'd42, 4'd2, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EORSR SR_LOG
-	if (s[27]) a = a | {1'b1, 9'd27, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CHK2 UNIMPL
-	if (s[28]) a = a | {1'b1, 9'd28, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CHK2 UNIMPL
-	if (s[29]) a = a | {1'b1, 9'd29, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CHK2 UNIMPL
-	if (s[30]) a = a | {1'b1, 9'd30, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CAS CAS
-	if (s[31]) a = a | {1'b1, 9'd31, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CAS CAS
-	if (s[32]) a = a | {1'b1, 9'd32, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CAS CAS
-	if (s[33]) a = a | {1'b1, 9'd33, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd2, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CAS2 UNIMPL
-	if (s[34]) a = a | {1'b1, 9'd34, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd2, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CAS2 UNIMPL
-	if (s[35]) a = a | {1'b1, 9'd35, 10'd43, 7'd30, 4'd0, 1'b0, 5'h0, 2'd0, 12'h7fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd45, 1'b1, 1'b0, 2'd0, 1'b0};  // BTST BTST_IMM
-	if (s[36]) a = a | {1'b1, 9'd36, 10'd37, 7'd31, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0};  // BCHG BIT_IMM
-	if (s[37]) a = a | {1'b1, 9'd37, 10'd37, 7'd32, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0};  // BCLR BIT_IMM
-	if (s[38]) a = a | {1'b1, 9'd38, 10'd37, 7'd33, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0};  // BSET BIT_IMM
-	if (s[39]) a = a | {1'b1, 9'd39, 10'd46, 7'd30, 4'd0, 1'b0, 5'h0, 2'd0, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd48, 1'b1, 1'b0, 2'd0, 1'b0};  // BTST BTST_DYN
-	if (s[40]) a = a | {1'b1, 9'd40, 10'd40, 7'd31, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0};  // BCHG BIT_DYN
-	if (s[41]) a = a | {1'b1, 9'd41, 10'd40, 7'd32, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0};  // BCLR BIT_DYN
-	if (s[42]) a = a | {1'b1, 9'd42, 10'd40, 7'd33, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0};  // BSET BIT_DYN
-	if (s[43]) a = a | {1'b1, 9'd43, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVPMR UNIMPL
-	if (s[44]) a = a | {1'b1, 9'd44, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVPMR UNIMPL
-	if (s[45]) a = a | {1'b1, 9'd45, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVPRM UNIMPL
-	if (s[46]) a = a | {1'b1, 9'd46, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVPRM UNIMPL
-	if (s[47]) a = a | {1'b1, 9'd47, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'hffd, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0};  // MOVE MOVE
-	if (s[48]) a = a | {1'b1, 9'd48, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0};  // MOVE MOVE
-	if (s[49]) a = a | {1'b1, 9'd49, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0};  // MOVE MOVE
-	if (s[50]) a = a | {1'b1, 9'd50, 10'd30, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd32, 1'b1, 1'b0, 2'd0, 1'b0};  // MOVEA MOVEA
-	if (s[51]) a = a | {1'b1, 9'd51, 10'd30, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd32, 1'b1, 1'b0, 2'd0, 1'b0};  // MOVEA MOVEA
-	if (s[52]) a = a | {1'b1, 9'd52, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEGX UNARY
-	if (s[53]) a = a | {1'b1, 9'd53, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CLR CLR_W
-	if (s[54]) a = a | {1'b1, 9'd54, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEG UNARY
-	if (s[55]) a = a | {1'b1, 9'd55, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NOT UNARY
-	if (s[56]) a = a | {1'b1, 9'd56, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // TST TST
-	if (s[57]) a = a | {1'b1, 9'd57, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEGX UNARY
-	if (s[58]) a = a | {1'b1, 9'd58, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CLR CLR_W
-	if (s[59]) a = a | {1'b1, 9'd59, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEG UNARY
-	if (s[60]) a = a | {1'b1, 9'd60, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NOT UNARY
-	if (s[61]) a = a | {1'b1, 9'd61, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // TST TST
-	if (s[62]) a = a | {1'b1, 9'd62, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEGX UNARY
-	if (s[63]) a = a | {1'b1, 9'd63, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CLR CLR_W
-	if (s[64]) a = a | {1'b1, 9'd64, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NEG UNARY
-	if (s[65]) a = a | {1'b1, 9'd65, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NOT UNARY
-	if (s[66]) a = a | {1'b1, 9'd66, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // TST TST
-	if (s[67]) a = a | {1'b1, 9'd67, 10'd98, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MVSR2 MOVE_FROM_SR
-	if (s[68]) a = a | {1'b1, 9'd68, 10'd99, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MVSR2 MOVE_FROM_CCR
-	if (s[69]) a = a | {1'b1, 9'd69, 10'd100, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MV2SR MOVE_TO_CCR
-	if (s[70]) a = a | {1'b1, 9'd70, 10'd101, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MV2SR MOVE_TO_SR
-	if (s[71]) a = a | {1'b1, 9'd71, 10'd94, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LINK LINK
-	if (s[72]) a = a | {1'b1, 9'd72, 10'd11, 7'd19, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // NBCD UNARY
-	if (s[73]) a = a | {1'b1, 9'd73, 10'd107, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // BKPT BKPT
-	if (s[74]) a = a | {1'b1, 9'd74, 10'd15, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SWAP SWAP
-	if (s[75]) a = a | {1'b1, 9'd75, 10'd28, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // PEA PEA
-	if (s[76]) a = a | {1'b1, 9'd76, 10'd16, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXT EXT
-	if (s[77]) a = a | {1'b1, 9'd77, 10'd16, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXT EXT
-	if (s[78]) a = a | {1'b1, 9'd78, 10'd17, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXT EXTB
-	if (s[79]) a = a | {1'b1, 9'd79, 10'd122, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1f4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd124, 1'b1, 1'b0, 2'd0, 1'b0};  // MVMLE MOVEM_RM
-	if (s[80]) a = a | {1'b1, 9'd80, 10'd122, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1f4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd124, 1'b1, 1'b0, 2'd0, 1'b0};  // MVMLE MOVEM_RM
-	if (s[81]) a = a | {1'b1, 9'd81, 10'd125, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h7ec, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd127, 1'b1, 1'b0, 2'd0, 1'b0};  // MVMEL MOVEM_MR
-	if (s[82]) a = a | {1'b1, 9'd82, 10'd125, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7ec, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd127, 1'b1, 1'b0, 2'd0, 1'b0};  // MVMEL MOVEM_MR
-	if (s[83]) a = a | {1'b1, 9'd83, 10'd18, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // TAS TAS
-	if (s[84]) a = a | {1'b1, 9'd84, 10'd0, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ILLG ILLEGAL
-	if (s[85]) a = a | {1'b1, 9'd85, 10'd114, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // HALT HALT
-	if (s[86]) a = a | {1'b1, 9'd86, 10'd115, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PULSE PULSE
-	if (s[87]) a = a | {1'b1, 9'd87, 10'd68, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MULL MULL
-	if (s[88]) a = a | {1'b1, 9'd88, 10'd69, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // DIVL DIVL
-	if (s[89]) a = a | {1'b1, 9'd89, 10'd106, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // TRAP TRAP
-	if (s[90]) a = a | {1'b1, 9'd90, 10'd94, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LINK LINK
-	if (s[91]) a = a | {1'b1, 9'd91, 10'd97, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // UNLK UNLK
-	if (s[92]) a = a | {1'b1, 9'd92, 10'd104, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVR2USP MOVE_TO_USP
-	if (s[93]) a = a | {1'b1, 9'd93, 10'd105, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MVUSP2R MOVE_FROM_USP
-	if (s[94]) a = a | {1'b1, 9'd94, 10'd110, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // RESET RESET
-	if (s[95]) a = a | {1'b1, 9'd95, 10'd109, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // NOP NOP
-	if (s[96]) a = a | {1'b1, 9'd96, 10'd111, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // STOP STOP
-	if (s[97]) a = a | {1'b1, 9'd97, 10'd165, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // RTE RTE
-	if (s[98]) a = a | {1'b1, 9'd98, 10'd90, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // RTD RTD
-	if (s[99]) a = a | {1'b1, 9'd99, 10'd89, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // RTS RTS
-	if (s[100]) a = a | {1'b1, 9'd100, 10'd93, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // TRAPV TRAPV
-	if (s[101]) a = a | {1'b1, 9'd101, 10'd171, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // RTR RTR
-	if (s[102]) a = a | {1'b1, 9'd102, 10'd116, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b1, 6'd16, 10'd118, 1'b0, 1'b0, 2'd0, 1'b0};  // MOVEC2 MOVEC_RD
-	if (s[103]) a = a | {1'b1, 9'd103, 10'd119, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b1, 6'd16, 10'd121, 1'b0, 1'b0, 2'd0, 1'b0};  // MOVE2C MOVEC_WR
-	if (s[104]) a = a | {1'b1, 9'd104, 10'd86, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // JSR JSR
-	if (s[105]) a = a | {1'b1, 9'd105, 10'd85, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // JMP JMP
-	if (s[106]) a = a | {1'b1, 9'd106, 10'd72, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CHK CHK
-	if (s[107]) a = a | {1'b1, 9'd107, 10'd72, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CHK CHK
-	if (s[108]) a = a | {1'b1, 9'd108, 10'd27, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // LEA LEA
-	if (s[109]) a = a | {1'b1, 9'd109, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD QUICK
-	if (s[110]) a = a | {1'b1, 9'd110, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB QUICK
-	if (s[111]) a = a | {1'b1, 9'd111, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD QUICK
-	if (s[112]) a = a | {1'b1, 9'd112, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB QUICK
-	if (s[113]) a = a | {1'b1, 9'd113, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD QUICK
-	if (s[114]) a = a | {1'b1, 9'd114, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB QUICK
-	if (s[115]) a = a | {1'b1, 9'd115, 10'd25, 7'd1, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ADDA QUICK_A
-	if (s[116]) a = a | {1'b1, 9'd116, 10'd25, 7'd1, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ADDA QUICK_A
-	if (s[117]) a = a | {1'b1, 9'd117, 10'd26, 7'd3, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SUBA QUICK_SA
-	if (s[118]) a = a | {1'b1, 9'd118, 10'd26, 7'd3, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SUBA QUICK_SA
-	if (s[119]) a = a | {1'b1, 9'd119, 10'd13, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // Scc SCC
-	if (s[120]) a = a | {1'b1, 9'd120, 10'd84, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // DBcc DBCC
-	if (s[121]) a = a | {1'b1, 9'd121, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // TRAPcc TRAPCC
-	if (s[122]) a = a | {1'b1, 9'd122, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // TRAPcc TRAPCC
-	if (s[123]) a = a | {1'b1, 9'd123, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // TRAPcc TRAPCC
-	if (s[124]) a = a | {1'b1, 9'd124, 10'd83, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd5, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // BSR BSR
-	if (s[125]) a = a | {1'b1, 9'd125, 10'd82, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd5, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // Bcc BCC
-	if (s[126]) a = a | {1'b1, 9'd126, 10'd10, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // MOVE MOVEQ
-	if (s[127]) a = a | {1'b1, 9'd127, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_EA_DN
-	if (s[128]) a = a | {1'b1, 9'd128, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_DN_EA
-	if (s[129]) a = a | {1'b1, 9'd129, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_EA_DN
-	if (s[130]) a = a | {1'b1, 9'd130, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_DN_EA
-	if (s[131]) a = a | {1'b1, 9'd131, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_EA_DN
-	if (s[132]) a = a | {1'b1, 9'd132, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_DN_EA
-	if (s[133]) a = a | {1'b1, 9'd133, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_EA_DN
-	if (s[134]) a = a | {1'b1, 9'd134, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_DN_EA
-	if (s[135]) a = a | {1'b1, 9'd135, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP CMP_EA_DN
-	if (s[136]) a = a | {1'b1, 9'd136, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR OP_DN_EA
-	if (s[137]) a = a | {1'b1, 9'd137, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0};  // CMPM CMPM
-	if (s[138]) a = a | {1'b1, 9'd138, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SUBX ADDX_R
-	if (s[139]) a = a | {1'b1, 9'd139, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // SUBX ADDX_M
-	if (s[140]) a = a | {1'b1, 9'd140, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ADDX ADDX_R
-	if (s[141]) a = a | {1'b1, 9'd141, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // ADDX ADDX_M
-	if (s[142]) a = a | {1'b1, 9'd142, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_EA_DN
-	if (s[143]) a = a | {1'b1, 9'd143, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_DN_EA
-	if (s[144]) a = a | {1'b1, 9'd144, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_EA_DN
-	if (s[145]) a = a | {1'b1, 9'd145, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_DN_EA
-	if (s[146]) a = a | {1'b1, 9'd146, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_EA_DN
-	if (s[147]) a = a | {1'b1, 9'd147, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_DN_EA
-	if (s[148]) a = a | {1'b1, 9'd148, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_EA_DN
-	if (s[149]) a = a | {1'b1, 9'd149, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_DN_EA
-	if (s[150]) a = a | {1'b1, 9'd150, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP CMP_EA_DN
-	if (s[151]) a = a | {1'b1, 9'd151, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR OP_DN_EA
-	if (s[152]) a = a | {1'b1, 9'd152, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0};  // CMPM CMPM
-	if (s[153]) a = a | {1'b1, 9'd153, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SUBX ADDX_R
-	if (s[154]) a = a | {1'b1, 9'd154, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // SUBX ADDX_M
-	if (s[155]) a = a | {1'b1, 9'd155, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ADDX ADDX_R
-	if (s[156]) a = a | {1'b1, 9'd156, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // ADDX ADDX_M
-	if (s[157]) a = a | {1'b1, 9'd157, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_EA_DN
-	if (s[158]) a = a | {1'b1, 9'd158, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // OR OP_DN_EA
-	if (s[159]) a = a | {1'b1, 9'd159, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_EA_DN
-	if (s[160]) a = a | {1'b1, 9'd160, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // AND OP_DN_EA
-	if (s[161]) a = a | {1'b1, 9'd161, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_EA_DN
-	if (s[162]) a = a | {1'b1, 9'd162, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // SUB OP_DN_EA
-	if (s[163]) a = a | {1'b1, 9'd163, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_EA_DN
-	if (s[164]) a = a | {1'b1, 9'd164, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ADD OP_DN_EA
-	if (s[165]) a = a | {1'b1, 9'd165, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMP CMP_EA_DN
-	if (s[166]) a = a | {1'b1, 9'd166, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // EOR OP_DN_EA
-	if (s[167]) a = a | {1'b1, 9'd167, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0};  // CMPM CMPM
-	if (s[168]) a = a | {1'b1, 9'd168, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SUBX ADDX_R
-	if (s[169]) a = a | {1'b1, 9'd169, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // SUBX ADDX_M
-	if (s[170]) a = a | {1'b1, 9'd170, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ADDX ADDX_R
-	if (s[171]) a = a | {1'b1, 9'd171, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // ADDX ADDX_M
-	if (s[172]) a = a | {1'b1, 9'd172, 10'd67, 7'd49, 4'd0, 1'b0, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // DIVU DIVW
-	if (s[173]) a = a | {1'b1, 9'd173, 10'd67, 7'd49, 4'd1, 1'b1, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // DIVS DIVW
-	if (s[174]) a = a | {1'b1, 9'd174, 10'd66, 7'd48, 4'd0, 1'b0, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MULU MULW
-	if (s[175]) a = a | {1'b1, 9'd175, 10'd66, 7'd48, 4'd1, 1'b1, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // MULS MULW
-	if (s[176]) a = a | {1'b1, 9'd176, 10'd51, 7'd18, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // SBCD ADDX_R
-	if (s[177]) a = a | {1'b1, 9'd177, 10'd52, 7'd18, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // SBCD ADDX_M
-	if (s[178]) a = a | {1'b1, 9'd178, 10'd51, 7'd17, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ABCD ADDX_R
-	if (s[179]) a = a | {1'b1, 9'd179, 10'd52, 7'd17, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // ABCD ADDX_M
-	if (s[180]) a = a | {1'b1, 9'd180, 10'd56, 7'd20, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PACK PACK_R
-	if (s[181]) a = a | {1'b1, 9'd181, 10'd58, 7'd20, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // PACK PACK_M
-	if (s[182]) a = a | {1'b1, 9'd182, 10'd61, 7'd21, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // UNPK UNPK_R
-	if (s[183]) a = a | {1'b1, 9'd183, 10'd63, 7'd21, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0};  // UNPK UNPK_M
-	if (s[184]) a = a | {1'b1, 9'd184, 10'd22, 7'd3, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd7, 10'd24, 1'b1, 1'b0, 2'd0, 1'b0};  // SUBA SUBA
-	if (s[185]) a = a | {1'b1, 9'd185, 10'd22, 7'd3, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd7, 10'd24, 1'b1, 1'b0, 2'd0, 1'b0};  // SUBA SUBA
-	if (s[186]) a = a | {1'b1, 9'd186, 10'd19, 7'd1, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd21, 1'b1, 1'b0, 2'd0, 1'b0};  // ADDA ADDA
-	if (s[187]) a = a | {1'b1, 9'd187, 10'd19, 7'd1, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd21, 1'b1, 1'b0, 2'd0, 1'b0};  // ADDA ADDA
-	if (s[188]) a = a | {1'b1, 9'd188, 10'd8, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMPA CMPA
-	if (s[189]) a = a | {1'b1, 9'd189, 10'd8, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // CMPA CMPA
-	if (s[190]) a = a | {1'b1, 9'd190, 10'd73, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXG EXG_DD
-	if (s[191]) a = a | {1'b1, 9'd191, 10'd76, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXG EXG_AA
-	if (s[192]) a = a | {1'b1, 9'd192, 10'd79, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // EXG EXG_DA
-	if (s[193]) a = a | {1'b1, 9'd193, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASR SHIFT_R
-	if (s[194]) a = a | {1'b1, 9'd194, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASL SHIFT_R
-	if (s[195]) a = a | {1'b1, 9'd195, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSR SHIFT_R
-	if (s[196]) a = a | {1'b1, 9'd196, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSL SHIFT_R
-	if (s[197]) a = a | {1'b1, 9'd197, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXR SHIFT_R
-	if (s[198]) a = a | {1'b1, 9'd198, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXL SHIFT_R
-	if (s[199]) a = a | {1'b1, 9'd199, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROR SHIFT_R
-	if (s[200]) a = a | {1'b1, 9'd200, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROL SHIFT_R
-	if (s[201]) a = a | {1'b1, 9'd201, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASR SHIFT_R
-	if (s[202]) a = a | {1'b1, 9'd202, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASL SHIFT_R
-	if (s[203]) a = a | {1'b1, 9'd203, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSR SHIFT_R
-	if (s[204]) a = a | {1'b1, 9'd204, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSL SHIFT_R
-	if (s[205]) a = a | {1'b1, 9'd205, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXR SHIFT_R
-	if (s[206]) a = a | {1'b1, 9'd206, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXL SHIFT_R
-	if (s[207]) a = a | {1'b1, 9'd207, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROR SHIFT_R
-	if (s[208]) a = a | {1'b1, 9'd208, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROL SHIFT_R
-	if (s[209]) a = a | {1'b1, 9'd209, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASR SHIFT_R
-	if (s[210]) a = a | {1'b1, 9'd210, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ASL SHIFT_R
-	if (s[211]) a = a | {1'b1, 9'd211, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSR SHIFT_R
-	if (s[212]) a = a | {1'b1, 9'd212, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LSL SHIFT_R
-	if (s[213]) a = a | {1'b1, 9'd213, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXR SHIFT_R
-	if (s[214]) a = a | {1'b1, 9'd214, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROXL SHIFT_R
-	if (s[215]) a = a | {1'b1, 9'd215, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROR SHIFT_R
-	if (s[216]) a = a | {1'b1, 9'd216, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // ROL SHIFT_R
-	if (s[217]) a = a | {1'b1, 9'd217, 10'd50, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ASRW SHIFT_M
-	if (s[218]) a = a | {1'b1, 9'd218, 10'd50, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ASLW SHIFT_M
-	if (s[219]) a = a | {1'b1, 9'd219, 10'd50, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // LSRW SHIFT_M
-	if (s[220]) a = a | {1'b1, 9'd220, 10'd50, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // LSLW SHIFT_M
-	if (s[221]) a = a | {1'b1, 9'd221, 10'd50, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ROXRW SHIFT_M
-	if (s[222]) a = a | {1'b1, 9'd222, 10'd50, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ROXLW SHIFT_M
-	if (s[223]) a = a | {1'b1, 9'd223, 10'd50, 7'd27, 4'd0, 1'b0, 5'hf, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // RORW SHIFT_M
-	if (s[224]) a = a | {1'b1, 9'd224, 10'd50, 7'd26, 4'd0, 1'b0, 5'hf, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // ROLW SHIFT_M
-	if (s[225]) a = a | {1'b1, 9'd225, 10'd130, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd138, 1'b1, 1'b0, 2'd0, 1'b0};  // BFTST BF_TST
-	if (s[226]) a = a | {1'b1, 9'd226, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0};  // BFEXTU BF_EXT
-	if (s[227]) a = a | {1'b1, 9'd227, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0};  // BFCHG BF_MOD
-	if (s[228]) a = a | {1'b1, 9'd228, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0};  // BFEXTS BF_EXT
-	if (s[229]) a = a | {1'b1, 9'd229, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0};  // BFCLR BF_MOD
-	if (s[230]) a = a | {1'b1, 9'd230, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0};  // BFFFO BF_EXT
-	if (s[231]) a = a | {1'b1, 9'd231, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0};  // BFSET BF_MOD
-	if (s[232]) a = a | {1'b1, 9'd232, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0};  // BFINS BF_MOD
-	if (s[233]) a = a | {1'b1, 9'd233, 10'd187, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd1, 3'd0, 1'b0, 6'd19, 10'd196, 1'b1, 1'b0, 2'd0, 1'b0};  // FPP FPU_GEN
-	if (s[234]) a = a | {1'b1, 9'd234, 10'd441, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // FScc FSCC
-	if (s[235]) a = a | {1'b1, 9'd235, 10'd443, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd1, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FDBcc FDBCC
-	if (s[236]) a = a | {1'b1, 9'd236, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FTRAPcc FTRAPCC
-	if (s[237]) a = a | {1'b1, 9'd237, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FTRAPcc FTRAPCC
-	if (s[238]) a = a | {1'b1, 9'd238, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FTRAPcc FTRAPCC
-	if (s[239]) a = a | {1'b1, 9'd239, 10'd439, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd7, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FBcc FBCC
-	if (s[240]) a = a | {1'b1, 9'd240, 10'd439, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd7, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // FBcc FBCC
-	if (s[241]) a = a | {1'b1, 9'd241, 10'd447, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1f4, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // FSAVE FSAVE
-	if (s[242]) a = a | {1'b1, 9'd242, 10'd460, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7ec, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0};  // FRESTORE FRESTORE
-	if (s[243]) a = a | {1'b1, 9'd243, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVL CACHE_OP
-	if (s[244]) a = a | {1'b1, 9'd244, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVP CACHE_OP
-	if (s[245]) a = a | {1'b1, 9'd245, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVA CACHE_OP
-	if (s[246]) a = a | {1'b1, 9'd246, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHL CACHE_OP
-	if (s[247]) a = a | {1'b1, 9'd247, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHP CACHE_OP
-	if (s[248]) a = a | {1'b1, 9'd248, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHA CACHE_OP
-	if (s[249]) a = a | {1'b1, 9'd249, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVL CACHE_OP
-	if (s[250]) a = a | {1'b1, 9'd250, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVP CACHE_OP
-	if (s[251]) a = a | {1'b1, 9'd251, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVA CACHE_OP
-	if (s[252]) a = a | {1'b1, 9'd252, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHL CACHE_OP
-	if (s[253]) a = a | {1'b1, 9'd253, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHP CACHE_OP
-	if (s[254]) a = a | {1'b1, 9'd254, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHA CACHE_OP
-	if (s[255]) a = a | {1'b1, 9'd255, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVL CACHE_OP
-	if (s[256]) a = a | {1'b1, 9'd256, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVP CACHE_OP
-	if (s[257]) a = a | {1'b1, 9'd257, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVA CACHE_OP
-	if (s[258]) a = a | {1'b1, 9'd258, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHL CACHE_OP
-	if (s[259]) a = a | {1'b1, 9'd259, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHP CACHE_OP
-	if (s[260]) a = a | {1'b1, 9'd260, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHA CACHE_OP
-	if (s[261]) a = a | {1'b1, 9'd261, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVL CACHE_OP
-	if (s[262]) a = a | {1'b1, 9'd262, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVP CACHE_OP
-	if (s[263]) a = a | {1'b1, 9'd263, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CINVA CACHE_OP
-	if (s[264]) a = a | {1'b1, 9'd264, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHL CACHE_OP
-	if (s[265]) a = a | {1'b1, 9'd265, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHP CACHE_OP
-	if (s[266]) a = a | {1'b1, 9'd266, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // CPUSHA CACHE_OP
-	if (s[267]) a = a | {1'b1, 9'd267, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PFLUSHN PFLUSH
-	if (s[268]) a = a | {1'b1, 9'd268, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PFLUSH PFLUSH
-	if (s[269]) a = a | {1'b1, 9'd269, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PFLUSHAN PFLUSH
-	if (s[270]) a = a | {1'b1, 9'd270, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PFLUSHA PFLUSH
-	if (s[271]) a = a | {1'b1, 9'd271, 10'd186, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PLPAW PLPA
-	if (s[272]) a = a | {1'b1, 9'd272, 10'd186, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // PLPAR PLPA
-	if (s[273]) a = a | {1'b1, 9'd273, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0};  // MOVE16 MOVE16
-	if (s[274]) a = a | {1'b1, 9'd274, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0};  // MOVE16 MOVE16
-	if (s[275]) a = a | {1'b1, 9'd275, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0};  // MOVE16 MOVE16
-	if (s[276]) a = a | {1'b1, 9'd276, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0};  // MOVE16 MOVE16
-	if (s[277]) a = a | {1'b1, 9'd277, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0};  // MOVE16 MOVE16
-	if (s[278]) a = a | {1'b1, 9'd278, 10'd112, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0};  // LPSTOP LPSTOP
+	if (s[0]) a = a | {1'b1, 9'd0, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // OR IMM_OP
+	if (s[1]) a = a | {1'b1, 9'd1, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // AND IMM_OP
+	if (s[2]) a = a | {1'b1, 9'd2, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // SUB IMM_OP
+	if (s[3]) a = a | {1'b1, 9'd3, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // ADD IMM_OP
+	if (s[4]) a = a | {1'b1, 9'd4, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // EOR IMM_OP
+	if (s[5]) a = a | {1'b1, 9'd5, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd6, 19'h40000, 19'h40000, 19'h40000};  // CMP IMM_CMP
+	if (s[6]) a = a | {1'b1, 9'd6, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd175, 19'h22dc9, 19'h22c51, 19'h40000};  // MOVES MOVES
+	if (s[7]) a = a | {1'b1, 9'd7, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // OR IMM_OP
+	if (s[8]) a = a | {1'b1, 9'd8, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // AND IMM_OP
+	if (s[9]) a = a | {1'b1, 9'd9, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // SUB IMM_OP
+	if (s[10]) a = a | {1'b1, 9'd10, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // ADD IMM_OP
+	if (s[11]) a = a | {1'b1, 9'd11, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // EOR IMM_OP
+	if (s[12]) a = a | {1'b1, 9'd12, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd6, 19'h40000, 19'h40000, 19'h40000};  // CMP IMM_CMP
+	if (s[13]) a = a | {1'b1, 9'd13, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd175, 19'h22dc9, 19'h22c51, 19'h40000};  // MOVES MOVES
+	if (s[14]) a = a | {1'b1, 9'd14, 10'd5, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // OR IMM_OP
+	if (s[15]) a = a | {1'b1, 9'd15, 10'd5, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // AND IMM_OP
+	if (s[16]) a = a | {1'b1, 9'd16, 10'd5, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // SUB IMM_OP
+	if (s[17]) a = a | {1'b1, 9'd17, 10'd5, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // ADD IMM_OP
+	if (s[18]) a = a | {1'b1, 9'd18, 10'd5, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd5, 19'h40000, 19'h40000, 19'h40000};  // EOR IMM_OP
+	if (s[19]) a = a | {1'b1, 9'd19, 10'd6, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'h7fd, 12'h000, 2'd0, 3'd1, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd6, 19'h40000, 19'h40000, 19'h40000};  // CMP IMM_CMP
+	if (s[20]) a = a | {1'b1, 9'd20, 10'd174, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b1, 6'd9, 10'd183, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd175, 19'h22dc9, 19'h22c51, 19'h40000};  // MOVES MOVES
+	if (s[21]) a = a | {1'b1, 9'd21, 10'd102, 7'd42, 4'd1, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd102, 19'h40000, 19'h40000, 19'h40000};  // ORSR CCR_LOG
+	if (s[22]) a = a | {1'b1, 9'd22, 10'd103, 7'd42, 4'd1, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd103, 19'h40000, 19'h40000, 19'h40000};  // ORSR SR_LOG
+	if (s[23]) a = a | {1'b1, 9'd23, 10'd102, 7'd42, 4'd0, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd102, 19'h40000, 19'h40000, 19'h40000};  // ANDSR CCR_LOG
+	if (s[24]) a = a | {1'b1, 9'd24, 10'd103, 7'd42, 4'd0, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd103, 19'h40000, 19'h40000, 19'h40000};  // ANDSR SR_LOG
+	if (s[25]) a = a | {1'b1, 9'd25, 10'd102, 7'd42, 4'd2, 1'b1, 5'h0, 2'd0, 12'h000, 12'h000, 2'd0, 3'd2, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd102, 19'h40000, 19'h40000, 19'h40000};  // EORSR CCR_LOG
+	if (s[26]) a = a | {1'b1, 9'd26, 10'd103, 7'd42, 4'd2, 1'b1, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd103, 19'h40000, 19'h40000, 19'h40000};  // EORSR SR_LOG
+	if (s[27]) a = a | {1'b1, 9'd27, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // CHK2 UNIMPL
+	if (s[28]) a = a | {1'b1, 9'd28, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // CHK2 UNIMPL
+	if (s[29]) a = a | {1'b1, 9'd29, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // CHK2 UNIMPL
+	if (s[30]) a = a | {1'b1, 9'd30, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd163, 19'h0, 19'h0, 19'h40000};  // CAS CAS
+	if (s[31]) a = a | {1'b1, 9'd31, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd163, 19'h0, 19'h0, 19'h40000};  // CAS CAS
+	if (s[32]) a = a | {1'b1, 9'd32, 10'd163, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1fc, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd163, 19'h0, 19'h0, 19'h40000};  // CAS CAS
+	if (s[33]) a = a | {1'b1, 9'd33, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd2, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // CAS2 UNIMPL
+	if (s[34]) a = a | {1'b1, 9'd34, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd2, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // CAS2 UNIMPL
+	if (s[35]) a = a | {1'b1, 9'd35, 10'd43, 7'd30, 4'd0, 1'b0, 5'h0, 2'd0, 12'h7fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd45, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd44, 19'h20b45, 19'h40000, 19'h40000};  // BTST BTST_IMM
+	if (s[36]) a = a | {1'b1, 9'd36, 10'd37, 7'd31, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd38, 19'h209c5, 19'h40000, 19'h40000};  // BCHG BIT_IMM
+	if (s[37]) a = a | {1'b1, 9'd37, 10'd37, 7'd32, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd38, 19'h209c5, 19'h40000, 19'h40000};  // BCLR BIT_IMM
+	if (s[38]) a = a | {1'b1, 9'd38, 10'd37, 7'd33, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd2, 1'b0, 6'd5, 10'd39, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd38, 19'h209c5, 19'h40000, 19'h40000};  // BSET BIT_IMM
+	if (s[39]) a = a | {1'b1, 9'd39, 10'd46, 7'd30, 4'd0, 1'b0, 5'h0, 2'd0, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd48, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd47, 19'h20c05, 19'h40000, 19'h40000};  // BTST BTST_DYN
+	if (s[40]) a = a | {1'b1, 9'd40, 10'd40, 7'd31, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd41, 19'h20a85, 19'h40000, 19'h40000};  // BCHG BIT_DYN
+	if (s[41]) a = a | {1'b1, 9'd41, 10'd40, 7'd32, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd41, 19'h20a85, 19'h40000, 19'h40000};  // BCLR BIT_DYN
+	if (s[42]) a = a | {1'b1, 9'd42, 10'd40, 7'd33, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd5, 10'd42, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd41, 19'h20a85, 19'h40000, 19'h40000};  // BSET BIT_DYN
+	if (s[43]) a = a | {1'b1, 9'd43, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // MVPMR UNIMPL
+	if (s[44]) a = a | {1'b1, 9'd44, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // MVPMR UNIMPL
+	if (s[45]) a = a | {1'b1, 9'd45, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // MVPRM UNIMPL
+	if (s[46]) a = a | {1'b1, 9'd46, 10'd1, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd14, 10'd1, 19'h40000, 19'h40000, 19'h40000};  // MVPRM UNIMPL
+	if (s[47]) a = a | {1'b1, 9'd47, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'hffd, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0, 4'd0, 10'd34, 19'h208cc, 19'h40000, 19'h0};  // MOVE MOVE
+	if (s[48]) a = a | {1'b1, 9'd48, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0, 4'd0, 10'd34, 19'h208cc, 19'h40000, 19'h0};  // MOVE MOVE
+	if (s[49]) a = a | {1'b1, 9'd49, 10'd33, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h1fd, 2'd0, 3'd0, 1'b0, 6'd12, 10'd35, 1'b1, 1'b1, 2'd0, 1'b0, 4'd0, 10'd34, 19'h208cc, 19'h40000, 19'h0};  // MOVE MOVE
+	if (s[50]) a = a | {1'b1, 9'd50, 10'd30, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd32, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd31, 19'h20802, 19'h40000, 19'h40000};  // MOVEA MOVEA
+	if (s[51]) a = a | {1'b1, 9'd51, 10'd30, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd32, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd31, 19'h20802, 19'h40000, 19'h40000};  // MOVEA MOVEA
+	if (s[52]) a = a | {1'b1, 9'd52, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEGX UNARY
+	if (s[53]) a = a | {1'b1, 9'd53, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd14, 19'h40000, 19'h40000, 19'h40000};  // CLR CLR_W
+	if (s[54]) a = a | {1'b1, 9'd54, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEG UNARY
+	if (s[55]) a = a | {1'b1, 9'd55, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NOT UNARY
+	if (s[56]) a = a | {1'b1, 9'd56, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd12, 19'h40000, 19'h40000, 19'h40000};  // TST TST
+	if (s[57]) a = a | {1'b1, 9'd57, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEGX UNARY
+	if (s[58]) a = a | {1'b1, 9'd58, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd14, 19'h40000, 19'h40000, 19'h40000};  // CLR CLR_W
+	if (s[59]) a = a | {1'b1, 9'd59, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEG UNARY
+	if (s[60]) a = a | {1'b1, 9'd60, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NOT UNARY
+	if (s[61]) a = a | {1'b1, 9'd61, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd12, 19'h40000, 19'h40000, 19'h40000};  // TST TST
+	if (s[62]) a = a | {1'b1, 9'd62, 10'd11, 7'd11, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEGX UNARY
+	if (s[63]) a = a | {1'b1, 9'd63, 10'd14, 7'd12, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd14, 19'h40000, 19'h40000, 19'h40000};  // CLR CLR_W
+	if (s[64]) a = a | {1'b1, 9'd64, 10'd11, 7'd10, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NEG UNARY
+	if (s[65]) a = a | {1'b1, 9'd65, 10'd11, 7'd9, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NOT UNARY
+	if (s[66]) a = a | {1'b1, 9'd66, 10'd12, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd12, 19'h40000, 19'h40000, 19'h40000};  // TST TST
+	if (s[67]) a = a | {1'b1, 9'd67, 10'd98, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd98, 19'h40000, 19'h40000, 19'h40000};  // MVSR2 MOVE_FROM_SR
+	if (s[68]) a = a | {1'b1, 9'd68, 10'd99, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd99, 19'h40000, 19'h40000, 19'h40000};  // MVSR2 MOVE_FROM_CCR
+	if (s[69]) a = a | {1'b1, 9'd69, 10'd100, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd100, 19'h40000, 19'h40000, 19'h40000};  // MV2SR MOVE_TO_CCR
+	if (s[70]) a = a | {1'b1, 9'd70, 10'd101, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd101, 19'h40000, 19'h40000, 19'h40000};  // MV2SR MOVE_TO_SR
+	if (s[71]) a = a | {1'b1, 9'd71, 10'd94, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd94, 19'h0, 19'h0, 19'h40000};  // LINK LINK
+	if (s[72]) a = a | {1'b1, 9'd72, 10'd11, 7'd19, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd11, 19'h40000, 19'h40000, 19'h40000};  // NBCD UNARY
+	if (s[73]) a = a | {1'b1, 9'd73, 10'd107, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd107, 19'h0, 19'h0, 19'h40000};  // BKPT BKPT
+	if (s[74]) a = a | {1'b1, 9'd74, 10'd15, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd15, 19'h40000, 19'h40000, 19'h40000};  // SWAP SWAP
+	if (s[75]) a = a | {1'b1, 9'd75, 10'd28, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd28, 19'h0, 19'h0, 19'h40000};  // PEA PEA
+	if (s[76]) a = a | {1'b1, 9'd76, 10'd16, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd16, 19'h40000, 19'h40000, 19'h40000};  // EXT EXT
+	if (s[77]) a = a | {1'b1, 9'd77, 10'd16, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd16, 19'h40000, 19'h40000, 19'h40000};  // EXT EXT
+	if (s[78]) a = a | {1'b1, 9'd78, 10'd17, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd17, 19'h40000, 19'h40000, 19'h40000};  // EXT EXTB
+	if (s[79]) a = a | {1'b1, 9'd79, 10'd122, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h1f4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd124, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd123, 19'h21f0d, 19'h40000, 19'h40000};  // MVMLE MOVEM_RM
+	if (s[80]) a = a | {1'b1, 9'd80, 10'd122, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1f4, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd124, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd123, 19'h21f0d, 19'h40000, 19'h40000};  // MVMLE MOVEM_RM
+	if (s[81]) a = a | {1'b1, 9'd81, 10'd125, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h7ec, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd127, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd126, 19'h21fcd, 19'h40000, 19'h40000};  // MVMEL MOVEM_MR
+	if (s[82]) a = a | {1'b1, 9'd82, 10'd125, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7ec, 12'h000, 2'd1, 3'd0, 1'b0, 6'd13, 10'd127, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd126, 19'h21fcd, 19'h40000, 19'h40000};  // MVMEL MOVEM_MR
+	if (s[83]) a = a | {1'b1, 9'd83, 10'd18, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd18, 19'h40000, 19'h40000, 19'h40000};  // TAS TAS
+	if (s[84]) a = a | {1'b1, 9'd84, 10'd0, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd13, 10'd0, 19'h40000, 19'h40000, 19'h40000};  // ILLG ILLEGAL
+	if (s[85]) a = a | {1'b1, 9'd85, 10'd114, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd114, 19'h40000, 19'h40000, 19'h40000};  // HALT HALT
+	if (s[86]) a = a | {1'b1, 9'd86, 10'd115, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd115, 19'h40000, 19'h40000, 19'h40000};  // PULSE PULSE
+	if (s[87]) a = a | {1'b1, 9'd87, 10'd68, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd68, 19'h40000, 19'h40000, 19'h40000};  // MULL MULL
+	if (s[88]) a = a | {1'b1, 9'd88, 10'd69, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd69, 19'h0, 19'h0, 19'h40000};  // DIVL DIVL
+	if (s[89]) a = a | {1'b1, 9'd89, 10'd106, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd12, 10'd106, 19'h40000, 19'h40000, 19'h40000};  // TRAP TRAP
+	if (s[90]) a = a | {1'b1, 9'd90, 10'd94, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd94, 19'h0, 19'h0, 19'h40000};  // LINK LINK
+	if (s[91]) a = a | {1'b1, 9'd91, 10'd97, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd97, 19'h40000, 19'h40000, 19'h40000};  // UNLK UNLK
+	if (s[92]) a = a | {1'b1, 9'd92, 10'd104, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd104, 19'h40000, 19'h40000, 19'h40000};  // MVR2USP MOVE_TO_USP
+	if (s[93]) a = a | {1'b1, 9'd93, 10'd105, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd105, 19'h40000, 19'h40000, 19'h40000};  // MVUSP2R MOVE_FROM_USP
+	if (s[94]) a = a | {1'b1, 9'd94, 10'd110, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd110, 19'h40000, 19'h40000, 19'h40000};  // RESET RESET
+	if (s[95]) a = a | {1'b1, 9'd95, 10'd109, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd109, 19'h40000, 19'h40000, 19'h40000};  // NOP NOP
+	if (s[96]) a = a | {1'b1, 9'd96, 10'd111, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd15, 10'd111, 19'h40000, 19'h40000, 19'h40000};  // STOP STOP
+	if (s[97]) a = a | {1'b1, 9'd97, 10'd165, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd165, 19'h0, 19'h0, 19'h40000};  // RTE RTE
+	if (s[98]) a = a | {1'b1, 9'd98, 10'd90, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd90, 19'h0, 19'h0, 19'h40000};  // RTD RTD
+	if (s[99]) a = a | {1'b1, 9'd99, 10'd89, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd5, 10'd89, 19'h40000, 19'h40000, 19'h40000};  // RTS RTS
+	if (s[100]) a = a | {1'b1, 9'd100, 10'd93, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd93, 19'h40000, 19'h40000, 19'h40000};  // TRAPV TRAPV
+	if (s[101]) a = a | {1'b1, 9'd101, 10'd171, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd171, 19'h0, 19'h0, 19'h40000};  // RTR RTR
+	if (s[102]) a = a | {1'b1, 9'd102, 10'd116, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b1, 6'd16, 10'd118, 1'b0, 1'b0, 2'd0, 1'b0, 4'd10, 10'd117, 19'h21d90, 19'h40000, 19'h40000};  // MOVEC2 MOVEC_RD
+	if (s[103]) a = a | {1'b1, 9'd103, 10'd119, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b1, 6'd16, 10'd121, 1'b0, 1'b0, 2'd0, 1'b0, 4'd10, 10'd120, 19'h21e50, 19'h40000, 19'h40000};  // MOVE2C MOVEC_WR
+	if (s[104]) a = a | {1'b1, 9'd104, 10'd86, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd3, 10'd86, 19'h0, 19'h0, 19'h40000};  // JSR JSR
+	if (s[105]) a = a | {1'b1, 9'd105, 10'd85, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd4, 10'd85, 19'h40000, 19'h40000, 19'h40000};  // JMP JMP
+	if (s[106]) a = a | {1'b1, 9'd106, 10'd72, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd72, 19'h40000, 19'h40000, 19'h40000};  // CHK CHK
+	if (s[107]) a = a | {1'b1, 9'd107, 10'd72, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd72, 19'h40000, 19'h40000, 19'h40000};  // CHK CHK
+	if (s[108]) a = a | {1'b1, 9'd108, 10'd27, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e4, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd27, 19'h40000, 19'h40000, 19'h40000};  // LEA LEA
+	if (s[109]) a = a | {1'b1, 9'd109, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // ADD QUICK
+	if (s[110]) a = a | {1'b1, 9'd110, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // SUB QUICK
+	if (s[111]) a = a | {1'b1, 9'd111, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // ADD QUICK
+	if (s[112]) a = a | {1'b1, 9'd112, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // SUB QUICK
+	if (s[113]) a = a | {1'b1, 9'd113, 10'd9, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // ADD QUICK
+	if (s[114]) a = a | {1'b1, 9'd114, 10'd9, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd9, 19'h40000, 19'h40000, 19'h40000};  // SUB QUICK
+	if (s[115]) a = a | {1'b1, 9'd115, 10'd25, 7'd1, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd25, 19'h40000, 19'h40000, 19'h40000};  // ADDA QUICK_A
+	if (s[116]) a = a | {1'b1, 9'd116, 10'd25, 7'd1, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd25, 19'h40000, 19'h40000, 19'h40000};  // ADDA QUICK_A
+	if (s[117]) a = a | {1'b1, 9'd117, 10'd26, 7'd3, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd26, 19'h40000, 19'h40000, 19'h40000};  // SUBA QUICK_SA
+	if (s[118]) a = a | {1'b1, 9'd118, 10'd26, 7'd3, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd26, 19'h40000, 19'h40000, 19'h40000};  // SUBA QUICK_SA
+	if (s[119]) a = a | {1'b1, 9'd119, 10'd13, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd13, 19'h40000, 19'h40000, 19'h40000};  // Scc SCC
+	if (s[120]) a = a | {1'b1, 9'd120, 10'd84, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd6, 10'd84, 19'h40000, 19'h40000, 19'h40000};  // DBcc DBCC
+	if (s[121]) a = a | {1'b1, 9'd121, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd92, 19'h40000, 19'h40000, 19'h40000};  // TRAPcc TRAPCC
+	if (s[122]) a = a | {1'b1, 9'd122, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd92, 19'h40000, 19'h40000, 19'h40000};  // TRAPcc TRAPCC
+	if (s[123]) a = a | {1'b1, 9'd123, 10'd92, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd92, 19'h40000, 19'h40000, 19'h40000};  // TRAPcc TRAPCC
+	if (s[124]) a = a | {1'b1, 9'd124, 10'd83, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd5, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd2, 10'd83, 19'h40000, 19'h40000, 19'h40000};  // BSR BSR
+	if (s[125]) a = a | {1'b1, 9'd125, 10'd82, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd5, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd1, 10'd82, 19'h40000, 19'h40000, 19'h40000};  // Bcc BCC
+	if (s[126]) a = a | {1'b1, 9'd126, 10'd10, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd10, 19'h40000, 19'h40000, 19'h40000};  // MOVE MOVEQ
+	if (s[127]) a = a | {1'b1, 9'd127, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // OR OP_EA_DN
+	if (s[128]) a = a | {1'b1, 9'd128, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // OR OP_DN_EA
+	if (s[129]) a = a | {1'b1, 9'd129, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // AND OP_EA_DN
+	if (s[130]) a = a | {1'b1, 9'd130, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // AND OP_DN_EA
+	if (s[131]) a = a | {1'b1, 9'd131, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_EA_DN
+	if (s[132]) a = a | {1'b1, 9'd132, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_DN_EA
+	if (s[133]) a = a | {1'b1, 9'd133, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_EA_DN
+	if (s[134]) a = a | {1'b1, 9'd134, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_DN_EA
+	if (s[135]) a = a | {1'b1, 9'd135, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd7, 19'h40000, 19'h40000, 19'h40000};  // CMP CMP_EA_DN
+	if (s[136]) a = a | {1'b1, 9'd136, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // EOR OP_DN_EA
+	if (s[137]) a = a | {1'b1, 9'd137, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0, 4'd0, 10'd54, 19'h0, 19'h0, 19'h40000};  // CMPM CMPM
+	if (s[138]) a = a | {1'b1, 9'd138, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // SUBX ADDX_R
+	if (s[139]) a = a | {1'b1, 9'd139, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // SUBX ADDX_M
+	if (s[140]) a = a | {1'b1, 9'd140, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // ADDX ADDX_R
+	if (s[141]) a = a | {1'b1, 9'd141, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // ADDX ADDX_M
+	if (s[142]) a = a | {1'b1, 9'd142, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // OR OP_EA_DN
+	if (s[143]) a = a | {1'b1, 9'd143, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // OR OP_DN_EA
+	if (s[144]) a = a | {1'b1, 9'd144, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // AND OP_EA_DN
+	if (s[145]) a = a | {1'b1, 9'd145, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // AND OP_DN_EA
+	if (s[146]) a = a | {1'b1, 9'd146, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_EA_DN
+	if (s[147]) a = a | {1'b1, 9'd147, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_DN_EA
+	if (s[148]) a = a | {1'b1, 9'd148, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_EA_DN
+	if (s[149]) a = a | {1'b1, 9'd149, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_DN_EA
+	if (s[150]) a = a | {1'b1, 9'd150, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd7, 19'h40000, 19'h40000, 19'h40000};  // CMP CMP_EA_DN
+	if (s[151]) a = a | {1'b1, 9'd151, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // EOR OP_DN_EA
+	if (s[152]) a = a | {1'b1, 9'd152, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0, 4'd0, 10'd54, 19'h0, 19'h0, 19'h40000};  // CMPM CMPM
+	if (s[153]) a = a | {1'b1, 9'd153, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // SUBX ADDX_R
+	if (s[154]) a = a | {1'b1, 9'd154, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // SUBX ADDX_M
+	if (s[155]) a = a | {1'b1, 9'd155, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // ADDX ADDX_R
+	if (s[156]) a = a | {1'b1, 9'd156, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // ADDX ADDX_M
+	if (s[157]) a = a | {1'b1, 9'd157, 10'd3, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // OR OP_EA_DN
+	if (s[158]) a = a | {1'b1, 9'd158, 10'd4, 7'd7, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // OR OP_DN_EA
+	if (s[159]) a = a | {1'b1, 9'd159, 10'd3, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // AND OP_EA_DN
+	if (s[160]) a = a | {1'b1, 9'd160, 10'd4, 7'd6, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // AND OP_DN_EA
+	if (s[161]) a = a | {1'b1, 9'd161, 10'd3, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_EA_DN
+	if (s[162]) a = a | {1'b1, 9'd162, 10'd4, 7'd3, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // SUB OP_DN_EA
+	if (s[163]) a = a | {1'b1, 9'd163, 10'd3, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd3, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_EA_DN
+	if (s[164]) a = a | {1'b1, 9'd164, 10'd4, 7'd1, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // ADD OP_DN_EA
+	if (s[165]) a = a | {1'b1, 9'd165, 10'd7, 7'd5, 4'd0, 1'b0, 5'hf, 2'd3, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd7, 19'h40000, 19'h40000, 19'h40000};  // CMP CMP_EA_DN
+	if (s[166]) a = a | {1'b1, 9'd166, 10'd4, 7'd8, 4'd0, 1'b0, 5'hf, 2'd3, 12'h1fd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd4, 19'h40000, 19'h40000, 19'h40000};  // EOR OP_DN_EA
+	if (s[167]) a = a | {1'b1, 9'd167, 10'd54, 7'd0, 4'd0, 1'b0, 5'h0, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd1, 1'b0, 4'd0, 10'd54, 19'h0, 19'h0, 19'h40000};  // CMPM CMPM
+	if (s[168]) a = a | {1'b1, 9'd168, 10'd51, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // SUBX ADDX_R
+	if (s[169]) a = a | {1'b1, 9'd169, 10'd52, 7'd4, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // SUBX ADDX_M
+	if (s[170]) a = a | {1'b1, 9'd170, 10'd51, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // ADDX ADDX_R
+	if (s[171]) a = a | {1'b1, 9'd171, 10'd52, 7'd2, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // ADDX ADDX_M
+	if (s[172]) a = a | {1'b1, 9'd172, 10'd67, 7'd49, 4'd0, 1'b0, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd67, 19'h40000, 19'h40000, 19'h40000};  // DIVU DIVW
+	if (s[173]) a = a | {1'b1, 9'd173, 10'd67, 7'd49, 4'd1, 1'b1, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd67, 19'h40000, 19'h40000, 19'h40000};  // DIVS DIVW
+	if (s[174]) a = a | {1'b1, 9'd174, 10'd66, 7'd48, 4'd0, 1'b0, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd66, 19'h40000, 19'h40000, 19'h40000};  // MULU MULW
+	if (s[175]) a = a | {1'b1, 9'd175, 10'd66, 7'd48, 4'd1, 1'b1, 5'hf, 2'd1, 12'hffd, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd66, 19'h40000, 19'h40000, 19'h40000};  // MULS MULW
+	if (s[176]) a = a | {1'b1, 9'd176, 10'd51, 7'd18, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // SBCD ADDX_R
+	if (s[177]) a = a | {1'b1, 9'd177, 10'd52, 7'd18, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // SBCD ADDX_M
+	if (s[178]) a = a | {1'b1, 9'd178, 10'd51, 7'd17, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd51, 19'h40000, 19'h40000, 19'h40000};  // ABCD ADDX_R
+	if (s[179]) a = a | {1'b1, 9'd179, 10'd52, 7'd17, 4'd0, 1'b0, 5'h1f, 2'd0, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd52, 19'h0, 19'h0, 19'h40000};  // ABCD ADDX_M
+	if (s[180]) a = a | {1'b1, 9'd180, 10'd56, 7'd20, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd56, 19'h0, 19'h0, 19'h40000};  // PACK PACK_R
+	if (s[181]) a = a | {1'b1, 9'd181, 10'd58, 7'd20, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd58, 19'h0, 19'h0, 19'h40000};  // PACK PACK_M
+	if (s[182]) a = a | {1'b1, 9'd182, 10'd61, 7'd21, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd61, 19'h0, 19'h0, 19'h40000};  // UNPK UNPK_R
+	if (s[183]) a = a | {1'b1, 9'd183, 10'd63, 7'd21, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd2, 1'b0, 4'd0, 10'd63, 19'h0, 19'h0, 19'h40000};  // UNPK UNPK_M
+	if (s[184]) a = a | {1'b1, 9'd184, 10'd22, 7'd3, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd7, 10'd24, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd23, 19'h20607, 19'h40000, 19'h40000};  // SUBA SUBA
+	if (s[185]) a = a | {1'b1, 9'd185, 10'd22, 7'd3, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd7, 10'd24, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd23, 19'h20607, 19'h40000, 19'h40000};  // SUBA SUBA
+	if (s[186]) a = a | {1'b1, 9'd186, 10'd19, 7'd1, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd21, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd20, 19'h20542, 19'h40000, 19'h40000};  // ADDA ADDA
+	if (s[187]) a = a | {1'b1, 9'd187, 10'd19, 7'd1, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd2, 10'd21, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd20, 19'h20542, 19'h40000, 19'h40000};  // ADDA ADDA
+	if (s[188]) a = a | {1'b1, 9'd188, 10'd8, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd8, 19'h40000, 19'h40000, 19'h40000};  // CMPA CMPA
+	if (s[189]) a = a | {1'b1, 9'd189, 10'd8, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd8, 19'h40000, 19'h40000, 19'h40000};  // CMPA CMPA
+	if (s[190]) a = a | {1'b1, 9'd190, 10'd73, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd73, 19'h0, 19'h0, 19'h40000};  // EXG EXG_DD
+	if (s[191]) a = a | {1'b1, 9'd191, 10'd76, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd76, 19'h0, 19'h0, 19'h40000};  // EXG EXG_AA
+	if (s[192]) a = a | {1'b1, 9'd192, 10'd79, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd79, 19'h0, 19'h0, 19'h40000};  // EXG EXG_DA
+	if (s[193]) a = a | {1'b1, 9'd193, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASR SHIFT_R
+	if (s[194]) a = a | {1'b1, 9'd194, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASL SHIFT_R
+	if (s[195]) a = a | {1'b1, 9'd195, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSR SHIFT_R
+	if (s[196]) a = a | {1'b1, 9'd196, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSL SHIFT_R
+	if (s[197]) a = a | {1'b1, 9'd197, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXR SHIFT_R
+	if (s[198]) a = a | {1'b1, 9'd198, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXL SHIFT_R
+	if (s[199]) a = a | {1'b1, 9'd199, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROR SHIFT_R
+	if (s[200]) a = a | {1'b1, 9'd200, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROL SHIFT_R
+	if (s[201]) a = a | {1'b1, 9'd201, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASR SHIFT_R
+	if (s[202]) a = a | {1'b1, 9'd202, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASL SHIFT_R
+	if (s[203]) a = a | {1'b1, 9'd203, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSR SHIFT_R
+	if (s[204]) a = a | {1'b1, 9'd204, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSL SHIFT_R
+	if (s[205]) a = a | {1'b1, 9'd205, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXR SHIFT_R
+	if (s[206]) a = a | {1'b1, 9'd206, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXL SHIFT_R
+	if (s[207]) a = a | {1'b1, 9'd207, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROR SHIFT_R
+	if (s[208]) a = a | {1'b1, 9'd208, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROL SHIFT_R
+	if (s[209]) a = a | {1'b1, 9'd209, 10'd49, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASR SHIFT_R
+	if (s[210]) a = a | {1'b1, 9'd210, 10'd49, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ASL SHIFT_R
+	if (s[211]) a = a | {1'b1, 9'd211, 10'd49, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSR SHIFT_R
+	if (s[212]) a = a | {1'b1, 9'd212, 10'd49, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // LSL SHIFT_R
+	if (s[213]) a = a | {1'b1, 9'd213, 10'd49, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXR SHIFT_R
+	if (s[214]) a = a | {1'b1, 9'd214, 10'd49, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROXL SHIFT_R
+	if (s[215]) a = a | {1'b1, 9'd215, 10'd49, 7'd27, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROR SHIFT_R
+	if (s[216]) a = a | {1'b1, 9'd216, 10'd49, 7'd26, 4'd0, 1'b0, 5'hf, 2'd3, 12'h000, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd49, 19'h40000, 19'h40000, 19'h40000};  // ROL SHIFT_R
+	if (s[217]) a = a | {1'b1, 9'd217, 10'd50, 7'd23, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // ASRW SHIFT_M
+	if (s[218]) a = a | {1'b1, 9'd218, 10'd50, 7'd22, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // ASLW SHIFT_M
+	if (s[219]) a = a | {1'b1, 9'd219, 10'd50, 7'd25, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // LSRW SHIFT_M
+	if (s[220]) a = a | {1'b1, 9'd220, 10'd50, 7'd24, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // LSLW SHIFT_M
+	if (s[221]) a = a | {1'b1, 9'd221, 10'd50, 7'd29, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // ROXRW SHIFT_M
+	if (s[222]) a = a | {1'b1, 9'd222, 10'd50, 7'd28, 4'd0, 1'b0, 5'h1f, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // ROXLW SHIFT_M
+	if (s[223]) a = a | {1'b1, 9'd223, 10'd50, 7'd27, 4'd0, 1'b0, 5'hf, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // RORW SHIFT_M
+	if (s[224]) a = a | {1'b1, 9'd224, 10'd50, 7'd26, 4'd0, 1'b0, 5'hf, 2'd1, 12'h1fc, 12'h000, 2'd0, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd50, 19'h40000, 19'h40000, 19'h40000};  // ROLW SHIFT_M
+	if (s[225]) a = a | {1'b1, 9'd225, 10'd130, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd138, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd131, 19'h22285, 19'h0, 19'h0};  // BFTST BF_TST
+	if (s[226]) a = a | {1'b1, 9'd226, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd141, 19'h22505, 19'h0, 19'h0};  // BFEXTU BF_EXT
+	if (s[227]) a = a | {1'b1, 9'd227, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd151, 19'h22845, 19'h0, 19'h0};  // BFCHG BF_MOD
+	if (s[228]) a = a | {1'b1, 9'd228, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd141, 19'h22505, 19'h0, 19'h0};  // BFEXTS BF_EXT
+	if (s[229]) a = a | {1'b1, 9'd229, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd151, 19'h22845, 19'h0, 19'h0};  // BFCLR BF_MOD
+	if (s[230]) a = a | {1'b1, 9'd230, 10'd140, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd148, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd141, 19'h22505, 19'h0, 19'h0};  // BFFFO BF_EXT
+	if (s[231]) a = a | {1'b1, 9'd231, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd151, 19'h22845, 19'h0, 19'h0};  // BFSET BF_MOD
+	if (s[232]) a = a | {1'b1, 9'd232, 10'd150, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1e5, 12'h000, 2'd1, 3'd0, 1'b0, 6'd5, 10'd161, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd151, 19'h22845, 19'h0, 19'h0};  // BFINS BF_MOD
+	if (s[233]) a = a | {1'b1, 9'd233, 10'd187, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'hfff, 12'h000, 2'd1, 3'd0, 1'b0, 6'd19, 10'd196, 1'b1, 1'b0, 2'd0, 1'b0, 4'd9, 10'd188, 19'h23113, 19'h0, 19'h40000};  // FPP FPU_GEN
+	if (s[234]) a = a | {1'b1, 9'd234, 10'd441, 7'd0, 4'd0, 1'b0, 5'h0, 2'd0, 12'h1fd, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd441, 19'h0, 19'h0, 19'h40000};  // FScc FSCC
+	if (s[235]) a = a | {1'b1, 9'd235, 10'd443, 7'd0, 4'd0, 1'b0, 5'h0, 2'd1, 12'h000, 12'h000, 2'd1, 3'd3, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd8, 10'd443, 19'h0, 19'h0, 19'h40000};  // FDBcc FDBCC
+	if (s[236]) a = a | {1'b1, 9'd236, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd445, 19'h0, 19'h0, 19'h40000};  // FTRAPcc FTRAPCC
+	if (s[237]) a = a | {1'b1, 9'd237, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd445, 19'h0, 19'h0, 19'h40000};  // FTRAPcc FTRAPCC
+	if (s[238]) a = a | {1'b1, 9'd238, 10'd445, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd6, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd445, 19'h0, 19'h0, 19'h40000};  // FTRAPcc FTRAPCC
+	if (s[239]) a = a | {1'b1, 9'd239, 10'd439, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd7, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd7, 10'd439, 19'h0, 19'h0, 19'h40000};  // FBcc FBCC
+	if (s[240]) a = a | {1'b1, 9'd240, 10'd439, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd7, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd7, 10'd439, 19'h0, 19'h0, 19'h40000};  // FBcc FBCC
+	if (s[241]) a = a | {1'b1, 9'd241, 10'd447, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h1f4, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd447, 19'h0, 19'h0, 19'h40000};  // FSAVE FSAVE
+	if (s[242]) a = a | {1'b1, 9'd242, 10'd460, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h7ec, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b1, 1'b0, 2'd0, 1'b0, 4'd0, 10'd460, 19'h0, 19'h0, 19'h40000};  // FRESTORE FRESTORE
+	if (s[243]) a = a | {1'b1, 9'd243, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVL CACHE_OP
+	if (s[244]) a = a | {1'b1, 9'd244, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVP CACHE_OP
+	if (s[245]) a = a | {1'b1, 9'd245, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVA CACHE_OP
+	if (s[246]) a = a | {1'b1, 9'd246, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHL CACHE_OP
+	if (s[247]) a = a | {1'b1, 9'd247, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHP CACHE_OP
+	if (s[248]) a = a | {1'b1, 9'd248, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHA CACHE_OP
+	if (s[249]) a = a | {1'b1, 9'd249, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVL CACHE_OP
+	if (s[250]) a = a | {1'b1, 9'd250, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVP CACHE_OP
+	if (s[251]) a = a | {1'b1, 9'd251, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVA CACHE_OP
+	if (s[252]) a = a | {1'b1, 9'd252, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHL CACHE_OP
+	if (s[253]) a = a | {1'b1, 9'd253, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHP CACHE_OP
+	if (s[254]) a = a | {1'b1, 9'd254, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHA CACHE_OP
+	if (s[255]) a = a | {1'b1, 9'd255, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVL CACHE_OP
+	if (s[256]) a = a | {1'b1, 9'd256, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVP CACHE_OP
+	if (s[257]) a = a | {1'b1, 9'd257, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVA CACHE_OP
+	if (s[258]) a = a | {1'b1, 9'd258, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHL CACHE_OP
+	if (s[259]) a = a | {1'b1, 9'd259, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHP CACHE_OP
+	if (s[260]) a = a | {1'b1, 9'd260, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHA CACHE_OP
+	if (s[261]) a = a | {1'b1, 9'd261, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVL CACHE_OP
+	if (s[262]) a = a | {1'b1, 9'd262, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVP CACHE_OP
+	if (s[263]) a = a | {1'b1, 9'd263, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CINVA CACHE_OP
+	if (s[264]) a = a | {1'b1, 9'd264, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHL CACHE_OP
+	if (s[265]) a = a | {1'b1, 9'd265, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHP CACHE_OP
+	if (s[266]) a = a | {1'b1, 9'd266, 10'd184, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd184, 19'h40000, 19'h40000, 19'h40000};  // CPUSHA CACHE_OP
+	if (s[267]) a = a | {1'b1, 9'd267, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd185, 19'h40000, 19'h40000, 19'h40000};  // PFLUSHN PFLUSH
+	if (s[268]) a = a | {1'b1, 9'd268, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd185, 19'h40000, 19'h40000, 19'h40000};  // PFLUSH PFLUSH
+	if (s[269]) a = a | {1'b1, 9'd269, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd185, 19'h40000, 19'h40000, 19'h40000};  // PFLUSHAN PFLUSH
+	if (s[270]) a = a | {1'b1, 9'd270, 10'd185, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd185, 19'h40000, 19'h40000, 19'h40000};  // PFLUSHA PFLUSH
+	if (s[271]) a = a | {1'b1, 9'd271, 10'd186, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd186, 19'h40000, 19'h40000, 19'h40000};  // PLPAW PLPA
+	if (s[272]) a = a | {1'b1, 9'd272, 10'd186, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd0, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd0, 10'd186, 19'h40000, 19'h40000, 19'h40000};  // PLPAR PLPA
+	if (s[273]) a = a | {1'b1, 9'd273, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0, 4'd0, 10'd128, 19'h0, 19'h0, 19'h40000};  // MOVE16 MOVE16
+	if (s[274]) a = a | {1'b1, 9'd274, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0, 4'd0, 10'd128, 19'h0, 19'h0, 19'h40000};  // MOVE16 MOVE16
+	if (s[275]) a = a | {1'b1, 9'd275, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0, 4'd0, 10'd128, 19'h0, 19'h0, 19'h40000};  // MOVE16 MOVE16
+	if (s[276]) a = a | {1'b1, 9'd276, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd0, 3'd4, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0, 4'd0, 10'd128, 19'h0, 19'h0, 19'h40000};  // MOVE16 MOVE16
+	if (s[277]) a = a | {1'b1, 9'd277, 10'd128, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd0, 1'b0, 6'd0, 10'd0, 1'b0, 1'b0, 2'd3, 1'b0, 4'd0, 10'd128, 19'h0, 19'h0, 19'h40000};  // MOVE16 MOVE16
+	if (s[278]) a = a | {1'b1, 9'd278, 10'd112, 7'd0, 4'd0, 1'b0, 5'h0, 2'd2, 12'h000, 12'h000, 2'd1, 3'd3, 1'b1, 6'd0, 10'd0, 1'b0, 1'b0, 2'd0, 1'b0, 4'd11, 10'd112, 19'h0, 19'h0, 19'h40000};  // LPSTOP LPSTOP
 	ent_attr_oh = a;
 endfunction
 
