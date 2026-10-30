@@ -505,8 +505,16 @@ always_comb begin
 	for (int i = 0; i < 3; i++) if (fwe[i]) fv_n = fv_n | fwoh[i];
 	for (int b = 0; b < 4; b++) if (fv_clr[b]) fv_n[8*b +: 8] = 8'd0;
 end
+// (fv's own entry read at each candidate, this clock's writes -- their
+// enables late -- and the drop applied after it, not through fv_n's 32:1)
+function automatic logic fvn_at(input logic [4:0] a);
+	logic v;
+	v = fv[a];
+	for (int w = 0; w < 3; w++) if (fwe[w] && fwa[w] == a) v = 1'b1;
+	fvn_at = v && !fv_clr[0];
+endfunction
 always_ff @(posedge clk)
-	for (int r = 2; r < 7; r++) fsel_q[r] <= rrsel[r] ? fv_n[rran1[r]] : fv_n[rran0[r]];
+	for (int r = 2; r < 7; r++) fsel_q[r] <= rrsel[r] ? fvn_at(rran1[r]) : fvn_at(rran0[r]);
 // synthesis translate_off
 always_ff @(posedge clk)
 	for (int r = 2; r < 7; r++)
