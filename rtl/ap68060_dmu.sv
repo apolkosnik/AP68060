@@ -505,7 +505,7 @@ always_ff @(posedge clk)
 		logic [63:0] pr;
 		pr = pair(dq_rn[j], mt.a[3:2]);
 		for (int p = 0; p < 4; p++)
-			dqa[j][8*p +: 8] <= (tk_bsel[p] == 3'd7) ? 8'd0 : pr[63 - 8*tk_bsel[p] -: 8];
+			dqa[j][8*p +: 8] <= (mt_bsel[p] == 3'd7) ? 8'd0 : pr[63 - 8*mt_bsel[p] -: 8];
 		// synthesis translate_off
 		dq2w[j] <= pr;
 		// synthesis translate_on
@@ -732,6 +732,7 @@ wire        tk_fast  = (mt.mem == M_LD || mt.mem == M_RMW) && !mt.lock &&
 // n-byte operand at byte o of the two long words is byte o + n - 1 - p
 // (byte 0 the first): its index, 7 for none, registered with the access
 logic [2:0] tk_bsel [4];
+logic [2:0] mt_bsel [4];        // (registered as the access enters DT, from DC1's)
 always_comb
 	for (int p = 0; p < 4; p++)
 		tk_bsel[p] = (3'(p) < nbytes(mt.msz)) ? 3'({1'b0, mt.a[1:0]} + nbytes(mt.msz) - 3'd1 - 3'(p)) : 3'd7;
@@ -1229,15 +1230,16 @@ assign dm_hold1_c = sn_frz || steal || steal_q || (m1.v && m1_stale) || tk_reloo
                   (e_st != E_IDLE && e_st != E_W_START &&
                    e_st != E_W_DEC && e_st != E_W_PART && e_st != E_W_DONE && e_st != E_SB);
 
-// the engine's operand bytes, one extractor for its states: E_SP_3 the
-// rest of a split load from the stolen read, E_S_ACT from the line a fill
-// delivered (bo_line), E_S_RD2 from the read way
+// the engine's operand bytes: E_SP_3 the rest of a split load from the
+// stolen read, E_S_RD2 from the read way (both the RAM's: registered in
+// etk_q before the merge); E_S_ACT from the line a fill delivered (bo_line,
+// its own extractor: the RAM is off that merge's path)
 wire  [2:0]  sp_n0    = 3'(5'd16 - {1'b0, m2.r.a[3:0]});
 wire         etk_sp   = (e_st == E_SP_3);
-wire [127:0] etk_line = (e_st == E_S_ACT) ? bo_line : dq_rn[e_x.way];
 wire  [3:0]  etk_o    = etk_sp ? 4'd0 : e_va[3:0];
 wire  [2:0]  etk_n    = etk_sp ? 3'(nbytes(m2.r.msz) - sp_n0) : e_n;
-wire [31:0]  etk      = take(etk_line, etk_o, etk_n);
+wire [31:0]  etk      = take(dq_rn[e_x.way], etk_o, etk_n);
+wire [31:0]  etk_b    = take(bo_line, e_va[3:0], e_n);
 // (from the RAM's output, registered before it is merged: E_S_RD3, E_SP_4)
 logic [31:0] etk_q;
 
@@ -1379,6 +1381,9 @@ always_ff @(posedge clk) begin
 				// in DT's clock: m1_tp is DC1's)
 				mt_tp   <= transp_of(m1.a, m1.smode, m1.fc, m1.ack);
 				mt_tt0  <= ttr_hit(dtt0, m1.a, m1.smode);
+				for (int p = 0; p < 4; p++)
+					mt_bsel[p] <= (3'(p) < nbytes(m1.msz)) ?
+					              3'({1'b0, m1.a[1:0]} + nbytes(m1.msz) - 3'd1 - 3'(p)) : 3'd7;
 				mt_tt1  <= ttr_hit(dtt1, m1.a, m1.smode);
 				mt_aset <= m1_aset;
 				stl = (dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet;
@@ -1714,7 +1719,7 @@ always_ff @(posedge clk) begin
 			else if (e_fillhit) begin
 				// the fill installed the line (f_way) and it is in bo_line:
 				// the operand from it, the part now a hit in that way
-				e_acc     <= (e_acc << (8 * e_n)) | etk;
+				e_acc     <= (e_acc << (8 * e_n)) | etk_b;
 				e_fillhit <= 1'b0;
 				e_x.hit   <= 1'b1;
 				e_x.way   <= f_way;
@@ -1722,7 +1727,7 @@ always_ff @(posedge clk) begin
 			end
 			else if (e_fromline) begin
 				// an inhibited fill delivered the line: the operand from it
-				e_acc <= (e_acc << (8 * e_n)) | etk;
+				e_acc <= (e_acc << (8 * e_n)) | etk_b;
 				e_fromline <= 1'b0;
 				e_x.hit <= 1'b0;
 				e_x.cm  <= 2'b11;
@@ -3004,6 +3009,11 @@ end
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset) begin
+		if (mt.v && (mt_bsel[0] != tk_bsel[0] || mt_bsel[1] != tk_bsel[1] ||
+		             mt_bsel[2] != tk_bsel[2] || mt_bsel[3] != tk_bsel[3])) begin
+			$display("FAIL: DMU: DT's registered byte selects disagree");
+			$finish;
+		end
 		if (mt.v && (mt_tt0 != ttr_hit(dtt0, mt.a, mt.smode) || mt_tt1 != ttr_hit(dtt1, mt.a, mt.smode)) &&
 		    !kill_now) begin
 			$display("FAIL: DMU: DT's registered TTR matches disagree");
