@@ -1300,23 +1300,25 @@ always_ff @(posedge clk) begin
 		// no write lands at that edge, and no older store to the line is
 		// still in flight (DT's, if a new access enters, DC2's, EX's, WB's).
 		// A load waits in DT (hold_dt, a register) until it has such a read.
+		// (formed for both candidates, DC1's access entering and DT's own
+		// staying, from registers; the advance picks last)
 		begin
-			logic [6:0] ts;
-			logic [7:0] tl;
-			logic       haz, dok, nrd, nv, nstl;
-			ts  = adv_dc1 ? m1.a[10:4] : mt.a[10:4];
-			tl  = adv_dc1 ? m1.a[11:4] : mt.a[11:4];
-			haz = (dw && dw_set == ts) || !e_quiet || sn_frz ||
-			      (adv_dc1 && st_at(mt, tk_split, tl)) ||
-			      st_at(m2.r, m2.split, tl) || st_at(m3.r, m3.split, tl) || st_at(m4.r, m4.split, tl);
-			dok = !sn_rset && !steal && !haz;
-			tk_dok <= dok;
-			nv   = adv_dc1 ? m1.v : (mt.v && !adv_dt);
-			nrd  = adv_dc1 ? (m1.mem == M_LD || m1.mem == M_RMW) : (mt.mem == M_LD || mt.mem == M_RMW);
-			nstl = adv_dc1 ? ((dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet) :
-			       ((dw && dw_src != 2'd0 && dw_set == mt.a[10:4]) || !e_quiet ||
-			        (mt_stale && !tk_rdok));
-			hold_dt <= nv && ((nrd && !dok) || nstl);
+			logic hz1, hzt, dk1, dkt, h1, ht;
+			hz1 = (dw && dw_set == m1.a[10:4]) || !e_quiet || sn_frz || st_at(mt, tk_split, m1.a[11:4]) ||
+			      st_at(m2.r, m2.split, m1.a[11:4]) || st_at(m3.r, m3.split, m1.a[11:4]) ||
+			      st_at(m4.r, m4.split, m1.a[11:4]);
+			hzt = (dw && dw_set == mt.a[10:4]) || !e_quiet || sn_frz ||
+			      st_at(m2.r, m2.split, mt.a[11:4]) || st_at(m3.r, m3.split, mt.a[11:4]) ||
+			      st_at(m4.r, m4.split, mt.a[11:4]);
+			dk1 = !sn_rset && !steal && !hz1;
+			dkt = !sn_rset && !steal && !hzt;
+			h1  = m1.v && (((m1.mem == M_LD || m1.mem == M_RMW) && !dk1) ||
+			               (dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet);
+			ht  = mt.v && (((mt.mem == M_LD || mt.mem == M_RMW) && !dkt) ||
+			               (dw && dw_src != 2'd0 && dw_set == mt.a[10:4]) || !e_quiet ||
+			               (mt_stale && !tk_rdok));
+			tk_dok  <= adv_dc1 ? dk1 : dkt;
+			hold_dt <= adv_dc1 ? h1 : (!adv_dt && ht);
 		end
 
 		// DT -> DC2
