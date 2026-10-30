@@ -57,7 +57,9 @@ module ap040_fpu
 	                               // pipeline (nice_mem: the interface forms
 	                               // it as it registers din)
 	input       [2:0] din_cls,     // with sel_x: din's class by src_fmt (din_class,
-	                               // formed outside as din is registered)
+	                               // formed outside from flags registered with din)
+	input       [1:0] din_nrm,     // with sel_x: din as a double [1] / a single [0]
+	                               // is a normal number (its integer bit)
 	output reg        done,
 	// the operation has passed operand classification: unimp/unsupp can no
 	// longer occur, only completion or an enabled arithmetic exception.
@@ -114,6 +116,10 @@ module ap040_fpu
 	output     [31:0] rfl_next,
 	input       [3:0] sfl_x,
 	input       [3:0] dfl_x,
+	// with sel_x: src_r and dst_r as they will be next cycle (the register
+	// file compares its pending write's address with them a cycle ahead)
+	input       [2:0] src_r_n,
+	input       [2:0] dst_r_n,
 	output            pbusy,       // pipelined operations in flight: FPU state
 	                               // (registers, FPSR, condition codes) is not
 	                               // current until they complete
@@ -464,9 +470,19 @@ reg  [2:0] r_dcls;
 // number, clear for zero, a denormal, infinity and a NaN
 // (formed from din as the dispatch latches it: unp_m is a register; FINT's
 // rounded integer goes there too, for the normalizer's count)
+// a single's / double's image in din is a normal number
+function [1:0] din_nrm_of;
+	input [95:0] d;
+	begin
+		din_nrm_of = {(d[94:84] != 11'd0) && (d[94:84] != 11'h7FF),
+		              (d[94:87] != 8'd0) && (d[94:87] != 8'hFF)};
+	end
+endfunction
 function [63:0] unp_of;
 	input [95:0] d;
 	input  [2:0] f;
+	input  [1:0] n;      // din as a double / a single is a normal number:
+	                     // the integer bit
 	reg   [31:0] im;
 	reg          hs, hd;
 	begin
@@ -475,8 +491,8 @@ function [63:0] unp_of;
 		im = (f == 3'd0) ? (d[95] ? (32'd0 - d[95:64]) : d[95:64]) :
 		     (f == 3'd4) ? {(d[95] ? (16'd0 - d[95:80]) : d[95:80]), 16'd0} :
 		                   {(d[95] ? (8'd0 - d[95:88]) : d[95:88]), 24'd0};
-		hs = (d[94:87] != 8'd0) && (d[94:87] != 8'hFF);
-		hd = (d[94:84] != 11'd0) && (d[94:84] != 11'h7FF);
+		hs = n[0];
+		hd = n[1];
 		unp_of = (f == 3'd1) ? {hs, d[86:64], 40'd0} :
 		         (f == 3'd5) ? {hd, d[83:32], 11'd0} :
 		         (f == 3'd0 || f == 3'd4 || f == 3'd6) ? {im, 32'd0} : d[63:0];
@@ -512,13 +528,21 @@ reg  [16:0] a_e;
 reg  [63:0] a_m;
 reg   [1:0] a_t;
 // The arithmetic's result significand has a register of its own: the add,
-// multiply, divide, square root, normalize and round states write z_m,
-// the dispatch, conversion and special-case states a_m -- two narrower
-// input selects instead of one wide one.  The rounding reads z_m after
-// arithmetic (zr), a_m after a move or an exact special case; writeback
-// reads z_m after rounding (wz), a_m otherwise.
-reg  [63:0] z_m;
-reg         zr, wz;
+// multiply, divide, square root and normalize states write z_m, the
+// dispatch, conversion and special-case states a_m, the rounding w_m --
+// narrow input selects instead of one wide one.  The rounding reads z_m
+// after arithmetic (zr), a_m after a move or an exact special case;
+// writeback reads w_m after rounding, z_m after FINT's normalization, a_m
+// otherwise (wsrc).
+reg  [63:0] z_m, w_m;
+// F_RND2's overflow choice, formed the cycle before (F_ROUND, which
+// changes neither the sign nor the rounding controls): tmx_q says an
+// overflow gives the largest number (else an infinity), ovv is the
+// significand it writes
+reg         tmx_q;
+reg  [63:0] ovv;
+reg         zr;
+reg   [1:0] wsrc;
 // The arithmetic units' result as the significand and GRS of a value to
 // round, by the operation (op_kind, a register): the sum, renormalized by
 // its carry; the product by its top bit; the quotient by its integer bit;
@@ -528,11 +552,13 @@ reg   [2:0] ur_g;
 always @* begin
 	case (1'b1)   // synthesis parallel_case
 		okh[0]: begin
-			ur_m = add_r[67] ? add_r[67:4] : add_r[66:3];
+			ur_m[63:32] = add_top[1] ? add_r[67:36] : add_r[66:35];
+			ur_m[31:0]  = add_top[0] ? add_r[35:4] : add_r[34:3];
 			ur_g = add_r[67] ? {add_r[3], add_r[2], add_r[1] | add_r[0]} : add_r[2:0];
 		end
 		okh[1]: begin
-			ur_m = mul_pd[127] ? mul_pd[127:64] : mul_pd[126:63];
+			ur_m[63:32] = mul_top[1] ? mul_pd[127:96] : mul_pd[126:95];
+			ur_m[31:0]  = mul_top[0] ? mul_pd[95:64] : mul_pd[94:63];
 			ur_g = mul_pd[127] ? {mul_pd[63], mul_pd[62], mul_slo || (mul_pd[61:32] != 0)} :
 			                     {mul_pd[62], mul_pd[61], mul_slo || (mul_pd[60:32] != 0)};
 		end
@@ -863,8 +889,14 @@ end
 // inverted for an effective subtraction ({b_m, GRS} >= the aligned value:
 // b is the larger magnitude)
 reg  [67:0] add_r;
-always @(posedge clk)
-	add_r <= {1'b0, b_m, 3'd0} + ({1'b0, shr_out} ^ {68{eff_sub}}) + {67'd0, eff_sub};
+wire [67:0] add_sum = {1'b0, b_m, 3'd0} + ({1'b0, shr_out} ^ {68{eff_sub}}) + {67'd0, eff_sub};
+// add_r[67] twice more, each the normalizing select of half of the
+// significand (kept apart: one flip-flop does not reach all 64 in one clock)
+(* preserve *) reg [1:0] add_top;
+always @(posedge clk) begin
+	add_r   <= add_sum;
+	add_top <= {2{add_sum[67]}};
+end
 
 // Normalization (an integer source in F_SRC, FINT's integer in F_INTN, a
 // cancellation's difference in F_ADDN): the leading zeros of the value's
@@ -933,6 +965,12 @@ wire [127:0] mul_out = {mul_hh, mul_ll} + {31'd0, mul_cross, 32'd0};
 reg  [63:0] mf_hh, mf_hl, mf_lh, mf_ll, mc_hh, mc_ll;
 reg  [64:0] mc_x;
 reg         mul_slo;          // mul_pd[31:0] != 0
+wire [127:0] mul_sum = {mc_hh, mc_ll} + {31'd0, mc_x, 32'd0};
+wire         mul_sum127 = mul_sum[127];
+// mul_pd[127] twice more, each the normalizing select of half of the
+// product's 64 significand bits (kept apart: one flip-flop does not reach
+// all 64 in one clock)
+(* preserve *) reg [1:0] mul_top;
 always @(posedge clk) if (ce) begin
 	mf_hh  <= mul_hh;
 	mf_hl  <= mul_hl;
@@ -941,7 +979,8 @@ always @(posedge clk) if (ce) begin
 	mc_x   <= {1'b0, mf_hl} + {1'b0, mf_lh};
 	mc_hh  <= mf_hh;
 	mc_ll  <= mf_ll;
-	mul_pd <= {mc_hh, mc_ll} + {31'd0, mc_x, 32'd0};
+	mul_pd <= mul_sum;
+	mul_top <= {2{mul_sum127}};
 	// the product's low long word passes the sum unchanged: its sticky
 	// OR formed beside it
 	mul_slo <= (mc_ll[31:0] != 32'd0);
@@ -1677,7 +1716,8 @@ wire [14:0] fr_wb_e = (a_t == T_ZERO) ? 15'd0 :
                        (a_t == T_INF || a_t == T_NAN) ? 15'h7FFF : a_e[14:0];
 // the 68060 writes every infinity with a zero mantissa (WinUAE
 // infinity_clear_intbit: move, abs, neg, add, sub, mul, div, sqrt, int)
-wire [63:0] fr_wb_m = (a_t == T_ZERO || a_t == T_INF) ? 64'd0 : wz ? z_m : a_m;
+wire [63:0] fr_wb_m = (a_t == T_ZERO || a_t == T_INF) ? 64'd0 :
+                      wsrc[1] ? w_m : wsrc[0] ? z_m : a_m;
 wire [79:0] p6_wd   = {p6_s, p6_z ? 15'd0 : p6_e[14:0], p6_z ? 64'd0 : p6_m};
 wire [79:0] fm_wd   = {fm_wdata[95], fm_wdata[94:80], fm_wdata[63:0]};
 wire        fr_bank_we = fm_we || fr_wb_we || p6_v;
@@ -1740,6 +1780,29 @@ always @(posedge clk)
 	if (nreset && (fst == F_BIN0 || fst == F_EXEC) && b_unsup != unsupported_x(b_e[14:0], b_m)) begin
 		$display("FAIL: FPU b_unsup %b, the destination classifies as %b", b_unsup,
 		         unsupported_x(b_e[14:0], b_m));
+		$finish;
+	end
+// the sum's normalizing selects are its top bit
+always @(posedge clk)
+	if (nreset && add_top != {2{add_r[67]}}) begin
+		$display("FAIL: FPU sum select copies %b, the sum's top bit %b", add_top, add_r[67]);
+		$finish;
+	end
+// the product's normalizing selects are its top bit
+always @(posedge clk)
+	if (nreset && mul_top != {2{mul_pd[127]}}) begin
+		$display("FAIL: FPU product select copies %b, the product's top bit %b", mul_top, mul_pd[127]);
+		$finish;
+	end
+// F_RND2's overflow choice formed the cycle before must be this cycle's
+always @(posedge clk)
+	if (nreset && ce && fst == F_RND2 &&
+	    (tmx_q != ((rnd_mode == 2'b01) || (rnd_mode == 2'b10 && !a_s) || (rnd_mode == 2'b11 && a_s)) ||
+	     ovv != (!tmx_q ? 64'd0 : r_sgl ? 64'hFFFF_FFFF_FFFF_FFFF :
+	             (r_prec == 2'd1) ? 64'hFFFF_FF00_0000_0000 :
+	             (r_prec == 2'd2) ? 64'hFFFF_FFFF_FFFF_F800 : 64'hFFFF_FFFF_FFFF_FFFF))) begin
+		$display("FAIL: FPU F_RND2 overflow choice %b %h, the sign and controls give otherwise",
+		         tmx_q, ovv);
 		$finish;
 	end
 // synthesis translate_on
@@ -1817,7 +1880,8 @@ ap040_fp_regfile fpregs
 	.clk(clk), .ce(ce), .we(fr_bank_we),
 	.waddr(fr_bank_wa), .wdata(fr_bank_wd),
 	.raddr_a(src_r), .rdata_a(fr_src_raw),
-	.raddr_b(dst_r), .rdata_b(fr_dst_raw)
+	.raddr_b(dst_r), .rdata_b(fr_dst_raw),
+	.sel_n(sel_x), .raddr_a_n(src_r_n), .raddr_b_n(dst_r_n)
 );
 
 integer k;
@@ -1901,6 +1965,14 @@ function [2:0] din_class;
 endfunction
 
 // synthesis translate_off
+wire [1:0] din_nrm_own = din_nrm_of(din);
+always @(posedge clk)
+	if (nreset && sel_x && fst == F_IDLE && rq && op_class == 3'b010 &&
+	    (src_fmt == 3'd1 || src_fmt == 3'd5) && din_nrm[src_fmt[2]] != din_nrm_own[src_fmt[2]]) begin
+		$display("FAIL: the outside normal flags of the memory operand %b, its own %b", din_nrm,
+		         din_nrm_own);
+		$finish;
+	end
 always @(posedge clk)
 	if (nreset && sel_x && fst == F_IDLE && rq && op_class == 3'b010 && din_cls != din_class(din, src_fmt)) begin
 		$display("FAIL: the outside class of the memory operand %0d, its own %0d", din_cls,
@@ -1950,7 +2022,7 @@ always @(posedge clk) begin : fsm
 	reg n_wk;
 	if (!nreset) begin
 		fst <= F_IDLE; fst1h <= 26'd1; acc_r <= 1'b0; wbok_r <= 1'b0; known <= 1'b0; end_ok <= 1'b0;
-		lpf <= 1'b0; wk <= 1'b0; wbw <= 1'b0; r_ct <= 1'b0; r_rng <= 6'd0; r_dcnt <= 7'd0; r_icnt <= 7'd0;
+		wk <= 1'b0; wbw <= 1'b0; r_ct <= 1'b0; r_rng <= 6'd0; r_dcnt <= 7'd0; r_icnt <= 7'd0;
 		done <= 0; unimp <= 0; unsupp <= 0; exc_req <= 0; exc_vec <= 0;
 		fpcr <= 0; fpsr <= 0; fpiar <= 0; fpcr_en0 <= 1'b1;
 		fpu_used <= 0;
@@ -1961,12 +2033,12 @@ always @(posedge clk) begin : fsm
 		r_ae7 <= 0;
 		r_bin <= 0; r_mov <= 0; r_fsub <= 0; r_sgl <= 0; r_kind <= 0; r_prec <= 0;
 		r_dcls <= 0;
-		a_s <= 0; a_e <= 0; a_m <= 0; a_t <= 0; z_m <= 0; zr <= 0; wz <= 0;
+		a_s <= 0; a_e <= 0; a_m <= 0; a_t <= 0; z_m <= 0; zr <= 0; wsrc <= 0;
 		sh_v <= 0; sh_cnt <= 0;
-		pk_neg <= 0; pk_isz <= 0; pk_mg <= 0; pk_sat <= 0; r_lde <= 0; pk_lo <= 0; pk_ovf <= 0; int_z <= 0; unp_m <= 0;
+		pk_neg <= 0; pk_isz <= 0; pk_sat <= 0; r_lde <= 0; unp_m <= 0;
 		b_s <= 0; b_e <= 0; b_m <= 0; b_t <= 0; b_unsup <= 0;
-		grs <= 0; eff_sub <= 0; acc_hi <= 0;
-		qv <= 0; qr <= 0; srem <= 0; srad <= 0; loop_n <= 0; op_kind <= 0; okh <= 4'd0;
+		grs <= 0; eff_sub <= 0;
+		op_kind <= 0; okh <= 4'd0;
 		sh_ret <= F_PACKI; e_w <= 0; r_pr <= 0;
 		n_mode <= N_OPN;
 		// Invalid entries read as the default positive nonsignaling NaN.
@@ -2079,7 +2151,7 @@ always @(posedge clk) begin : fsm
 				r_icnt <= 7'd62 - fr_src_e[6:0];
 				n_wk = 1'b0;
 				r_din  <= din;
-				unp_m  <= unp_of(din, src_fmt);
+				unp_m  <= unp_of(din, src_fmt, sel_x ? din_nrm : din_nrm_of(din));
 				r_lde  <= lde_of(din, src_fmt, sel_x ? din_cls : din_class(din, src_fmt));
 				r_dcls <= sel_x ? din_cls : din_class(din, src_fmt);
 				r_bin  <= bin_op(opmode);
@@ -2090,16 +2162,14 @@ always @(posedge clk) begin : fsm
 				r_prec <= prec_of(opmode);
 				b_s <= fr_dst_s; b_e <= {2'd0, fr_dst_e}; b_m <= fr_dst_m;
 				b_t <= dst_tag;  b_unsup <= dst_unsup;
-				a_s <= fr_src_s; a_e <= {2'd0, fr_src_e}; a_m <= fr_src_m;
+				// (a_s, a_e, a_m, e_w and sh_src from the register file: after
+				// the case, the outermost select)
 				a_t <= src_tag;  // (a memory operand's: F_SRC classifies)
 				op_kind <= bin_kind(opmode); okh <= kind1h(bin_kind(opmode));
 				grs <= 3'd0;
-				e_w <= $signed({3'd0, fr_src_e});
 				zr  <= 1'b0;
-				wz  <= 1'b0;
-				sh_src <= (!cd_st && (cd_mcr || !cd_hw)) ? 96'd0 :
-				          (!cd_st && !cd_reg && cd_pk) ? {32'd0, din[63:0]} :
-				          {fr_src_s, fr_src_e, 16'd0, fr_src_m};
+				wsrc <= 2'd0;
+
 				if (pipe_issue) begin
 					// into the pipeline: complete as far as the core is
 					// concerned (pdone, this cycle)
@@ -2397,9 +2467,9 @@ always @(posedge clk) begin : fsm
 						n_acc = 1'b1;
 					end
 					default: begin
-						// FINT's integer: written back from z_m (wz)
+						// FINT's integer: written back from z_m (wsrc)
 						a_e <= a_e - {10'd0, n_lz};
-						wz  <= 1'b1;
+						wsrc <= 2'd1;
 						n_fst = F_WB; n1h = 26'd1 << F_WB; n_acc = 1'b1; n_wbok = fpcr_en0;
 					end
 				endcase
@@ -2533,11 +2603,6 @@ always @(posedge clk) begin : fsm
 					bo[BO_SQN]: begin
 						e_w <= bo_esq;
 						grs <= 0;
-						srad <= bo_sqodd ? {a_m, 2'b00} : {1'b0, a_m, 1'b0};
-						srem <= 0;
-						qr <= 0;
-						lpf <= 1'b0;
-						loop_n <= 0;
 						// the exact square root of an even power of two
 						if (bo_sqx) begin n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; end
 						else begin n_fst = F_SQRTL; n1h = 26'd1 << F_SQRTL; end
@@ -2605,8 +2670,6 @@ always @(posedge clk) begin : fsm
 						a_s <= a_s ^ b_s;
 						e_w <= bo_emul;
 						grs <= 0;
-						lpf <= 1'b0;
-						loop_n <= 0;
 						// multiplication by an exact power of two only
 						// changes sign/exponent and needs no multiply
 						if (bo_p2) begin n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; end
@@ -2640,10 +2703,6 @@ always @(posedge clk) begin : fsm
 						e_w <= bo_ediv;
 						grs <= 0;
 						// the first, integer quotient bit is formed already
-						acc_hi <= bo_rem0;
-						qv <= {66'd0, bo_q0};
-						lpf <= 1'b0;
-						loop_n <= 7'd1;
 						// division by a power of two, or equal normalized
 						// significands, is exact after exponent adjustment
 						if (bo_dvx) begin n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; end
@@ -2681,13 +2740,10 @@ always @(posedge clk) begin : fsm
 				z_m <= ur_m;
 				grs <= ur_g;
 				a_t <= T_NUM;
+				// (the loop's count and last-cycle flag: the loops' block)
 				if (lpf) begin
 					if (mul_pd[127]) e_w <= e_w + 18'sd1;
 					n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; n_acc = 1'b1;
-				end
-				else begin
-					loop_n <= loop_n + 7'd1;
-					lpf    <= (loop_n == 7'd2);
 				end
 			end
 
@@ -2698,16 +2754,10 @@ always @(posedge clk) begin : fsm
 				z_m <= ur_m;
 				grs <= ur_g;
 				a_t <= T_NUM;
+				// (the quotient's steps, two bits a cycle: the loops' block)
 				if (lpf) begin
 					if (!qv[66]) e_w <= e_w - 18'sd1;
 					n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; n_acc = 1'b1;
-				end
-				else begin
-					// two restoring fraction bits per cycle (66 = 2 x 33)
-					acc_hi <= {1'b0, dv_rem};
-					qv <= {qv[64:0], dv_q1, dv_q2};
-					loop_n <= loop_n + 7'd1;
-					lpf    <= (loop_n == 7'd33);
 				end
 			end
 
@@ -2718,15 +2768,8 @@ always @(posedge clk) begin : fsm
 				z_m <= ur_m;
 				grs <= ur_g;
 				a_t <= T_NUM;
+				// (the root's steps, one bit a cycle: the loops' block)
 				if (lpf) begin n_fst = F_ROUND; n1h = 26'd1 << F_ROUND; n_acc = 1'b1; end
-				else begin
-					// one result digit per cycle (66 of them)
-					srad <= {srad[63:0], 2'b00};
-					srem <= sq_rem;
-					qr <= {qr[64:0], sq_q};
-					loop_n <= loop_n + 7'd1;
-					lpf    <= (loop_n == 7'd65);
-				end
 			end
 
 			fst1h[F_ROUND]: begin
@@ -2748,22 +2791,16 @@ always @(posedge clk) begin : fsm
 				mr  = carry ? 64'h8000_0000_0000_0000 : rn_up ? rn_mi[63:0] : (rin & rmask);
 				er  = carry ? rn_e1 : e_w;
 				ovf = carry ? rn_ge : rn_gt;
-				tomax = (rnd_mode == 2'b01) ||
-				        (rnd_mode == 2'b10 && !a_s) ||
-				        (rnd_mode == 2'b11 && a_s);
+				tomax = tmx_q;
 				// the result, written whatever the range check decides (an
 				// underflow keeps the destination: x_kill), and the
 				// underflow's denormalizing shift set up beside it
-				z_m <= !ovf ? mr : !tomax ? 64'd0 :      // created infinity: all-zero
-				       r_sgl ? 64'hFFFF_FFFF_FFFF_FFFF :
-				       (r_prec == 2'd1) ? 64'hFFFF_FF00_0000_0000 :
-				       (r_prec == 2'd2) ? 64'hFFFF_FFFF_FFFF_F800 :
-				                          64'hFFFF_FFFF_FFFF_FFFF;
+				// (the result significand: w_m, beside the state machine)
 				a_e <= (ovf && tomax) ? emax[16:0] : er[16:0];
 				a_t <= (ovf && !tomax) ? T_INF : T_NUM;
 				sh_v   <= {rin, grs};
 				sh_cnt <= carry ? rn_x1 : rn_x0;
-				wz     <= 1'b1;
+				wsrc   <= 2'd2;
 				e_w    <= emin;
 				r_pr   <= r_prec;
 				sh_ret <= F_UNFL;
@@ -2890,7 +2927,7 @@ always @(posedge clk) begin : fsm
 				// rounding, INEX2 for discarded bits, a zero keeps the sign).
 				// The rounded integer is zero when nothing rounds up from
 				// zero, or everything below the carry is ones: tested on
-				// sh_v beside the incrementer, decided in F_INTN.
+				// sh_v beside the incrementer (int_z), decided in F_INTN.
 				reg up;
 				up = (r_op == 7'h03) ? 1'b0 :
 				     round_up(sh_v[3], sh_v[2], (sh_v[1:0] != 0), a_s);
@@ -2898,7 +2935,6 @@ always @(posedge clk) begin : fsm
 					fpsr[9] <= 1;                        // INEX2
 					fpsr[3] <= 1;                        // accrued INEX
 				end
-				int_z <= up ? (sh_v[66:3] == 64'hFFFF_FFFF_FFFF_FFFF) : (sh_v[66:3] == 64'd0);
 				unp_m <= up ? shk_i[63:0] : shk[63:0];
 				a_e <= 17'd16383 + 17'd63;
 				n_fst = F_INTN; n1h = 26'd1 << F_INTN; n_acc = 1'b0;
@@ -2949,7 +2985,6 @@ always @(posedge clk) begin : fsm
 					n_acc = 1'b0;
 				end
 				else begin
-					pk_mg <= round_up(sh_v[3], sh_v[2], (sh_v[1:0] != 0), pk_neg) ? shk_i : shk;
 					n_fst = F_PACKI2; n1h = 26'd1 << F_PACKI2; n_acc = 1'b0;
 				end
 			end
@@ -2959,12 +2994,7 @@ always @(posedge clk) begin : fsm
 				// signed result holds below 2^(n-1), or exactly 2^(n-1)
 				// when negative), and only the low long word negated for
 				// the store; F_PACKI3 assembles
-				reg         hi32, hi16, hi8;
-				pk_lo <= pk_neg ? (32'd0 - pk_mg[31:0]) : pk_mg[31:0];
-				hi32 = (pk_mg[64:32] != 0) || (pk_mg[31] && !(pk_neg && pk_mg[30:0] == 0));
-				hi16 = (pk_mg[64:16] != 0) || (pk_mg[15] && !(pk_neg && pk_mg[14:0] == 0));
-				hi8  = (pk_mg[64:8]  != 0) || (pk_mg[7]  && !(pk_neg && pk_mg[6:0]  == 0));
-				pk_ovf <= (pk_isz == 2'd2) ? hi32 : (pk_isz == 2'd1) ? hi16 : hi8;
+				// (pk_lo, pk_ovf: beside the state machine)
 				n_fst = F_PACKI3; n1h = 26'd1 << F_PACKI3; n_acc = 1'b0;
 			end
 
@@ -3115,6 +3145,18 @@ always @(posedge clk) begin : fsm
 		// cycle after (nothing reads it before an FSAVE), so fstate_et's
 		// input is a four-way choice of flip-flops
 		if (et_cap) fstate_et <= sh_src;
+		// The dispatch's loads from the register file (F_IDLE, every idle
+		// cycle) last: the outermost select of these registers, the read
+		// data entering their final LUT
+		if (fst1h[F_IDLE]) begin
+			a_s <= fr_src_s;
+			a_e <= {2'd0, fr_src_e};
+			a_m <= fr_src_m;
+			e_w <= $signed({3'd0, fr_src_e});
+			sh_src <= (!cd_st && (cd_mcr || !cd_hw)) ? 96'd0 :
+			          (!cd_st && !cd_reg && cd_pk) ? {32'd0, din[63:0]} :
+			          {fr_src_s, fr_src_e, 16'd0, fr_src_m};
+		end
 
 		fst     <= n_fst;
 		fst1h   <= n1h;
@@ -3132,6 +3174,77 @@ always @(posedge clk) begin : fsm
 	end
 end
 
+
+// The loops' registers and the one-state results, free-running: each is
+// written every cycle (outside the states that read it the value is a
+// don't-care) and loaded by F_BIN as a loop starts, so no hold condition
+// over the state register sits in front of them.
+always @(posedge clk) begin : loops
+	reg        carry, ovf, tomax, up;
+	reg [63:0] mr;
+	reg        hi32, hi16, hi8;
+	if (!nreset) begin
+		acc_hi <= 0; qv <= 0; qr <= 0; srem <= 0; srad <= 0; loop_n <= 0; lpf <= 1'b0;
+		w_m <= 0; pk_mg <= 0; pk_lo <= 0; pk_ovf <= 0; int_z <= 0;
+		tmx_q <= 1'b0; ovv <= 64'd0;
+	end
+	else if (ce) begin
+		if (fst1h[F_BIN]) begin
+			// a loop starts: the divide's first, integer quotient bit is
+			// formed already (count 1), the multiply and square root count
+			// from 0
+			acc_hi <= bo_rem0;
+			qv     <= {66'd0, bo_q0};
+			qr     <= 66'd0;
+			srem   <= 69'd0;
+			srad   <= bo_sqodd ? {a_m, 2'b00} : {1'b0, a_m, 1'b0};
+			loop_n <= bo[BO_DIVN] ? 7'd1 : 7'd0;
+			lpf    <= 1'b0;
+		end
+		else begin
+			// two restoring quotient bits (66 = 2 x 33), one root bit (66
+			// of them), a cycle
+			acc_hi <= {1'b0, dv_rem};
+			qv     <= {qv[64:0], dv_q1, dv_q2};
+			qr     <= {qr[64:0], sq_q};
+			srem   <= sq_rem;
+			srad   <= {srad[63:0], 2'b00};
+			loop_n <= loop_n + 7'd1;
+			// the loop's last cycle: the product in mul_pd, the quotient's
+			// 67 bits, the root's 66
+			lpf    <= (fst1h[F_MULT] && loop_n == 7'd2) || (fst1h[F_DIVL] && loop_n == 7'd33) ||
+			          (fst1h[F_SQRTL] && loop_n == 7'd65);
+		end
+		// F_RND2's result significand: the rounded value (the increment
+		// carrying out of the precision's top bit gives 1.0), or on
+		// overflow the largest number or a created infinity (all-zero)
+		carry = rn_up && rn_one;
+		mr    = carry ? 64'h8000_0000_0000_0000 : rn_up ? rn_mi[63:0] : (rin & rmask);
+		ovf   = carry ? rn_ge : rn_gt;
+		w_m   <= !ovf ? mr : ovv;
+		// the next cycle's overflow choice (used when it is F_RND2)
+		tomax = (rnd_mode == 2'b01) || (rnd_mode == 2'b10 && !a_s) || (rnd_mode == 2'b11 && a_s);
+		tmx_q <= tomax;
+		ovv   <= !tomax ? 64'd0 :
+		         r_sgl ? 64'hFFFF_FFFF_FFFF_FFFF :
+		         (r_prec == 2'd1) ? 64'hFFFF_FF00_0000_0000 :
+		         (r_prec == 2'd2) ? 64'hFFFF_FFFF_FFFF_F800 :
+		                            64'hFFFF_FFFF_FFFF_FFFF;
+		// F_INTR: the rounded integer is zero when nothing rounds up from
+		// zero, or everything below the carry is ones
+		up    = (r_op == 7'h03) ? 1'b0 : round_up(sh_v[3], sh_v[2], (sh_v[1:0] != 0), a_s);
+		int_z <= up ? (sh_v[66:3] == 64'hFFFF_FFFF_FFFF_FFFF) : (sh_v[66:3] == 64'd0);
+		// F_PACKI: the integer store's rounded magnitude; F_PACKI2: its
+		// low long word negated for a negative, its range (an n-bit signed
+		// result holds below 2^(n-1), or exactly 2^(n-1) when negative)
+		pk_mg  <= round_up(sh_v[3], sh_v[2], (sh_v[1:0] != 0), pk_neg) ? shk_i : shk;
+		pk_lo  <= pk_neg ? (32'd0 - pk_mg[31:0]) : pk_mg[31:0];
+		hi32 = (pk_mg[64:32] != 0) || (pk_mg[31] && !(pk_neg && pk_mg[30:0] == 0));
+		hi16 = (pk_mg[64:16] != 0) || (pk_mg[15] && !(pk_neg && pk_mg[14:0] == 0));
+		hi8  = (pk_mg[64:8]  != 0) || (pk_mg[7]  && !(pk_neg && pk_mg[6:0]  == 0));
+		pk_ovf <= (pk_isz == 2'd2) ? hi32 : (pk_isz == 2'd1) ? hi16 : hi8;
+	end
+end
 endmodule
 
 // Two mirrored simple-dual-port banks provide two asynchronous reads and one
@@ -3147,7 +3260,12 @@ module ap040_fp_regfile
 	input       [2:0] raddr_a,
 	output     [79:0] rdata_a,
 	input       [2:0] raddr_b,
-	output     [79:0] rdata_b
+	output     [79:0] rdata_b,
+	// sel_n: raddr_a_n/raddr_b_n are the read addresses as they will be next
+	// cycle -- the pending write's address compares registered (hit_*_q)
+	input             sel_n,
+	input       [2:0] raddr_a_n,
+	input       [2:0] raddr_b_n
 );
 
 // READ DURING WRITE.  no_rw_check does not promise the accesses never
@@ -3173,8 +3291,18 @@ reg        pend_we;
 reg  [2:0] pend_waddr;
 reg [79:0] pend_wdata;
 
-wire hit_a = pend_we && (pend_waddr == raddr_a);
-wire hit_b = pend_we && (pend_waddr == raddr_b);
+reg  hit_a_q, hit_b_q;
+wire hit_a = sel_n ? hit_a_q : pend_we && (pend_waddr == raddr_a);
+wire hit_b = sel_n ? hit_b_q : pend_we && (pend_waddr == raddr_b);
+// synthesis translate_off
+always @(posedge clk)
+	if (sel_n && $time > 0 && (hit_a_q !== (pend_we && pend_waddr == raddr_a) ||
+	                           hit_b_q !== (pend_we && pend_waddr == raddr_b))) begin
+		$display("FAIL: FPU register file read bypass %b%b, the addresses' %b%b", hit_a_q, hit_b_q,
+		         pend_we && pend_waddr == raddr_a, pend_we && pend_waddr == raddr_b);
+		$finish;
+	end
+// synthesis translate_on
 assign rdata_a = hit_a ? pend_wdata : bank_a[raddr_a];
 assign rdata_b = hit_b ? pend_wdata : bank_b[raddr_b];
 
@@ -3188,6 +3316,8 @@ always @(posedge clk) begin
 		pend_we    <= we;
 		pend_waddr <= waddr;
 		pend_wdata <= wdata;
+		hit_a_q    <= we && (waddr == raddr_a_n);
+		hit_b_q    <= we && (waddr == raddr_b_n);
 	end
 end
 
