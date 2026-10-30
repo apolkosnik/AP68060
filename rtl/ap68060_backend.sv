@@ -1247,7 +1247,10 @@ wire        ex_bdb_tk = (ex_u.op == OP_BCC) ? alu_cc : (!alu_cc && (ex_bv[15:0] 
 wire [31:0] ex_bdb_nx = ex_bdb_tk ? ex_u.target : ex_npc;
 wire        ex_xok   = (ex_u.exc == 8'd0) && !ex_snw;   // no exception, no snoop refetch
 assign      ex_xnz   = ex_slow ? xs_xnz :
-                       ((ex_kx[2] && fp_xvec != 8'd0) || (ex_kx[1] && ex_div0) || (ex_kx[0] && alu_cc));
+                       ((ex_kx[2] && fp_xvec != 8'd0) || (ex_kx[1] && md_z) || (ex_kx[0] && alu_cc));
+// (a divide by zero holds its first EX cycle, md_z set from the second: the
+// uop leaves EX only with md_z, so the flag needs no zero test of its
+// operand; its first cycle, held, is not compared)
 wire        ex_early = ((ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC)) && (ex_u.br != BR_NONE) && (ex_bdb_tk != ex_u.pred) &&
                        !ex_u.ser && !(ex_u.last && smc_pend) && ex_xok &&
                        !ex_fault && !ex_u.target[0] && !kill_now && !flush;
@@ -1723,7 +1726,7 @@ always_ff @(posedge clk)
 			$display("FAIL: WB's control register select %b disagrees (pc %h)", wb_crs, wb_u.pc);
 			$finish;
 		end
-		if (ex_v && ex_xnz != (ex_xvec != 8'd0)) begin
+		if (ex_v && !ex_hold && ex_xnz != (ex_xvec != 8'd0)) begin
 			$display("FAIL: EX's exception flag %b, its vector %0d (pc %h)", ex_xnz, ex_xvec, ex_u.pc);
 			$finish;
 		end

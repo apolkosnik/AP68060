@@ -218,6 +218,13 @@ function automatic logic [31:0] line_word(input logic [127:0] w, input logic [1:
 	endcase
 endfunction
 
+// each client's first data word, formed in parallel with the pick
+logic [31:0] dcand [NC];
+always_comb
+	for (int c = 0; c < NC; c++)
+		dcand[c] = (breq[c].siz == SIZ_LINE) ? line_word(wdata[c], breq[c].addr[3:2]) : wdata[c][31:0];
+
+
 // BS3-BS0 from SIZ and A1:A0 (table 2-6; asserted low)
 function automatic logic [3:0] bsel(input logic [1:0] s, input logic [1:0] a10);
 	logic [3:0] b;       // b[0] = BS0 (D31-D24)
@@ -647,8 +654,12 @@ always_ff @(posedge clk) begin
 				// drive the transfer (S_IDLE: the request picked; S_RETRY: cur)
 				busreq_t r;
 				logic [127:0] w;
+				logic [31:0] dw;
 				r = (st == S_RETRY) ? cur : breq[pick_c];
 				w = (st == S_RETRY) ? cur_wd : wdata[pick_c];
+				// (each client's first data word formed before the pick)
+				dw = (st == S_RETRY) ? ((cur.siz == SIZ_LINE) ? line_word(cur_wd, cur.addr[3:2]) : cur_wd[31:0])
+				                     : dcand[pick_c];
 				ab        <= B_EXP;
 				bb_n_o    <= 1'b0;
 				bb_oe     <= 1'b1;
@@ -669,7 +680,7 @@ always_ff @(posedge clk) begin
 				ciout_n   <= !r.ci || (r.tt == 2'd3);
 				lock_n    <= !(r.lock || lk_now);
 				locke_n   <= !(r.lock && r.locke);
-				d_o       <= (r.siz == SIZ_LINE) ? line_word(w, r.addr[3:2]) : w[31:0];
+				d_o       <= dw;
 				d_oe      <= !r.rd;
 				ts_n      <= 1'b0;
 				tip_n     <= 1'b0;
