@@ -537,17 +537,18 @@ always_ff @(posedge clk) if (rsti_n) begin
 end
 int rc [9];
 initial for (int i = 0; i < 9; i++) rc[i] = 0;
-// loads that missed the DC2 fast path: miss, older store to the line,
-// a same-set RAM write after the lookup, other (split, CI, ...)
+// loads leaving DT: fast, miss, other (split, CI, ...); and the cycles a
+// load waited in DT for a fresh data read, and for a fresh lookup
 int lsl [5];
 initial for (int i = 0; i < 5; i++) lsl[i] = 0;
-always_ff @(posedge clk) if (rsti_n && dut.dmu.adv_dc1 && dut.dmu.m1.v && dut.dmu.m1.mem == 2'd1) begin
-	if (dut.dmu.m1_fast && !dut.dmu.m1_stale && !(dut.dmu.dw && dut.dmu.dw_src != 0 && dut.dmu.dw_set == dut.dmu.m1.a[9:4]) &&
-	    dut.dmu.e_st == 0) lsl[0]++;
-	else if (!dut.dmu.x_dc1.hit) lsl[1]++;
-	else if (dut.dmu.m1_stale || (dut.dmu.dw && dut.dmu.dw_src != 0 && dut.dmu.dw_set == dut.dmu.m1.a[9:4])) lsl[2]++;
-	else if (dut.dmu.e_st != 0) lsl[3]++;
-	else lsl[4]++;
+always_ff @(posedge clk) if (rsti_n) begin
+	if (dut.dmu.adv_dt && dut.dmu.mt.v && dut.dmu.mt.mem == 2'd1) begin
+		if (dut.dmu.tk_fast) lsl[0]++;
+		else if (!dut.dmu.x_tk.hit) lsl[1]++;
+		else lsl[4]++;
+	end
+	if (dut.dmu.hold_dt && dut.dmu.mt.v && !dut.dmu.mt_stale) lsl[2]++;
+	if (dut.dmu.hold_dt && dut.dmu.mt.v && dut.dmu.mt_stale) lsl[3]++;
 end
 // DMU engine: jobs started (DC2 slow path, WB store, maintenance, walk)
 // and the cycles it is busy; DC2 cycles blocked by an older store (hz)
@@ -563,7 +564,7 @@ always_ff @(posedge clk) if (rsti_n) begin
 	if (dut.dmu.sim_es_m) ej[2]++;
 	if (dut.dmu.sim_es_tw) ej[3]++;
 	if (!dut.dmu.sim_es_i) ej[4]++;
-	if (dut.dmu.m2.r.v && dut.dmu.m2.fast && dut.dmu.hzf) ej[5]++;
+	if (dut.dmu.hold_dt && dut.dmu.mt.v && !dut.dmu.tk_dok) ej[5]++;
 end
 // snoops: lookups by where the line was (cache, push buffer, queued push,
 // miss), invalidations, snoop-forced refetches
@@ -592,6 +593,18 @@ int exop [64], wbop [64];
 initial for (int i = 0; i < 64; i++) begin exop[i] = 0; wbop[i] = 0; end
 int hold [8];
 int us [5];
+// registered holds on a clock the stage's own state would let it go:
+// WB's store answer, WB's other terms, DC2, DC1
+int rh [4];
+initial for (int i = 0; i < 4; i++) rh[i] = 0;
+always_ff @(posedge clk) if (rsti_n && prof) begin
+	if (dut.be.wb_v && !dut.be.wb_hold) begin
+		if (dut.be.wbh_q) rh[1]++;
+		else if (dut.be.wb_stv && !dut.be.dm_st_ok) rh[0]++;
+	end
+	if (dut.be.dc2_v && dut.be.dc2_mx && !dut.be.dm_dc2_rdy && dut.be.dm_dc2_rdy_c) rh[2]++;
+	if (dut.be.dc1_v && dut.dm_hold1 && !dut.dm_hold1_c) rh[3]++;
+end
 initial for (int i = 0; i < 5; i++) us[i] = 0;
 initial for (int i = 0; i < 8; i++) hold[i] = 0;
 always_ff @(posedge clk) if (rsti_n && prof) begin
@@ -674,10 +687,10 @@ task automatic prof_report();
 	$display("PROF snoops: hit cache %0d, push buffer %0d, queued push %0d, miss %0d; invalidated %0d, I-side refetches %0d",
 	         snc[0], snc[1], snc[2], snc[3], snc[6], snc[7]);
 	for (int i = 0; i < 8; i++) snc[i] = 0;
-	$display("PROF loads at DC1: fast %0d, miss %0d, set written since lookup %0d, engine busy %0d, other %0d",
-	         lsl[0], lsl[1], lsl[2], lsl[3], lsl[4]);
+	$display("PROF loads at DT: fast %0d, miss %0d, other %0d; DT waits: data read %0d, lookup again %0d",
+	         lsl[0], lsl[1], lsl[4], lsl[2], lsl[3]);
 	for (int i = 0; i < 5; i++) lsl[i] = 0;
-	$display("PROF engine: DC2 jobs %0d, WB store jobs %0d, maintenance %0d, walks %0d, busy cycles %0d; fast loads held by an older store %0d cycles",
+	$display("PROF engine: DC2 jobs %0d, WB store jobs %0d, maintenance %0d, walks %0d, busy cycles %0d; DT held for its data read %0d cycles",
 	         ej[0], ej[1], ej[2], ej[3], ej[4], ej[5]);
 	for (int i = 0; i < 6; i++) ej[i] = 0;
 	for (int i = 0; i < 16; i++) begin
@@ -696,6 +709,9 @@ task automatic prof_report();
 	         100 * us[0] / tot, 100 * us[1] / tot, 100 * us[2] / tot, 100 * us[3] / tot, 100 * us[4] / tot);
 	for (int i = 0; i < 5; i++) us[i] = 0;
 	for (int i = 0; i < 8; i++) hold[i] = 0;
+	$display("PROF registered holds over the stage's state (cycles): WB store %0d, WB other %0d, DC2 %0d, DC1 %0d",
+	         rh[0], rh[1], rh[2], rh[3]);
+	for (int i = 0; i < 4; i++) rh[i] = 0;
 	for (int i = 0; i < 64; i++) begin
 		if (exop[i] * 100 > tot) $display("PROF   EX op %0d: %0d%%", i, 100 * exop[i] / tot);
 		if (wbop[i] * 100 > tot) $display("PROF   WB op %0d: %0d%%", i, 100 * wbop[i] / tot);

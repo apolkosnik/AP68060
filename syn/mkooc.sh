@@ -25,6 +25,8 @@ if [ "$PHYS" = ON ]; then
 fi
 echo "set_instance_assignment -name VIRTUAL_PIN ON -to *"
 [ -n "$SEED" ] && echo "set_global_assignment -name SEED $SEED"
+# PARAMS="NAME=VALUE ...": top-level parameter overrides (e.g. FPU_PIPE=0)
+for p in $PARAMS; do echo "set_parameter -name ${p%%=*} ${p#*=}"; done
 for f in "$@"; do
   case "$f" in
     *.sv|*.svh) echo "set_global_assignment -name SYSTEMVERILOG_FILE $(readlink -f $f)";;

@@ -149,6 +149,39 @@ always_comb begin
 	sp_slow = (pq0_v && pq0_l == sp_l) || (pq1_v && pq1_l == sp_l);
 end
 
+// The compare's result is registered (sb_*) and queued from there, the
+// clock after; the request to the DMU still goes out from the compare
+// (sp_ask), so the DMU freezes as soon as before, and with the queue empty
+// it takes the registered entry directly (the head).  A tag or valid write
+// of the registered clock is laid over it once more: an install of the line
+// (its tag written in a way) is a hit there; the hit way invalidated, or
+// given another line, is no longer one (the DMU, if it froze for it
+// already, invalidates that way again: no other line is in it yet)
+logic        sb_v, sb_hit0, sb_slow;
+logic  [1:0] sb_way0;
+logic [27:0] sb_l;
+always_ff @(posedge clk) begin
+	sb_v    <= nreset && sp_v;
+	sb_hit0 <= sp_hit;
+	sb_way0 <= sp_way;
+	sb_slow <= sp_slow;
+	sb_l    <= sp_l;
+end
+logic       sb_hit;
+logic [1:0] sb_way;
+always_comb begin
+	sb_hit = sb_hit0;
+	sb_way = sb_way0;
+	if (sb_hit && ((dv_we && dv_set == sb_l[6:0] && dv_wm[sb_way] && !dv_lv) ||
+	               (dt_we && dt_set == sb_l[6:0] && dt_way == sb_way && dt_tag != sb_l[27:7])))
+		sb_hit = 1'b0;
+	if (dt_we && dt_set == sb_l[6:0] && dt_tag == sb_l[27:7]) begin
+		sb_hit = 1'b1;
+		sb_way = dt_way;
+	end
+end
+wire sp_ask = sp_v && sp_hit && !sp_slow;
+
 //--------------------------------------------------------------------------
 // fast invalidations: set and way
 //--------------------------------------------------------------------------
@@ -158,17 +191,19 @@ end
 logic [8:0] fq [FQ];
 logic [$clog2(FQ):0] fn;
 logic        fq_ovf, dq_ovf;
-logic        sp_new;            // a hit not queued yet
+logic        sp_new;            // the registered hit, not queued yet
 assign dc_ovf = fq_ovf || dq_ovf;
 always_comb begin
-	sp_new = sp_v && sp_hit && !sp_slow;
+	sp_new = sb_v && sb_hit && !sb_slow;
 	for (int i = 0; i < FQ; i++)
-		if (i < fn && !(sf_ack && i == 0) && fq[i] == {sp_l[6:0], sp_way}) sp_new = 1'b0;
+		if (i < fn && !(sf_ack && i == 0) && fq[i] == {sb_l[6:0], sb_way}) sp_new = 1'b0;
 end
-assign sf_req  = (fn != 0) || sp_new;
-assign sf_set  = fq[0][8:2];
-assign sf_way  = fq[0][1:0];
-assign sf_more = (fn > 1) || (fn == 1 && sp_new);
+// (entries now: the queue's, and the registered hit; the head is the
+// queue's first, else the registered hit's set and way)
+assign sf_req  = (fn != 0) || sp_new || sp_ask;
+assign sf_set  = (fn != 0) ? fq[0][8:2] : sb_l[6:0];
+assign sf_way  = (fn != 0) ? fq[0][1:0] : sb_way;
+assign sf_more = (fn > 1) || (fn == 1 && sp_new) || ((fn != 0 || sp_new) && sp_ask);
 
 always_ff @(posedge clk) begin
 	if (!nreset) begin
@@ -178,19 +213,22 @@ always_ff @(posedge clk) begin
 	else begin
 		logic [$clog2(FQ):0] n;
 		n = fn;
-		if (sf_ack) begin
+		// an ack takes the queue's head, or with the queue empty the
+		// registered hit (not queued then)
+		if (sf_ack && fn != 0) begin
 			for (int i = 0; i < FQ - 1; i++) fq[i] <= fq[i + 1];
 			n = n - 1'd1;
 		end
-		if (sp_new) begin
+		if (sp_new && !(sf_ack && fn == 0)) begin
 			if (n < FQ) begin
-				fq[n] <= {sp_l[6:0], sp_way};
+				fq[n] <= {sb_l[6:0], sb_way};
 				n = n + 1'd1;
 			end
 			else fq_ovf <= 1'b1;
 		end
 		fn <= n;
-		if (sf_ack && fn == 0) fq_ovf <= 1'b1;      // (cannot happen: for the bench)
+		// (an ack with nothing asked for: cannot happen, for the bench)
+		if (sf_ack && fn == 0 && !sb_v) fq_ovf <= 1'b1;
 	end
 end
 
@@ -220,14 +258,14 @@ always_ff @(posedge clk) begin
 			for (int i = 0; i < DQ - 1; i++) dq[i] <= dq[i + 1];
 			n = n - 1'd1;
 		end
-		if (sp_v && sp_slow) begin
+		if (sb_v && sb_slow) begin
 			// (a head whose lookup ends now does not cover a new snoop)
 			dup = 1'b0;
 			for (int i = 0; i < DQ; i++)
-				if (i < dn && !(pop && i == 0) && dq[i] == sp_l) dup = 1'b1;
+				if (i < dn && !(pop && i == 0) && dq[i] == sb_l) dup = 1'b1;
 			if (!dup) begin
 				if (n < DQ) begin
-					dq[n] <= sp_l;
+					dq[n] <= sb_l;
 					n = n + 1'd1;
 				end
 				else dq_ovf <= 1'b1;
@@ -238,7 +276,7 @@ always_ff @(posedge clk) begin
 		// ends: the DMU's port waits for the request to drop.
 		if (!dbusy && n != 0) begin
 			dc_req <= 1'b1;
-			dc_pa  <= {(dn != 0) ? dq[0] : sp_l, 4'd0};
+			dc_pa  <= {(dn != 0) ? dq[0] : sb_l, 4'd0};
 			dbusy  <= 1'b1;
 		end
 	end
@@ -247,7 +285,7 @@ end
 // the data cache's invalidations hold the processor's next transfer (a
 // push of a line a snoop hit must not go out); the instruction cache's do
 // not, the fetch unit making them only outside a line fill
-assign busy = snoop || sp_v || (fn != 0) || (dn != 0) || dc_req || dbusy;
+assign busy = snoop || sp_v || sb_v || (fn != 0) || (dn != 0) || dc_req || dbusy;
 
 //--------------------------------------------------------------------------
 // instruction cache queue: two entries, overflow -> every line

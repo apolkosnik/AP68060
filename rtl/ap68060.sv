@@ -23,8 +23,8 @@ module ap68060
 	// area options (doc/STATUS.md has what each costs in ALMs and cycles)
 	parameter bit         FPU_PIPE     = 0,      // the FPU's arithmetic pipeline (0: the state machine alone)
 	parameter bit         LOOP_PRED    = 0,      // D1's loop exit predictor
-	parameter bit         EARLY_RES    = 0,      // AG's early results for younger uops' base and index
-	parameter bit         DC1_ATC      = 1,      // DC1's own ATC port and tag compare (65 MHz timing: +290 ALMs)
+	parameter bit         EARLY_RES    = 0,      // (unused here: AG's early results are not built)
+	parameter bit         DC1_ATC      = 1,      // (unused here: the DMU's DT stage compares the tags)
 	parameter bit         SKID         = 1,      // the skid register in front of AG (65 MHz timing: +400 ALMs)
 	parameter logic [7:0] PCR_REV      = 8'h06   // PCR revision number
 )(
@@ -93,12 +93,21 @@ module ap68060
 // the processor stays in reset for another 27 CLK cycles (7.13).
 logic [1:0] rst_q = 2'b00;
 logic [4:0] rst_hold = 5'd27;
+// The reset itself is a register, from the values the synchronizer and the
+// counter take (the same clocks as their compare), with a copy for the
+// back end and one for the DMU: each drives its own registers' resets.
+(* preserve *) logic nreset = 1'b0, nrst_be = 1'b0, nrst_dm = 1'b0;
 always_ff @(posedge clk) begin
-	if (bclk_en) rst_q <= {rst_q[0], rsti_n};
-	if (!rst_q[1])            rst_hold <= 5'd27;
-	else if (rst_hold != 5'd0) rst_hold <= rst_hold - 5'd1;
+	logic [1:0] q;
+	logic [4:0] h;
+	q = bclk_en ? {rst_q[0], rsti_n} : rst_q;
+	h = !rst_q[1] ? 5'd27 : (rst_hold != 5'd0) ? rst_hold - 5'd1 : 5'd0;
+	rst_q    <= q;
+	rst_hold <= h;
+	nreset   <= q[1] && (h == 5'd0);
+	nrst_be  <= q[1] && (h == 5'd0);
+	nrst_dm  <= q[1] && (h == 5'd0);
 end
-wire nreset = rst_q[1] && (rst_hold == 5'd0);
 
 // the special modes (7.14): IPL2-IPL0 and D15-D0 registered on the bus
 // clock edges while RSTI is asserted; the last one stands
@@ -159,7 +168,7 @@ localparam int NC = 2;
 logic [NC-1:0] b_req, b_gnt, b_done, b_err;
 logic          b_own;
 logic          sn_ovf, sn_busy, sn_act;
-logic          sb_empty, sb_err, sb_err_ack;     // the DMU's store buffer
+logic          sb_empty, sb_ne_n, sb_err, sb_err_ack;     // the DMU's store buffer
 logic  [31:0]  sb_fslw;
 busreq_t       b_breq [NC];
 logic [127:0]  b_wdata [NC];
@@ -171,14 +180,20 @@ logic          b_ravec, b_rtci;
 logic  [1:0]   b_errbeat;
 logic          b_idle;
 logic          rsto_req, rsto_busy;
-logic          be_fstop;
+logic          be_fstop, be_idle;
 logic          b_drop, b_more;
+// the fetch's hold at the BIU, its own flip-flop (placed by the BIU's
+// arbitration): a clock after the back end's, still well before what it
+// holds the fetch for (the LPSTOP broadcast, RSTO waiting for any transfer
+// starting)
+logic          bstop_q;
+always_ff @(posedge clk) bstop_q <= be_fstop || rsto_busy;
 
 ap68060_biu #(.NC(NC)) biu (
 	.clk(clk), .nreset(nreset), .bclk_en(bclk_en),
 	.m_ign(m_ign), .m_native(m_native), .m_hold(m_hold), .m_cnt(m_cnt),
 	// (client 1, the fetch, is held while stopped, halted or resetting)
-	.req(b_req & ~{be_fstop || rsto_busy, 1'b0}), .breq(b_breq), .wdata(b_wdata),
+	.req(b_req & ~{bstop_q, 1'b0}), .breq(b_breq), .wdata(b_wdata),
 	.gnt(b_gnt), .done(b_done), .err(b_err),
 	.rvalid(b_rvalid), .rclient(b_rclient), .rdata(b_rdata), .rbeat(b_rbeat),
 	.ravec(b_ravec), .rtci(b_rtci), .errbeat(b_errbeat), .idle(b_idle), .own(b_own),
@@ -242,9 +257,11 @@ logic [31:0] vbr, cacr;
 logic        bc_clr;
 logic  [2:0] sfc, dfc;
 logic        kill_now, adv_ag, lk_abandon;
+logic  [5:0] dm_adv;                // the DMU's copies of the advances
+logic        dm_kill;               // ... and of the kill
 logic [31:0] dtt0, dtt1, itt0, itt1, tc;
 logic        q_odd;
-logic        dm_hold1, mt_v, mt_ng, mt_wr, mt_done;
+logic        dm_hold1, dm_hold1_c, dm_dc2_rdy_c, dm_st_ok, mt_v, mt_ng, mt_wr, mt_done;
 logic  [2:0] mt_op, mt_fc;
 logic  [1:0] mt_scope, mt_caches;
 logic [31:0] mt_addr, mt_pa, mt_fslw, urp, srp, dm_st_faddr;
@@ -252,7 +269,7 @@ logic        mt_fault, dm_lkend, dm_iack_end;
 logic  [2:0] iack_lvl;
 logic  [1:0] dm_ack;
 
-logic        dm_req, adv_dc1, adv_dc2, adv_ex, adv_wb;
+logic        dm_req, adv_dc1, adv_dt, adv_dc2, adv_ex, adv_wb, dm_hold_dt;
 logic [31:0] dm_va;
 logic  [1:0] dm_mem, dm_msz;
 logic  [2:0] dm_fc;
@@ -274,7 +291,7 @@ logic        uo_rdy;
 
 ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
                   .PCR_REV(PCR_REV)) be (
-	.clk(clk), .nreset(nreset),
+	.clk(clk), .nreset(nrst_be),
 	.in_v(uq_n != 2'd0), .in_u(uq0), .in_rdy(uo_rdy),
 	.redir_v(redir_v), .redir_pc(redir_pc), .flush(flush), .fe_flush(fe_flush),
 	.ras_rv(ras_rv), .ras_rtp(ras_rtp), .ras_rn(ras_rn),
@@ -287,34 +304,35 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.lp_we(lp_we), .lp_wa(lp_wa), .lp_tk(lp_tk), .lp_mp(lp_mp), .sn_ihit(sn_ihit),
 	.tw_busy(tw_busy), .pst5(pst5),
 	.irq_pending(irq_pending),
-	.adv_dc1(adv_dc1), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
-	.dm_dc2_rdy(dm_dc2_rdy), .dm_ldata(dm_ldata), .dm_ldata_al(dm_ldata_al), .dm_ldata_alv(dm_ldata_alv), .dm_fault(dm_fault),
+	.adv_dc1(adv_dc1), .adv_dt(adv_dt), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
+	.dm_dc2_rdy(dm_dc2_rdy), .dm_dc2_rdy_c(dm_dc2_rdy_c), .dm_ldata(dm_ldata), .dm_ldata_al(dm_ldata_al), .dm_ldata_alv(dm_ldata_alv), .dm_fault(dm_fault),
 	.dm_fvec(dm_fvec), .dm_faddr(dm_faddr), .dm_fslw(dm_fslw), .if_cause(if_cause),
-	.dm_st_v(dm_st_v), .dm_st_data(dm_st_data), .dm_st_rdy(dm_st_rdy),
+	.dm_st_v(dm_st_v), .dm_st_data(dm_st_data), .dm_st_rdy(dm_st_rdy), .dm_st_ok(dm_st_ok),
 	.dm_st_fault(dm_st_fault), .dm_st_fslw(dm_st_fslw), .dm_lkend(dm_lkend), .dm_iack_end(dm_iack_end),
-	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
-	.dm_hold1(dm_hold1), .mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope),
+	.sb_empty(sb_empty), .sb_ne_n(sb_ne_n), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
+	.dm_hold1(dm_hold1), .dm_hold1_c(dm_hold1_c), .dm_hold_dt(dm_hold_dt), .mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope),
 	.mt_caches(mt_caches), .mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng),
 	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
 	.dm_st_faddr(dm_st_faddr),
 	.urp(urp), .srp(srp),
 	.ipl(ipl_v), .iack_lvl(iack_lvl), .rsto_req(rsto_req), .rsto_busy(rsto_busy),
-	.kill_now(kill_now), .lk_abandon(lk_abandon), .adv_ag(adv_ag),
+	.kill_now(kill_now), .lk_abandon(lk_abandon), .adv_ag(adv_ag), .dm_adv(dm_adv), .dm_kill(dm_kill),
 	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1), .tc(tc),
-	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .halted(dbg_halted), .fetch_stop(be_fstop)
+	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .halted(dbg_halted), .be_idle(be_idle),
+	.fetch_stop(be_fstop)
 );
 
 ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
-	.clk(clk), .nreset(nreset),
-	.adv_ag(adv_ag), .dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem),
+	.clk(clk), .nreset(nrst_dm),
+	.adv_ag(dm_adv[5]), .dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem),
 	.dm_msz(dm_msz), .dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke),
 	.dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .iack_lvl(iack_lvl),
 	.dm_older(dm_older),
-	.adv_dc1(adv_dc1), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
-	.kill_now(kill_now), .dm_hold1(dm_hold1),
-	.dc2_rdy(dm_dc2_rdy), .ldata(dm_ldata), .ldata_al(dm_ldata_al), .ldata_alv(dm_ldata_alv), .fault(dm_fault), .fvec(dm_fvec),
+	.adv_dc1(dm_adv[4]), .adv_dt(dm_adv[3]), .adv_dc2(dm_adv[2]), .adv_ex(dm_adv[1]), .adv_wb(dm_adv[0]),
+	.kill_now(dm_kill), .dm_hold1(dm_hold1), .dm_hold1_c(dm_hold1_c), .hold_dt(dm_hold_dt),
+	.dc2_rdy(dm_dc2_rdy), .dc2_rdy_c(dm_dc2_rdy_c), .ldata(dm_ldata), .ldata_al(dm_ldata_al), .ldata_alv(dm_ldata_alv), .fault(dm_fault), .fvec(dm_fvec),
 	.faddr(dm_faddr), .fslw(dm_fslw),
-	.st_v(dm_st_v), .st_data(dm_st_data), .st_rdy(dm_st_rdy),
+	.st_v(dm_st_v), .st_data(dm_st_data), .st_rdy(dm_st_rdy), .st_ok(dm_st_ok),
 	.st_fault(dm_st_fault), .st_fslw(dm_st_fslw), .st_faddr(dm_st_faddr), .lkend(dm_lkend), .iack_end(dm_iack_end),
 	.mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope), .mt_caches(mt_caches),
 	.mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng), .mt_wr(mt_wr),
@@ -322,7 +340,10 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.cacr(cacr), .tc(tc), .urp(urp), .srp(srp),
 	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1),
 	.cdis(cdis), .mdis(mdis), .tw_busy(tw_busy),
-	.iw_req(iw_req), .iw_va(iw_va), .iw_fc2(iw_fc2), .iw_done(iw_done), .iw_ent(iw_ent),
+	// (an instruction-side table search waits for every older instruction:
+	// the back end and the decoded/sequenced queues empty)
+	.iw_req(iw_req), .iw_ok(be_idle && rq_n == 2'd0 && uq_n == 2'd0),
+	.iw_va(iw_va), .iw_fc2(iw_fc2), .iw_done(iw_done), .iw_ent(iw_ent),
 	.iw_cause(iw_cause),
 	.ic_inv(ic_inv), .ic_inv_scope(ic_inv_scope), .ic_inv_pa(ic_inv_pa),
 	.ic_inv_done(ic_inv_done),
@@ -333,7 +354,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.bi_req(b_req[0]), .bi_breq(b_breq[0]), .bi_wdata(b_wdata[0]),
 	.bi_gnt(b_gnt[0]), .bi_done(b_done[0]), .bi_err(b_err[0]), .bi_drop(b_drop), .bi_more(b_more),
 	.bi_rvalid(b_rvalid && b_rclient == 1'b0), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
-	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
+	.sb_empty(sb_empty), .sb_ne_n(sb_ne_n), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
 	.b_ravec(b_ravec), .b_rtci(b_rtci),
 	.sn_req(sn_req), .sn_pa(sn_pa), .sn_look(sn_look), .sn_hit(sn_hit),
 	.sn_dirty(sn_dirty), .sn_line(sn_line), .sn_inv(sn_inv), .sn_act(sn_act), .sn_wr(sn_wr),

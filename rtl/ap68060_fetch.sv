@@ -337,7 +337,7 @@ ap68060_atc #(.SAME_SEARCH(0)) iatc (
 	.la(atc_la),
 	.fc2(atc_fc2),
 	.hit(atc_hit), .ent(atc_e), .hv(), .wpa(),
-	.la_d(32'd0), .fc2_d(1'b0), .set_d(4'd0), .hv_d(), .wpa_d(),
+	.la_d(32'd0), .fc2_d(1'b0), .set_d(4'd0), .hv_d(), .wpa_d(), .ent_d(),
 	.wr(iatc_wr), .wla(iatc_wla), .wfc2(iatc_wfc2), .went(iatc_went),
 	.wsame(1'b0), .wsame_hv(4'd0),
 	.flush_all(fl_all_q), .flush_page(fl_pg_q),
