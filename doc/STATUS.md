@@ -86,21 +86,31 @@ a clock of its own; `t_fastram` runs in every configuration.
   seeds match).
 - `tb/run_bench.sh`: Dhrystone and Whetstone, self-checking (see
   Performance).
-- WinUAE cputest corpus for the 68060 (`tb/run_cputest.py`, generated
-  with `cpu_unimplemented=0`): all slices pass except the oracle
-  deviations below.
+- WinUAE cputest corpus for the 68060 (`tb/run_cputest.py`): the corpus
+  of 2026-10-26 (`data060_20261026.zip`: Default, BASIC, IRQ, EXTSRC,
+  EXTDST, AE, ODDSTK, ODDEXC, ODDIRQ, FBASIC, FINT, FPACK, FILLG) passes
+  except the oracle deviations below.  `run_cputest.py --known
+  tb/cputest_known.txt` reports those slices as KNOWN, a slice qualifying
+  only when the first mismatch of every failing round is a listed one.
 
 ### Known deviations of the corpus oracle (the core follows the manual)
 
-- Denormal or unnormal FP source operands: WinUAE stacks a format $3
+- Denormal or unnormal FP source operands (PackedFPU, FILLG .S/.D):
+  WinUAE stacks a format $3
   frame ("simplification" in fpp.cpp); the manual (6.5.2, table 6-10)
   says format $0 for register and memory sources.  Both stack the next
   PC with the address register updated (the M68060SP emulates the
   instruction from the FSAVE frame and returns past it).
 - An unimplemented FPU instruction with an extended -(An) operand: the
-  frame's address is An - 4 (the decremented An + 8, as the M68060SP's
-  _dcalc_ea expects and 8.2.4 states for the FPU-disabled frame);
-  WinUAE reports An - 12.
+  frame's address is An - 4 (the decremented An + 8) and An is not
+  updated, as the M68060SP's _dcalc_ea expects ("for extended precision
+  and packed, the stacked <ea> value is 8 bytes too big"; "the register is
+  not updated regardless of size") and 8.2.4 states for the FPU-disabled
+  frame; WinUAE reports An - 12 (FILLG .X slices).
+- The 68060's unimplemented integer instructions (CAS with a misaligned
+  operand, CAS2, CHK2/CMP2, 64-bit MULx.L/DIVx.L, MOVEP) take vector 61
+  for the M68060ISP to emulate (MC68060UM 1.5); the 2026-10-26 corpus was
+  generated with `cpu_no_unimplemented=0` and expects them executed.
 - Traced multi-instruction rounds: the generator runs the sequence without
   the trace exceptions in between, so effects of those exceptions are not
   in its expectations (BUSCR L/LE copied to SL/SLE, 7.4), nor is TCR's
