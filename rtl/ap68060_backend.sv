@@ -1339,13 +1339,31 @@ wire trace_due   = wb_bound && tr_now;
 // exception the instruction at WB takes (MC68060UM 8.4.6); it goes before
 // a trace or an interrupt.  (wb_refetch: below, not an exception.)
 wire wb_refetch;
-wire take_sbe    = sb_err && sb_empty &&
-                   ((adv_wb && wb_is_exc && !wb_refetch) || wb_bound || (stopped && !wb_v));
-wire take_irq    = irq_pend && !trace_due && !take_sbe && ((wb_bound && !xstk) || (stopped && !wb_v));
+// Each decision in two forms from registers: if WB's uop advances this
+// cycle (*1) and if it does not (*0, the stopped processor's); WB's advance,
+// the end of the stall chain, picks last (checked against the direct forms)
+wire wb_rf1  = wb_v && (wb_exc == EXC_IFS || wb_exc == EXC_IFSA);   // a refetch
+wire wb_ex1  = wb_is_exc && !wb_rf1;                                 // an exception
+wire bnd1    = wb_v && !wb_is_exc && wb_u.last;                      // a boundary
+wire stp0    = stopped && !wb_v;
+wire sbe1    = sb_err && sb_empty && (wb_ex1 || bnd1);
+wire sbe0    = sb_err && sb_empty && stp0;
+wire trc1    = bnd1 && tr_now && !sbe1;
+wire irq1    = irq_pend && !(bnd1 && tr_now) && !sbe1 && bnd1 && !xstk;
+wire irq0    = irq_pend && !sbe0 && stp0;
+wire dbl1    = xr_dbl && !halted &&
+               ((wb_ex1 && ((xstk && (wb_exc == 8'd2 || wb_exc == 8'd3)) ||
+                            (x_first && wb_exc == 8'd2 && (wb_exc_fslw & FSLW_IO) != 32'd0))) ||
+                (sbe1 && xstk && (sb_fslw & FSLW_SBE) != 32'd0));
+wire dbl0    = xr_dbl && !halted && sbe0 && xstk && (sb_fslw & FSLW_SBE) != 32'd0;
+wire xgo1    = (wb_ex1 || trc1 || irq1 || sbe1) && !dbl1 && !halted;
+wire xgo0    = (irq0 || sbe0) && !dbl0 && !halted;
+wire take_sbe    = adv_wb ? sbe1 : sbe0;
+wire take_irq    = adv_wb ? irq1 : irq0;
 // (at the first handler instruction's boundary irq_pend compares with the
 // mask that instruction leaves: it can raise it to keep the interrupt
 // out, 8.1, 8.2.9; no IPEND claim is formed inside xwin)
-wire take_trace  = trace_due && !take_sbe;
+wire take_trace  = adv_wb && trc1;
 assign sb_err_ack = take_sbe;
 // a speculative fetch fault (code 1) is no exception: WB refetches the
 // instruction once on demand, and only a second fault there is an access
@@ -1353,7 +1371,7 @@ assign sb_err_ack = take_sbe;
 // exceptions that stack the next instruction: the instruction completed
 wire wb_post_trap = (wb_exc >= 8'd32 && wb_exc < 8'd48) ||
                     wb_exc == 8'd5 || wb_exc == 8'd6 || wb_exc == 8'd7;
-assign wb_refetch = adv_wb && wb_v && (wb_exc == EXC_IFS || wb_exc == EXC_IFSA);
+assign wb_refetch = adv_wb && wb_rf1;
 logic        rt_armed;
 logic [31:0] rt_pc;
 // a double bus fault (MC68060UM 7.9.3, 8.2.1): an access or
@@ -1364,13 +1382,29 @@ logic [31:0] rt_pc;
 // processing; a fault of that instruction's operands is a new access
 // error), or a bus error on a buffered write of its stack frame: the
 // processor halts (PST $1C) instead of taking it
-wire dbl_fault   = xr_dbl && !halted &&
-                   ((adv_wb && wb_is_exc && !wb_refetch &&
-                     ((xstk && (wb_exc == 8'd2 || wb_exc == 8'd3)) ||
-                      (x_first && wb_exc == 8'd2 && (wb_exc_fslw & FSLW_IO) != 32'd0))) ||
-                    (take_sbe && xstk && (sb_fslw & FSLW_SBE) != 32'd0));
-wire x_go        = ((adv_wb && wb_is_exc && !wb_refetch) || take_trace || take_irq || take_sbe) &&
-                   !dbl_fault && !halted;
+wire dbl_fault   = adv_wb ? dbl1 : dbl0;
+wire x_go        = adv_wb ? xgo1 : xgo0;
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset) begin
+		logic ts, ti, df, xg;
+		ts = sb_err && sb_empty &&
+		     ((adv_wb && wb_is_exc && !wb_refetch) || wb_bound || (stopped && !wb_v));
+		ti = irq_pend && !trace_due && !ts && ((wb_bound && !xstk) || (stopped && !wb_v));
+		df = xr_dbl && !halted &&
+		     ((adv_wb && wb_is_exc && !wb_refetch &&
+		       ((xstk && (wb_exc == 8'd2 || wb_exc == 8'd3)) ||
+		        (x_first && wb_exc == 8'd2 && (wb_exc_fslw & FSLW_IO) != 32'd0))) ||
+		      (ts && xstk && (sb_fslw & FSLW_SBE) != 32'd0));
+		xg = ((adv_wb && wb_is_exc && !wb_refetch) || (trace_due && !ts) || ti || ts) && !df && !halted;
+		if (ts != take_sbe || ti != take_irq || (trace_due && !ts) != take_trace ||
+		    df != dbl_fault || xg != x_go) begin
+			$display("FAIL: WB's two-form decisions disagree: sbe %b/%b irq %b/%b trace %b/%b dbl %b/%b go %b/%b",
+			         take_sbe, ts, take_irq, ti, take_trace, trace_due && !ts, dbl_fault, df, x_go, xg);
+			$finish;
+		end
+	end
+// synthesis translate_on
 // a locked sequence ends with its LOCKE write; before that only an
 // exception (L and LE go to SL and SLE) or a MOVEC clearing BUSCR.L ends it
 // (MC68060UM 7.4) -- not a pipeline flush, a NOP's included
@@ -1457,7 +1491,7 @@ assign mt_wr     = (wb_u.cond == 4'd5) && !wb_u.imm_b[6];   // PLPAW $F588, PLPA
 logic        rst_seq;         // reset exception pending (first cycles)
 
 // same-cycle kill of every younger uop: WB takes an exception or redirects
-assign kill_now = (adv_wb && (wb_is_exc || wb_redir)) || x_go;
+assign kill_now = adv_wb ? (wb_is_exc || wb_redir || xgo1) : xgo0;
 
 // exception entry values
 logic  [7:0] x_vec;
