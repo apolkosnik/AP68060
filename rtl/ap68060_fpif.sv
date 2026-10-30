@@ -152,13 +152,10 @@ function automatic logic nice_mem(input logic [95:0] d, input logic [2:0] f);
 endfunction
 
 // an extended image's class, as the FPU forms it (ap040_fpu unsupported_x,
-// nice_x, tag_x: 0 number, 1 zero, 2 infinity, 3 NaN)
+// tag_x: 0 number, 1 zero, 2 infinity, 3 NaN)
 function automatic logic x_unsup(input logic [14:0] e, input logic [63:0] m);
 	x_unsup = ((e == 15'd0) && !m[63] && (m[62:0] != 0)) ||
 	          ((e != 15'd0) && (e != 15'h7FFF) && !m[63] && (m != 64'd0));
-endfunction
-function automatic logic x_nice(input logic [14:0] e, input logic [63:0] m);
-	x_nice = (m == 64'd0) ? (e != 15'h7FFF) : (m[63] && e >= 15'd16323 && e <= 15'd16443);
 endfunction
 function automatic logic [1:0] x_tag(input logic [14:0] e, input logic [63:0] m);
 	x_tag = (e == 15'h7FFF) ? ((m[62:0] != 63'd0) ? 2'd3 : 2'd2) : (m == 64'd0) ? 2'd1 : 2'd0;
@@ -259,7 +256,6 @@ logic  [7:0] f_okvn;          // the FPU's register-ready flags, next cycle
 logic        f_aok, f_bok;    // ... of the next source and destination
 logic [31:0] f_rfln;          // the FPU's register flags, next cycle
 logic  [3:0] f_sfl, f_dfl;    // ... of the next source and destination
-logic  [3:0] f_fmfl;          // FMOVEM's register image: {unsupported, nice, class tag}
 logic  [6:0] f_opm;
 // (f_din also carries FMOVEM's register data: an operation's instruction
 // waits until the FPU has taken its operand, so FMOVEM's writes come later)
@@ -313,7 +309,7 @@ ap040_fpu #(.PIPE(FPU_PIPE)) fpu (
 	.fm_sel(f_fmsel), .fm_we(f_fmwe), .fm_wdata(f_din), .fm_rdata(f_fmrd),
 	.fpu_used(f_used), .pbusy(f_pbusy), .pdone(f_pdone),
 	.okv_next(f_okvn), .sel_x(1'b1), .aok_x(f_aok), .bok_x(f_bok),
-	.rfl_next(f_rfln), .sfl_x(f_sfl), .dfl_x(f_dfl), .fm_wfl(f_fmfl),
+	.rfl_next(f_rfln), .sfl_x(f_sfl), .dfl_x(f_dfl),
 	.opmode_n(n_opm), .op_class_n(n_class), .src_fmt_n(n_fmt),
 	.fstate_et(f_xop), .frestore_idle(f_rest_idle),
 	.frestore_we(f_rwe), .frestore_wd({rs_w0, rs_w1, f_rwd}),
@@ -350,6 +346,8 @@ logic        mvr_wait;         // MVR: the raw read port's set-up cycle,
 logic        mvr_ok;           // ... the read registered (fmr_q): the result from
 logic [95:0] fmr_q;            // a flip-flop, not the register file's read path
 logic        st_q;             // the latched instruction is a store (ext_q opclass 011)
+logic        q_bcc, q_fdbcc;   // ... FBcc, FDBcc
+logic        q_fsccm;          // ... FScc of a memory operand (its frame address)
 logic        crr_wait;         // CRR: the control register read's cycle
 logic [95:0] get_q;            // the long words GET returns
 logic  [1:0] sv_kind;          // FSAVE frame: 0 NULL, 1 IDLE, 2 EXCP
@@ -847,8 +845,7 @@ always_comb begin
 		FC_EAL:  xaddr = eaf_l;
 		FC_END:  xaddr = sx_addr;
 		FC_COND, FC_DBCC:
-		         xaddr = is_bcc_l ? pc : is_fdbcc_l ? {ext_q, dbcc_d} :
-		                 (is_cc_l && eam_l >= 3'd2 && sub == FC_COND && !(eam_l == 3'd7 && ear_l >= 3'd2)) ? ea : 32'd0;
+		         xaddr = q_bcc ? pc : q_fdbcc ? {ext_q, dbcc_d} : (q_fsccm && sub == FC_COND) ? ea : 32'd0;
 		default: xaddr = pc;
 	endcase
 end
@@ -1179,8 +1176,9 @@ end
 always_ff @(posedge clk) begin : dat
 	if (!nreset) begin
 		opw_q <= '0; ext_q <= '0; fsr_q <= 1'b0; lst_q <= '0; st_q <= 1'b0;
+		q_bcc <= 1'b0; q_fdbcc <= 1'b0; q_fsccm <= 1'b0;
 		eaa <= '0; eav <= 1'b0;
-		f_din <= '0; f_dnice <= 1'b0; f_dcls <= '0; f_iapc <= '0; f_fmsel <= '0; f_fmfl <= '0;
+		f_din <= '0; f_dnice <= 1'b0; f_dcls <= '0; f_iapc <= '0; f_fmsel <= '0;
 		f_crsel <= '0; f_crwd <= '0; get_q <= '0;
 		list <= '0; mv_slots <= '0; mv_lsb <= 1'b0; mv_rev <= 1'b0; mv_st <= 1'b0; mv_m1 <= 1'b0;
 		sv_kind <= '0; sv_v <= '0; rs_kind <= '0; rs_v <= '0; rs_w0 <= '0; rs_w1 <= '0; f_rwd <= '0;
@@ -1195,6 +1193,9 @@ always_ff @(posedge clk) begin : dat
 			lst_q  <= lst_of(opw, ext);
 			ext_q  <= ext;
 			st_q   <= (ext[15:13] == 3'b011);
+			q_bcc   <= is_bcc;
+			q_fdbcc <= is_fdbcc;
+			q_fsccm <= is_cc && eam >= 3'd2 && !(eam == 3'd7 && ear >= 3'd2);
 			eav    <= eal && !ea_imm;
 			if (eal) eaa <= ea;
 			f_iapc <= pc;
@@ -1233,10 +1234,6 @@ always_ff @(posedge clk) begin : dat
 		FC_MVW: if (cur_on) begin
 			f_fmsel <= cur_reg;
 			f_din   <= {av, bv, latch};
-			// the image's class flags, formed as it is registered (the
-			// FPU's register flags take them from a flip-flop)
-			f_fmfl  <= {x_unsup(av[30:16], {bv, latch}), x_nice(av[30:16], {bv, latch}),
-			            x_tag(av[30:16], {bv, latch})};
 		end
 		FC_SV0: begin
 			sv_kind <= sv_now;
