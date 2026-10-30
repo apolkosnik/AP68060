@@ -838,10 +838,10 @@ wire  e_quiet = (e_st == E_IDLE) || (e_st == E_S_START) || (e_st == E_SP_W) ||
                 (e_st == E_SP_2) || (e_st == E_SP_3) || (e_st == E_SP_4) ||
                 (e_st == E_S_DONE && sp_job);
 // engine states that hold DC1 (all but the idle engine and its WB store's)
-function automatic logic e_busy(input est_t s);
-	e_busy = s != E_IDLE && s != E_W_START && s != E_W_DEC && s != E_W_PART &&
-	         s != E_W_DONE && s != E_SB;
-endfunction
+// (compares of the state register with constants only: it stays a state
+// machine, one-hot)
+wire  e_busy = (e_st != E_IDLE) && (e_st != E_W_START) && (e_st != E_W_DEC) &&
+               (e_st != E_W_PART) && (e_st != E_W_DONE) && (e_st != E_SB);
 // the engine's own lookup through the stolen ports: the ATC's part (an
 // asynchronous read) registered in the clock the tag RAM takes the stolen
 // set (E_S_XLW, E_SP_W), the tags compared from the RAM the clock after
@@ -2907,9 +2907,9 @@ always_ff @(posedge clk) begin
 			                      e_st == E_M_START || e_st == E_M_SCAN || e_st == E_FILL ||
 			                      e_st == E_PUSHV || e_st == E_TW_DESC);
 			if (sn_frz)
-				busy_n = e_busy(e_st);
+				busy_n = e_busy;
 			else
-				busy_n = (e_busy(e_st) && e_st != E_S_DONE && e_st != E_I_DONE) ||
+				busy_n = (e_busy && e_st != E_S_DONE && e_st != E_I_DONE) ||
 				         (e_st == E_IDLE && !wfs_p1 &&
 				          ((mt_v && !mt_done) ||
 				           (!wb_slow && (dc2_slow || (e_job && m2.r.v && !e_dc2_done) ||
