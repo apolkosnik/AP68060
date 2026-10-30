@@ -319,8 +319,14 @@ wire bvq0 = btb_q0[BTB_DW-1] && bep0 == bep && !bs_q;
 wire bvq1 = btb_q1[BTB_DW-1] && bep1 == bep && !bs_q;
 // the first branch of the fetch: word 0's when the fetch starts there
 wire btb_on   = cacr_q[23];
-wire btb_hit0 = btb_on && !btb_cf && bvq0 && btb_q0[BTB_DW-2 -: BTB_TW] == f1_pc[31:BTB_AW+2] && !f1_pc[1];
-wire btb_hit1 = btb_on && !btb_cf && bvq1 && btb_q1[BTB_DW-2 -: BTB_TW] == f1_pc[31:BTB_AW+2];
+// (the tag's low BTB_CW bits are compared: a prediction, which D1 checks
+// word by word -- an alias costs a redirect and the entry's rewrite, and
+// the compare stays two LUTs deep ahead of F0's address select)
+localparam int BTB_CW = 12;
+wire btb_hit0 = btb_on && !btb_cf && bvq0 && !f1_pc[1] &&
+                btb_q0[BTB_DW-1-BTB_TW +: BTB_CW] == f1_pc[BTB_AW+2 +: BTB_CW];
+wire btb_hit1 = btb_on && !btb_cf && bvq1 &&
+                btb_q1[BTB_DW-1-BTB_TW +: BTB_CW] == f1_pc[BTB_AW+2 +: BTB_CW];
 
 // the fetch's return stack: pushed by calls the BTB takes, popped by the
 // returns it takes (their target), resynchronized from D1's on redirects

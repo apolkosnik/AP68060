@@ -69,6 +69,7 @@ module ap68060_decode
 
 	// record FIFO towards D2: rq0 is the head
 	output logic  [2:0] rq_n,
+	output logic        rq_e,           // ... none (rq_n == 0), a register
 	output dinst_t      rq0,
 	output dinst_t      rq1,
 	input  logic        rq_pop,
@@ -1538,6 +1539,7 @@ end
 always_ff @(posedge clk) begin
 	if (!nrst) begin
 		rq_n       <= 3'd0;
+		rq_e       <= 1'b1;
 		room_q     <= 1'b1;
 		d_redir_v  <= 1'b0;
 		d_redir_pc <= '0;
@@ -1626,6 +1628,7 @@ always_ff @(posedge clk) begin
 		// four records: D1a took this one only with room for it (the data:
 		// below, without reset)
 		rq_n <= rq_n + {2'd0, push} - {2'd0, pop};
+		rq_e <= (rq_n + {2'd0, push} - {2'd0, pop}) == 3'd0;
 		// the room D1a sees next clock: the count after this clock's push
 		// and pop, and the record IR then holds (this clock's take)
 		begin
@@ -1637,6 +1640,7 @@ always_ff @(posedge clk) begin
 
 		if (flush) begin
 			rq_n       <= 3'd0;
+		rq_e       <= 1'b1;
 			room_q     <= 1'b1;
 			if (ras_rv) begin
 				ras_tp  <= ras_rtp;
@@ -1677,6 +1681,11 @@ always_ff @(posedge clk)
 always_ff @(posedge clk)
 	if (nrst && ir_v && ir_ph == PH_IDLE && ir_fpgk != (fpg && fpk[10])) begin
 		$display("FAIL: decode: the FPU routine flag");
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nrst && rq_e != (rq_n == 3'd0)) begin
+		$display("FAIL: decode: the record FIFO's empty flag");
 		$finish;
 	end
 always_ff @(posedge clk)

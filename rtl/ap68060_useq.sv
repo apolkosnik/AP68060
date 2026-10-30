@@ -61,6 +61,7 @@ module ap68060_useq
 
 	// uop FIFO towards the back end: uq0 is the head
 	output logic  [1:0] uq_n,
+	output logic        uq_e,           // ... none (uq_n == 0), a register
 	output uop_t        uq0,
 	input  logic        uq_pop      // the back end takes uq0 this cycle
 );
@@ -202,16 +203,33 @@ assign uw = ub;
 // the words are written at the write pointer by D2c's emit, from registers
 (* ramstyle = "logic" *) uop_t ue [2];
 logic        uq_rp, uq_wp;
-// ... but the register numbers the back end reads its register file with
-// at once (A, B, the AG's base and index) are the head's own flip-flops,
-// the pop the last select (few of them: the late pop fans out little)
-logic  [4:0] h_areg, h_breg, h_base, h_idx;
+// ... but what the back end reads its register file with and interlocks
+// AG on at once (A, B, the AG's base and index and their valid bits, its
+// updates) are the head's own flip-flops, the pop the last select (few of
+// them: the late pop fans out little)
+typedef struct packed {
+	logic [4:0] a_reg, b_reg;
+	logic       base_v, idx_v;
+	logic [4:0] base, idx;
+	logic       upd_v, upd2_v;
+	logic [4:0] upd_reg, upd2_reg;
+} uhd_t;
+function automatic uhd_t uhd(input uop_t u);
+	uhd = {u.a_reg, u.b_reg, u.base_v, u.idx_v, u.base, u.idx, u.upd_v, u.upd2_v, u.upd_reg, u.upd2_reg};
+endfunction
+uhd_t        hd;
 always_comb begin
-	uq0        = uq_rp ? ue[1] : ue[0];
-	uq0.a_reg  = h_areg;
-	uq0.b_reg  = h_breg;
-	uq0.base   = h_base;
-	uq0.idx    = h_idx;
+	uq0          = uq_rp ? ue[1] : ue[0];
+	uq0.a_reg    = hd.a_reg;
+	uq0.b_reg    = hd.b_reg;
+	uq0.base_v   = hd.base_v;
+	uq0.idx_v    = hd.idx_v;
+	uq0.base     = hd.base;
+	uq0.idx      = hd.idx;
+	uq0.upd_v    = hd.upd_v;
+	uq0.upd2_v   = hd.upd2_v;
+	uq0.upd_reg  = hd.upd_reg;
+	uq0.upd2_reg = hd.upd2_reg;
 end
 wire         room_out = (uq_n != 2'd2);
 
@@ -1446,10 +1464,10 @@ always_ff @(posedge clk) begin
 		uop_t nh;
 		nh = (uq_n == 2'd2) ? (uq_rp ? ue[0] : ue[1]) : nu;
 		if (uq_pop && uq_n != 2'd0) begin
-			h_areg <= nh.a_reg; h_breg <= nh.b_reg; h_base <= nh.base; h_idx <= nh.idx;
+			hd <= uhd(nh);
 		end
 		else if (uq_n == 2'd0) begin
-			h_areg <= nu.a_reg; h_breg <= nu.b_reg; h_base <= nu.base; h_idx <= nu.idx;
+			hd <= uhd(nu);
 		end
 	end
 end
@@ -1476,6 +1494,7 @@ always_ff @(posedge clk) begin
 		mv_t11   <= 1'b0;
 		mv_fix   <= 2'd0;
 		uq_n     <= 2'd0;
+		uq_e     <= 1'b1;
 		uq_rp    <= 1'b0;
 		uq_wp    <= 1'b0;
 	end
@@ -1525,6 +1544,7 @@ always_ff @(posedge clk) begin
 		// stall, a late signal), which selects between them last
 		if (uq_pop && uq_n != 2'd0) uq_n <= emit ? uq_n : uq_n - 2'd1;
 		else                        uq_n <= emit ? uq_n + 2'd1 : uq_n;
+		uq_e <= (uq_pop && uq_n != 2'd0) ? (!emit && uq_n == 2'd1) : (!emit && uq_n == 2'd0);
 		if (emit) uq_wp <= !uq_wp;
 		if (uq_pop && uq_n != 2'd0) uq_rp <= !uq_rp;
 
@@ -1575,6 +1595,7 @@ always_ff @(posedge clk) begin
 			mv_t11 <= 1'b0;
 			mv_fix <= 2'd0;
 			uq_n  <= 2'd0;
+			uq_e  <= 1'b1;
 			uq_rp <= 1'b0;
 			uq_wp <= 1'b0;
 		end
@@ -1582,6 +1603,7 @@ always_ff @(posedge clk) begin
 			first    <= 1'b1;
 			ssp      <= exc_ssp;
 			uq_n     <= 2'd0;
+			uq_e     <= 1'b1;
 			uq_rp    <= 1'b0;
 			uq_wp    <= 1'b0;
 		end
@@ -1602,12 +1624,17 @@ always_ff @(posedge clk)
 		$display("FAIL: useq: a merged uop's displacement %h changed from %h", nu.disp, dbg_dpre);
 		$finish;
 	end
+always_ff @(posedge clk)
+	if (nrst && uq_e != (uq_n == 2'd0)) begin
+		$display("FAIL: useq: the uop FIFO's empty flag");
+		$finish;
+	end
 // the head's register numbers against the ring's word
 always_ff @(posedge clk) begin
 	uop_t h;
 	h = uq_rp ? ue[1] : ue[0];
-	if (nrst && uq_n != 2'd0 && {h_areg, h_breg, h_base, h_idx} != {h.a_reg, h.b_reg, h.base, h.idx}) begin
-		$display("FAIL: useq: the uop FIFO head's register numbers");
+	if (nrst && uq_n != 2'd0 && hd != uhd(h)) begin
+		$display("FAIL: useq: the uop FIFO head's own fields");
 		$finish;
 	end
 end

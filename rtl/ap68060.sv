@@ -286,6 +286,7 @@ logic  [7:0] dm_fvec;
 logic [31:0] dm_fslw, dm_st_fslw;
 
 logic  [1:0] uq_n;
+logic        rq_e, uq_e;      // the record / uop FIFO is empty (registers)
 uop_t        uq0;
 logic        uo_rdy;
 
@@ -342,7 +343,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.cdis(cdis), .mdis(mdis), .tw_busy(tw_busy),
 	// (an instruction-side table search waits for every older instruction:
 	// the back end and the decoded/sequenced queues empty)
-	.iw_req(iw_req), .iw_ok(be_idle && rq_n == 2'd0 && uq_n == 2'd0),
+	.iw_req(iw_req), .iw_ok(be_idle && rq_e && uq_e),
 	.iw_va(iw_va), .iw_fc2(iw_fc2), .iw_done(iw_done), .iw_ent(iw_ent),
 	.iw_cause(iw_cause),
 	.ic_inv(ic_inv), .ic_inv_scope(ic_inv_scope), .ic_inv_pa(ic_inv_pa),
@@ -449,7 +450,7 @@ ap68060_decode #(.LOOP_PRED(LOOP_PRED)) dec (
 	.smode(sr[13]),
 	.cs_fire(cs_fire), .cr_fire(cr_fire), .cr_use(cr_use),
 	.d_redir_v(d_redir_v), .d_redir_pc(d_redir_pc),
-	.rq_n(rq_n), .rq0(rq0), .rq1(rq1), .rq_pop(rq_pop),
+	.rq_n(rq_n), .rq_e(rq_e), .rq0(rq0), .rq1(rq1), .rq_pop(rq_pop),
 	.bht_we(bht_we), .bht_wa(bht_wa), .bht_dis(bht_dis),
 	.lp_we(lp_we), .lp_wa(lp_wa), .lp_tk(lp_tk), .lp_mp(lp_mp),
 	.btb_we(btb_we), .btb_wi(btb_wi), .btb_wv(btb_wv), .btb_wtag(btb_wtag),
@@ -462,7 +463,7 @@ ap68060_useq useq (
 	.rq_n(rq_n), .rq0(rq0), .rq1(rq1), .rq_pop(rq_pop),
 	.smode(sr[13]),
 	.exc_go(exc_go), .exc_kind(exc_kind), .exc_ssp(exc_ssp),
-	.uq_n(uq_n), .uq0(uq0), .uq_pop(uo_rdy && uq_n != 2'd0)
+	.uq_n(uq_n), .uq_e(uq_e), .uq0(uq0), .uq_pop(uo_rdy && uq_n != 2'd0)
 );
 
 endmodule
