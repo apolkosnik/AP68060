@@ -169,16 +169,13 @@ always_ff @(posedge clk) begin
 end
 logic       sb_hit;
 logic [1:0] sb_way;
+logic       sb_ovl;             // the tag write of this clock installs the line
 always_comb begin
-	sb_hit = sb_hit0;
-	sb_way = sb_way0;
-	if (sb_hit && ((dv_we && dv_set == sb_l[6:0] && dv_wm[sb_way] && !dv_lv) ||
-	               (dt_we && dt_set == sb_l[6:0] && dt_way == sb_way && dt_tag != sb_l[27:7])))
-		sb_hit = 1'b0;
-	if (dt_we && dt_set == sb_l[6:0] && dt_tag == sb_l[27:7]) begin
-		sb_hit = 1'b1;
-		sb_way = dt_way;
-	end
+	sb_ovl = dt_we && dt_set == sb_l[6:0] && dt_tag == sb_l[27:7];
+	sb_hit = sb_ovl || (sb_hit0 &&
+	         !((dv_we && dv_set == sb_l[6:0] && dv_wm[sb_way0] && !dv_lv) ||
+	           (dt_we && dt_set == sb_l[6:0] && dt_way == sb_way0 && dt_tag != sb_l[27:7])));
+	sb_way = sb_ovl ? dt_way : sb_way0;
 end
 wire sp_ask = sp_v && sp_hit && !sp_slow;
 
@@ -193,10 +190,17 @@ logic [$clog2(FQ):0] fn;
 logic        fq_ovf, dq_ovf;
 logic        sp_new;            // the registered hit, not queued yet
 assign dc_ovf = fq_ovf || dq_ovf;
+// (already queued: checked for both ways it can be, the registered hit's
+// and the tag write's, in parallel; the overlay picks last)
 always_comb begin
-	sp_new = sb_v && sb_hit && !sb_slow;
+	logic d0, dd;
+	d0 = 1'b0; dd = 1'b0;
 	for (int i = 0; i < FQ; i++)
-		if (i < fn && !(sf_ack && i == 0) && fq[i] == {sb_l[6:0], sb_way}) sp_new = 1'b0;
+		if (i < fn && !(sf_ack && i == 0) && fq[i][8:2] == sb_l[6:0]) begin
+			if (fq[i][1:0] == sb_way0) d0 = 1'b1;
+			if (fq[i][1:0] == dt_way)  dd = 1'b1;
+		end
+	sp_new = sb_v && sb_hit && !sb_slow && !(sb_ovl ? dd : d0);
 end
 // (entries now: the queue's, and the registered hit; the head is the
 // queue's first, else the registered hit's set and way)
