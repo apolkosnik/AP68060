@@ -226,6 +226,7 @@ endfunction
 //--------------------------------------------------------------------------
 logic        f_req, f_crwe, f_iawe, f_bsun, f_fmwe, f_rst;
 logic        f_rest_idle, f_uack, f_fsclr;
+logic        f_ukeep;         // ... an unimplemented instruction: the state kept
 logic  [2:0] f_class, f_fmt, f_srcr, f_dstr, f_fmsel;
 logic  [7:0] f_okvn;          // the FPU's register-ready flags, next cycle
 logic        f_aok, f_bok;    // ... of the next source and destination
@@ -275,7 +276,7 @@ ap040_fpu #(.PIPE(FPU_PIPE)) fpu (
 	.opmode_n(n_opm), .op_class_n(n_class), .src_fmt_n(n_fmt),
 	.fstate_et(f_xop), .frestore_idle(f_rest_idle),
 	.frestore_we(f_rwe), .frestore_wd({rs_w0, rs_w1, f_rwd}),
-	.unimp_ack(f_uack), .fs_clr(f_fsclr),
+	.unimp_ack(f_uack), .unimp_keep(f_ukeep), .fs_clr(f_fsclr),
 	.fp_reset(f_rst)
 );
 
@@ -798,7 +799,7 @@ always_ff @(posedge clk) begin
 		slot <= '0; mvr_wait <= 1'b0; crr_wait <= 1'b0; get_q <= '0;
 		sv_kind <= '0; sv_v <= '0; rs_kind <= '0; rs_v <= '0;
 		f_req <= 1'b0; f_crwe <= 1'b0; f_iawe <= 1'b0; f_bsun <= 1'b0; f_fmwe <= 1'b0; f_rst <= 1'b0;
-		f_rest_idle <= 1'b0; f_uack <= 1'b0; f_fsclr <= 1'b0;
+		f_rest_idle <= 1'b0; f_uack <= 1'b0; f_fsclr <= 1'b0; f_ukeep <= 1'b0;
 		f_class <= '0; f_fmt <= '0; f_srcr <= '0; f_dstr <= '0; f_fmsel <= '0; f_opm <= '0;
 		f_aok <= 1'b0; f_bok <= 1'b0;
 		f_din <= '0; f_dnice <= 1'b0; f_crsel <= '0; f_crwd <= '0; f_iapc <= '0;
@@ -807,7 +808,7 @@ always_ff @(posedge clk) begin
 	else begin
 		f_req <= 1'b0; f_crwe <= 1'b0; f_iawe <= 1'b0; f_bsun <= 1'b0; f_fmwe <= 1'b0;
 		f_rwe <= 1'b0;
-		f_rst <= 1'b0; f_rest_idle <= 1'b0; f_uack <= 1'b0; f_fsclr <= 1'b0;
+		f_rst <= 1'b0; f_rest_idle <= 1'b0; f_uack <= 1'b0; f_fsclr <= 1'b0; f_ukeep <= 1'b0;
 		fresh     <= 1'b0;
 
 		// a released operation: completion, or its exception pending for
@@ -885,13 +886,21 @@ always_ff @(posedge clk) begin
 						f_iawe <= 1'b1;
 						f_iapc <= pc;
 					end
+					// unimplemented, packed: the operand zero, and (not
+					// FMOVECR) the exception byte clear; a packed operand
+					// (an implemented instruction) also leaves the NULL state,
+					// an unimplemented instruction does not (MC68060UM 6.7:
+					// NULL "until the execution of an implemented
+					// floating-point instruction"; the M68060SP's
+					// _fpsp_unimp: "the !NULL bit does not get set in the
+					// fsave frame when the machine encounters an fp unimp
+					// exception"; WinUAE sets it, issue 3)
 					case (chk_k)
-						// unimplemented, packed: the IDLE state, the operand
-						// zero, and (not FMOVECR) the exception byte clear
-						K_UNIMP, K_PK: begin f_uack <= 1'b1; f_fsclr <= 1'b1; end
-						K_FMOVECR: f_uack <= 1'b1;
+						K_UNIMP: begin f_uack <= 1'b1; f_fsclr <= 1'b1; f_ukeep <= 1'b1; end
+						K_PK:    begin f_uack <= 1'b1; f_fsclr <= 1'b1; end
+						K_FMOVECR: begin f_uack <= 1'b1; f_ukeep <= 1'b1; end
 						K_UNIMPM, K_PKM: if (eal) begin
-							f_uack <= 1'b1; f_fsclr <= 1'b1;
+							f_uack <= 1'b1; f_fsclr <= 1'b1; f_ukeep <= (chk_k == K_UNIMPM);
 						end
 						else dfr <= chk_k;
 						default: ;
@@ -903,7 +912,9 @@ always_ff @(posedge clk) begin
 				eaa <= ea;
 				eav <= !ea_imm;
 				if (adv && dfr != K_NONE) begin
-					if (dfr != K_DFPM) begin f_uack <= 1'b1; f_fsclr <= 1'b1; end
+					if (dfr != K_DFPM) begin
+						f_uack <= 1'b1; f_fsclr <= 1'b1; f_ukeep <= (dfr == K_UNIMPM);
+					end
 					dfr    <= K_NONE;
 				end
 			end

@@ -83,7 +83,7 @@ cmd_t cmds [$];
 		.fm_sel(P``_fmsel), .fm_we(P``_fmwe), .fm_wdata(P``_fmwd), .fm_rdata(P``_fmrd), \
 		.fpu_used(), .pbusy(P``_pbusy), .pdone(P``_pdone), X \
 		.fstate_et(), .frestore_idle(1'b0), \
-		.unimp_ack(1'b0), .fs_clr(1'b0), \
+		.unimp_ack(1'b0), .unimp_keep(1'b0), .fs_clr(1'b0), \
 		.fp_reset(1'b0) \
 	);
 

@@ -108,6 +108,7 @@ module ap040_fpu
 	input      [79:0] frestore_wd,     // once every word is read: exponent, mantissa
 	input             unimp_ack,       // the core trapped an unimplemented instruction or
 	                                   // a packed operand: IDLE state, operand zero,
+	input             unimp_keep,      // ... an unimplemented instruction: the NULL state stays
 	input             fs_clr,          // and (not FMOVECR) the exception byte cleared
 	input             fp_reset     // FRESTORE of a NULL frame
 );
@@ -1300,7 +1301,7 @@ always @(posedge clk) begin
 		if (frestore_we) fstate_et <= {frestore_wd[79:64], 16'd0, frestore_wd[63:0]};
 		if (unimp_ack) begin
 			fstate_et <= 96'd0;
-			fpu_used  <= 1;
+			if (!unimp_keep) fpu_used <= 1;
 			if (fs_clr) fpsr[15:8] <= 8'd0;
 		end
 
