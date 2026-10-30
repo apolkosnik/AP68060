@@ -505,7 +505,9 @@ logic        tw_upd;              // the search updates an entry (first write: M
 logic  [3:0] tw_hw;               // ... in this way (the ATC's hit vector then)
 ap68060_atc #(.SAME_SEARCH(0)) datc (
 	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc[11]),
-	.la(steal ? st_la : m1.a), .fc2(steal ? st_fc2 : m1.smode),
+	// (the first port is the engine's alone: its stolen address; DC1 and
+	// DT look up through the second)
+	.la(st_la), .fc2(st_fc2),
 	.hit(atc_hit), .ent(atc_e), .hv(atc_hv), .wpa(atc_wpa),
 	// (the second port: DC1's lookup, or DT's while it looks up again)
 	.la_d(tk_relook ? mt.a : m1.a), .fc2_d(tk_relook ? mt.smode : m1.smode),
@@ -2039,7 +2041,10 @@ always_ff @(posedge clk) begin
 			iatc_flush_page <= 1'b1;
 			e_st <= E_M_DONE;
 		end
-		E_M_PLW: e_st <= E_M_PL2;       // the ATC reads the stolen address
+		E_M_PLW: begin                  // the ATC reads the stolen address
+			lk_hit <= atc_hit; lk_e <= atc_e; lk_hv <= atc_hv;
+			e_st   <= E_M_PL2;
+		end
 		E_M_PL2: begin
 			// PLPA (MC68060UM 4.7.3): a transparent translation (a TTR of
 			// the space, or no paged translation: the TCR's defaults)
@@ -2076,18 +2081,18 @@ always_ff @(posedge clk) begin
 				end
 				e_st <= E_M_DONE;
 			end
-			else if (!isp && atc_hit && atc_e.r && !atc_e.b && !(mt_wr && !atc_e.m)) begin
-				mt_pa <= {atc_e.pa[19:1], tc_p ? mt_addr[12] : atc_e.pa[0], mt_addr[11:0]};
-				if ((atc_e.s && !mt_fc[2]) || (mt_wr && atc_e.w)) begin
+			else if (!isp && lk_hit && lk_e.r && !lk_e.b && !(mt_wr && !lk_e.m)) begin
+				mt_pa <= {lk_e.pa[19:1], tc_p ? mt_addr[12] : lk_e.pa[0], mt_addr[11:0]};
+				if ((lk_e.s && !mt_fc[2]) || (mt_wr && lk_e.w)) begin
 					mt_fault <= 1'b1;
-					mt_fslw  <= mk_fslw((atc_e.s && !mt_fc[2]) ? FSLW_SP : FSLW_WP, 1'b0,
+					mt_fslw  <= mk_fslw((lk_e.s && !mt_fc[2]) ? FSLW_SP : FSLW_WP, 1'b0,
 					                    mt_wr ? 2'b01 : 2'b10, SZ_L, mt_fc);
 				end
 				e_st <= E_M_DONE;
 			end
 			else begin
 				tw_va <= mt_addr; tw_s <= mt_fc[2]; tw_wr <= mt_wr;
-				tw_pt <= 1'b1; tw_i <= isp; tw_upd <= !isp && atc_hit; tw_hw <= atc_hv;
+				tw_pt <= 1'b1; tw_i <= isp; tw_upd <= !isp && lk_hit; tw_hw <= lk_hv;
 				e_ret <= E_M_PLD;
 				e_st  <= E_TW_START;
 			end
