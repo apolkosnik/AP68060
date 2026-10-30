@@ -1256,8 +1256,18 @@ always_ff @(posedge clk) begin
 		logic       vp_lwe, vp_lv;       // valid: write, value
 		logic       vp_dwe, vp_dv;       // dirty: write, value
 		logic       m1s_n, mts_n, m2ss_n;   // m1_stale, mt_stale, m2_ss as they will be
+		// (its three writers, each with its own request: the WB store's
+		// fast path vf_*, the engine ve_*, the snoop port vs_*; combined
+		// below, never two at once)
+		logic [6:0] vf_set, ve_set, vs_set;
+		logic [3:0] vf_wm, ve_wm, vs_wm;
+		logic       vf_lwe, vf_lv, vf_dwe, vf_dv, ve_lwe, ve_lv, ve_dwe, ve_dv;
+		logic       vs_lwe, vs_lv, vs_dwe, vs_dv;
 		vp_set = '0; vp_wm = '0; vp_lwe = 1'b0; vp_lv = 1'b0;
 		vp_dwe = 1'b0; vp_dv = 1'b0;
+		vf_set = '0; vf_wm = '0; vf_lwe = 1'b0; vf_lv = 1'b0; vf_dwe = 1'b0; vf_dv = 1'b0;
+		ve_set = '0; ve_wm = '0; ve_lwe = 1'b0; ve_lv = 1'b0; ve_dwe = 1'b0; ve_dv = 1'b0;
+		vs_set = '0; vs_wm = '0; vs_lwe = 1'b0; vs_lv = 1'b0; vs_dwe = 1'b0; vs_dv = 1'b0;
 		m1s_n = m1_stale; mts_n = mt_stale; m2ss_n = m2_ss;
 
 		//--------------------------------------------------------------
@@ -1395,7 +1405,7 @@ always_ff @(posedge clk) begin
 			dw_be   <= wbf_be;
 			dw_src  <= 2'd0;
 			dw_word <= wbf_word;
-			vp_set = m4.x.pa[10:4]; vp_wm[m4.x.way] = 1'b1; vp_dwe = 1'b1; vp_dv = 1'b1;
+			vf_set = m4.x.pa[10:4]; vf_wm[m4.x.way] = 1'b1; vf_dwe = 1'b1; vf_dv = 1'b1;
 			// answered this cycle: kept only if WB does not move
 			st_rdy_r   <= !adv_wb;
 			st_fault_r <= 1'b0;
@@ -1408,7 +1418,7 @@ always_ff @(posedge clk) begin
 			dw_be   <= bmask(m4.r.a[3:0], wfs_n0);
 			dw_src  <= 2'd0;
 			dw_word <= lanes32(wfs_acc, m4.r.a[1:0]);
-			vp_set = m4.x.pa[10:4]; vp_wm[m4.x.way] = 1'b1; vp_dwe = 1'b1; vp_dv = 1'b1;
+			vf_set = m4.x.pa[10:4]; vf_wm[m4.x.way] = 1'b1; vf_dwe = 1'b1; vf_dv = 1'b1;
 			wfs_p1  <= 1'b1;
 		end
 		if (wfs_p1 && !sn_frz) begin
@@ -1420,7 +1430,7 @@ always_ff @(posedge clk) begin
 				dw_be   <= bmask(4'd0, nbytes(m4.r.msz) - wfs_n0);
 				dw_src  <= 2'd0;
 				dw_word <= lanes32(wfs_acc << (8 * wfs_n0), 2'd0);
-				vp_set = m4.x1.pa[10:4]; vp_wm[m4.x1.way] = 1'b1; vp_dwe = 1'b1; vp_dv = 1'b1;
+				vf_set = m4.x1.pa[10:4]; vf_wm[m4.x1.way] = 1'b1; vf_dwe = 1'b1; vf_dv = 1'b1;
 				st_rdy_r   <= !adv_wb;
 				st_fault_r <= 1'b0;
 				e_wst_done <= !adv_wb;
@@ -1664,8 +1674,8 @@ always_ff @(posedge clk) begin
 				// write replaces all of it) -- unless the data cache is
 				// disabled, which leaves its contents alone (5.3)
 				if (e_x.hit && dc_en) begin
-					vp_set = e_va[10:4]; vp_wm[e_x.way] = 1'b1;
-					vp_lwe = 1'b1; vp_lv = 1'b0; vp_dwe = 1'b1; vp_dv = 1'b0;
+					ve_set = e_va[10:4]; ve_wm[e_x.way] = 1'b1;
+					ve_lwe = 1'b1; ve_lv = 1'b0; ve_dwe = 1'b1; ve_dv = 1'b0;
 					e_x.hit <= 1'b0;
 				end
 				e_st <= E_S_NEXT;
@@ -1884,7 +1894,7 @@ always_ff @(posedge clk) begin
 				dw_word <= lanes32(e_acc, e_va[1:0]);
 				if (e_x.cm == 2'b01)
 					if (be != 16'd0) begin
-						vp_set = e_va[10:4]; vp_wm[e_x.way] = 1'b1; vp_dwe = 1'b1; vp_dv = 1'b1;
+						ve_set = e_va[10:4]; ve_wm[e_x.way] = 1'b1; ve_dwe = 1'b1; ve_dv = 1'b1;
 					end
 			end
 			if (wd_cb) begin
@@ -2000,8 +2010,8 @@ always_ff @(posedge clk) begin
 		end
 		E_M_CLR: begin
 			// every line invalid, a set a cycle (CINVA; and after reset)
-			vp_set = clr_i; vp_wm = 4'hF;
-			vp_lwe = 1'b1; vp_lv = 1'b0;
+			ve_set = clr_i; ve_wm = 4'hF;
+			ve_lwe = 1'b1; ve_lv = 1'b0;
 			clr_i <= clr_i + 7'd1;
 			if (clr_i == 7'd127) begin
 				clr_rst <= 1'b0;
@@ -2110,8 +2120,8 @@ always_ff @(posedge clk) begin
 			end
 			else begin
 				if (m && !(mt_op == MT_CPUSH && dc_dpi)) begin
-					vp_set = s; vp_wm[w] = 1'b1;
-					vp_lwe = 1'b1; vp_lv = 1'b0; vp_dwe = 1'b1; vp_dv = 1'b0;
+					ve_set = s; ve_wm[w] = 1'b1;
+					ve_lwe = 1'b1; ve_lv = 1'b0; ve_dwe = 1'b1; ve_dv = 1'b0;
 				end
 				if ((mt_scope == 2'd1 && w == 2'd3) || ms_i == 9'h1FF) e_st <= E_M_IC;
 				else begin
@@ -2171,8 +2181,8 @@ always_ff @(posedge clk) begin
 				pv_dirty <= 1'b1;
 				pv_tln   <= f_way;
 			end
-			vp_set = f_set; vp_wm[f_way] = 1'b1;
-			vp_lwe = 1'b1; vp_lv = 1'b0; vp_dwe = 1'b1; vp_dv = 1'b0;
+			ve_set = f_set; ve_wm[f_way] = 1'b1;
+			ve_lwe = 1'b1; ve_lv = 1'b0; ve_dwe = 1'b1; ve_dv = 1'b0;
 			bo.line <= 1'b1; bo.rd <= 1'b1; bo.tt <= TT_NORMAL;
 			bo.tm <= m2.r.smode ? TM_SDATA : TM_UDATA;
 			bo.upa <= e_x.upa; bo.ci <= 1'b0; bo.lock <= 1'b0; bo.locke <= 1'b0;
@@ -2193,8 +2203,8 @@ always_ff @(posedge clk) begin
 				tset_b  <= f_set;
 				tway_b  <= f_way;
 				twd_b   <= f_tag;
-				vp_set = f_set; vp_wm[f_way] = 1'b1;
-				vp_lwe = 1'b1; vp_lv = 1'b1; vp_dwe = 1'b1; vp_dv = 1'b0;
+				ve_set = f_set; ve_wm[f_way] = 1'b1;
+				ve_lwe = 1'b1; ve_lv = 1'b1; ve_dwe = 1'b1; ve_dv = 1'b0;
 				rrc <= rrc + 2'd1;
 			end
 			else if (pv_v) begin
@@ -2204,8 +2214,8 @@ always_ff @(posedge clk) begin
 				dw_way  <= f_way;
 				dw_be   <= 16'hFFFF;
 				dw_src  <= 2'd2;
-				vp_set = f_set; vp_wm[f_way] = 1'b1;
-				vp_lwe = 1'b1; vp_lv = 1'b1; vp_dwe = 1'b1; vp_dv = pv_dirty;
+				ve_set = f_set; ve_wm[f_way] = 1'b1;
+				ve_lwe = 1'b1; ve_lv = 1'b1; ve_dwe = 1'b1; ve_dv = pv_dirty;
 				pv_v <= 1'b0;
 			end
 			if (bo_err && fill_late_ok) begin
@@ -2276,8 +2286,8 @@ always_ff @(posedge clk) begin
 			end
 			else e_st <= e_sret;
 			// invalidated, or (pv_keep) left valid and clean
-			vp_set = f_set; vp_wm[f_way] = 1'b1;
-			vp_lwe = 1'b1; vp_lv = pv_keep && fv_lv; vp_dwe = 1'b1; vp_dv = 1'b0;
+			ve_set = f_set; ve_wm[f_way] = 1'b1;
+			ve_lwe = 1'b1; ve_lv = pv_keep && fv_lv; ve_dwe = 1'b1; ve_dv = 1'b0;
 		end
 		E_PUSHV_B: begin
 			bo.line <= 1'b1; bo.rd <= 1'b0; bo.tt <= TT_NORMAL; bo.tm <= TM_PUSH;
@@ -2691,7 +2701,7 @@ always_ff @(posedge clk) begin
 					dw_be   <= sn_wbe;
 					dw_src  <= 2'd0;
 					dw_word <= sn_wword;
-					vp_set = s; vp_wm[sn_way] = 1'b1; vp_dwe = 1'b1; vp_dv = 1'b1;
+					vs_set = s; vs_wm[sn_way] = 1'b1; vs_dwe = 1'b1; vs_dv = 1'b1;
 				end
 				2'd1: for (int i = 0; i < 16; i++)
 					if (sn_wbe[i]) pv_line[8*i +: 8] <= sn_wword[8*(i % 4) +: 8];
@@ -2713,8 +2723,8 @@ always_ff @(posedge clk) begin
 			iv_s = (sn_ph == SN_F) ? sf_set : sn_pa[10:4];
 			iv_w = (sn_ph == SN_F) ? sf_way : sn_way;
 			if (iv) begin
-				vp_set = iv_s; vp_wm[iv_w] = 1'b1;
-				vp_lwe = 1'b1; vp_lv = 1'b0; vp_dwe = 1'b1; vp_dv = 1'b0;
+				vs_set = iv_s; vs_wm[iv_w] = 1'b1;
+				vs_lwe = 1'b1; vs_lv = 1'b0; vs_dwe = 1'b1; vs_dv = 1'b0;
 				// (the records' hits on it: at the valid/dirty write port)
 			end
 		end
@@ -2732,6 +2742,26 @@ always_ff @(posedge clk) begin
 		// in DC2 or, if it moved on, in EX.  Its data was read before: a
 		// fast load completes with it, as if before the invalidation; a store
 		// must lose the hit, or WB would write the line it no longer has)
+		// the valid/dirty port's request: the snoop port's, else the
+		// engine's, else the WB store's (the engine is frozen while the
+		// snoop port holds the cache; the WB store writes with the engine
+		// idle and no snoop)
+		if (vs_lwe || vs_dwe) begin
+			vp_set = vs_set; vp_wm = vs_wm; vp_lwe = vs_lwe; vp_lv = vs_lv; vp_dwe = vs_dwe; vp_dv = vs_dv;
+		end
+		else if (ve_lwe || ve_dwe) begin
+			vp_set = ve_set; vp_wm = ve_wm; vp_lwe = ve_lwe; vp_lv = ve_lv; vp_dwe = ve_dwe; vp_dv = ve_dv;
+		end
+		else begin
+			vp_set = vf_set; vp_wm = vf_wm; vp_lwe = vf_lwe; vp_lv = vf_lv; vp_dwe = vf_dwe; vp_dv = vf_dv;
+		end
+		// synthesis translate_off
+		if (32'(vs_lwe || vs_dwe) + 32'(ve_lwe || ve_dwe) + 32'(vf_lwe || vf_dwe) > 1) begin
+			$display("FAIL: DMU: two writers of the valid/dirty port at once (snoop %b engine %b store %b)",
+			         vs_lwe || vs_dwe, ve_lwe || ve_dwe, vf_lwe || vf_dwe);
+			$finish;
+		end
+		// synthesis translate_on
 		dt_inv <= (vp_lwe && !vp_lv && adv_dt && mt.a[10:4] == vp_set) ? vp_wm : 4'd0;
 		if (dt_inv[m2.x.way] && m2.x.hit) begin
 			if (!adv_dc2) begin
