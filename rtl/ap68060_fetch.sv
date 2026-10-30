@@ -29,8 +29,11 @@
 //                                                                          //
 // Pipeline, one aligned long word (two words) per cycle -- D1 decodes at  //
 // most one instruction a cycle, and the queue absorbs long ones:         //
-//   F0  fpc: I-ATC and ITT lookup, cache tag and data RAM read, BTB read  //
-//   F1  translation, tag compare (the hit, one-hot per way, registered    //
+//   F0  fpc: I-ATC set read and per-way compare (its pipelined port, at  //
+//       a registered set index), ITT match, cache tag and data RAM read, //
+//       BTB read                                                           //
+//   F1  translation (the ATC's hit way), tag compare (the hit, one-hot    //
+//       per way, registered                                                //
 //       with each way's words); the BTB's compare, and a taken branch     //
 //       sends F0 to its target (one bubble)                                //
 //   F2  the hit's words (the way's, or the line buffer's); anything else  //
@@ -330,14 +333,21 @@ logic        rs_p1, rs_p2;      // a redirect's resynchronization, two clocks on
 logic        frw_q;             // the return stack's write, registered
 logic  [2:0] frwa_q;
 logic [30:0] frwd_q;
-logic        atc_hit;
-atce_t       atc_e;
+logic  [3:0] atc_hv;            // the lookup: each way's hit and entry
+atce_t       atc_went [4];
+logic  [3:0] atc_set;           // atc_la's set (TC.P picks the bits), registered
+logic        atc_hit1;          // (simulation: the first port's lookup, the
+atce_t       atc_e1;            // reference for the pipelined one)
+// the set of an address
+function automatic logic [3:0] atc_sx(input logic [31:0] a, input logic p8);
+	atc_sx = p8 ? a[16:13] : a[15:12];
+endfunction
 ap68060_atc #(.SAME_SEARCH(0)) iatc (
 	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc_q[10]),
 	.la(atc_la),
 	.fc2(atc_fc2),
-	.hit(atc_hit), .ent(atc_e), .hv(), .wpa(),
-	.la_d(32'd0), .fc2_d(1'b0), .set_d(4'd0), .hv_d(), .wpa_d(), .ent_d(),
+	.hit(atc_hit1), .ent(atc_e1), .hv(), .wpa(),   // (the first port: page flushes)
+	.la_d(atc_la), .fc2_d(atc_fc2), .set_d(atc_set), .hv_d(atc_hv), .wpa_d(), .ent_d(atc_went),
 	.wr(iatc_wr), .wla(iatc_wla), .wfc2(iatc_wfc2), .went(iatc_went),
 	.wsame(1'b0), .wsame_hv(4'd0),
 	.flush_all(fl_all_q), .flush_page(fl_pg_q),
@@ -413,11 +423,24 @@ logic        fspec;            // ... a predicted one (D1's, the BTB's)
 logic        f1_v;
 logic        f1_btok;           // F0 had room for a taken branch's target
 logic        f1_s, f1_dem, f1_spec;
+// (the I-ATC is looked up through its pipelined port: F0 reads the set,
+// at a registered set index, and compares each way's tag; F1 has every
+// way's hit and entry in flip-flops and picks the hit way)
+logic  [3:0] f1_hv;             // the ATC's ways that hit
+atce_t       f1_went [4];       // ... their entries
+logic        f1_wmok, f1_wmf;   // the page's last walk matches: translated / failed
 logic        f1_hit;
 atce_t       f1_ea, f1_ew;      // the ATC's entry, the page's last walk's
-logic        f1_ah;             // ... the ATC hit (F1 picks: off the lookup's path)
+logic        f1_ah;             // ... the ATC hit
 atce_t       f1_e;
 logic        f1_wff;            // the page's last walk failed
+always_comb begin
+	f1_ah = |f1_hv;
+	f1_ea = '0;
+	for (int w = 0; w < 4; w++) if (f1_hv[w]) f1_ea = f1_ea | f1_went[w];
+	f1_hit = f1_ah || f1_wmok;
+	f1_wff = !f1_ah && f1_wmf;
+end
 
 // F2: F1's outcome, registered
 logic        f2_v;
@@ -491,7 +514,8 @@ assign f1_e = f1_ah ? f1_ea : f1_ew;
 wire [20:0] f1_tg = {f1_e.pa[19:1], tc_p ? f1_pc[12] : f1_e.pa[0], f1_pc[11]};
 always_comb begin
 	logic tt0, tt1, use_t;
-	logic [20:0] tg_a, tg_w;
+	logic [20:0] tg_a [4];
+	logic [20:0] tg_w;
 	x_ok = 1'b0; x_flt = 1'b0; x_walk = 1'b0;
 	x_pa = f1_pc; x_cm = 2'b00; x_upa = 2'b00;
 	tt0 = f1_tt0;
@@ -523,14 +547,22 @@ always_comb begin
 	// (three compares apart: the logical address, the ATC entry's, the
 	// page's last walk's -- the entry select is not ahead of them either)
 	use_t  = !(tt0 || tt1) && f1_tce;
-	tg_a   = {f1_ea.pa[19:1], tc_p ? f1_pc[12] : f1_ea.pa[0], f1_pc[11]};
+	// (each ATC way's tag apart: the hit way picks the outcome)
 	tg_w   = {f1_ew.pa[19:1], tc_p ? f1_pc[12] : f1_ew.pa[0], f1_pc[11]};
-	for (int i = 0; i < 4; i++)
-		x_mj[i] = ivf_q[i] && (use_t ? (f1_ah ? (ct[i][20:0] == tg_a) : (ct[i][20:0] == tg_w))
+	for (int w = 0; w < 4; w++)
+		tg_a[w] = {f1_went[w].pa[19:1], tc_p ? f1_pc[12] : f1_went[w].pa[0], f1_pc[11]};
+	for (int i = 0; i < 4; i++) begin
+		logic [3:0] eqa;
+		for (int w = 0; w < 4; w++) eqa[w] = (ct[i][20:0] == tg_a[w]);
+		x_mj[i] = ivf_q[i] && (use_t ? (f1_ah ? |(f1_hv & eqa) : (ct[i][20:0] == tg_w))
 		                             : (ct[i][20:0] == f1_pc[31:11]));
-	x_lb   = x_cach && lb_v && (use_t ? (f1_ah ? (lb_pa == {tg_a, f1_pc[10:4]})
-	                                           : (lb_pa == {tg_w, f1_pc[10:4]}))
-	                                  : (lb_pa == f1_pc[31:4]));
+	end
+	begin
+		logic [3:0] lba;
+		for (int w = 0; w < 4; w++) lba[w] = (lb_pa == {tg_a[w], f1_pc[10:4]});
+		x_lb = x_cach && lb_v && (use_t ? (f1_ah ? |(f1_hv & lba) : (lb_pa == {tg_w, f1_pc[10:4]}))
+		                                : (lb_pa == f1_pc[31:4]));
+	end
 end
 
 // the BTB's taken branch: F0 goes to the target (a return's from the
@@ -868,6 +900,7 @@ always_ff @(posedge clk) begin
 		odd   <= 1'b0;
 		fpc   <= '0;
 		atc_la <= '0;
+		atc_set <= '0;
 		atc_fc2 <= 1'b0;
 		fnew  <= 1'b1;
 		fspec <= 1'b0;
@@ -875,10 +908,9 @@ always_ff @(posedge clk) begin
 		stop_q <= 1'b1;
 		stop_f <= 1'b1;
 		fl_all_q <= 1'b0; fl_pg_q <= 1'b0; fl_ng_q <= 1'b0;
-		f1_v  <= 1'b0; f1_pc <= '0; f1_s <= 1'b0; f1_dem <= 1'b0; f1_hit <= 1'b0;
-		f1_ea <= '0; f1_ew <= '0; f1_ah <= 1'b0;
+		f1_v  <= 1'b0; f1_pc <= '0; f1_s <= 1'b0; f1_dem <= 1'b0;
+		f1_hv <= '0; f1_ew <= '0; f1_wmok <= 1'b0; f1_wmf <= 1'b0;
 		f1_spec <= 1'b0;
-		f1_wff <= 1'b0;
 		f2_v  <= 1'b0; f2_btk <= 1'b0; f2_rop <= '0;
 		md_v  <= 1'b0;
 		wf_v  <= 1'b0; wf_ok <= 1'b0; wf_fc2 <= 1'b0; wf_la <= '0; wf_e <= '0;
@@ -926,6 +958,8 @@ always_ff @(posedge clk) begin
 		// F0's address, and the ATC's (fpc's copy, or a page flush's)
 		fpc         <= f1_tg0 ? {f1_t0, 1'b0} : f1_tg1 ? {f1_t1, 1'b0} : fpc_b;
 		atc_la      <= f1_ta0 ? {f1_t0, 1'b0} : f1_ta1 ? {f1_t1, 1'b0} : atc_b;
+		atc_set     <= f1_ta0 ? atc_sx({f1_t0, 1'b0}, tc_p) : f1_ta1 ? atc_sx({f1_t1, 1'b0}, tc_p) :
+		               atc_sx(atc_b, tc_p);
 		atc_fc2     <= smode;
 		fl_all_q    <= iatc_flush_all;
 		fl_pg_q     <= iatc_flush_page;
@@ -1000,11 +1034,11 @@ always_ff @(posedge clk) begin
 				logic  wm;
 				wm = wf_v && wf_fc2 == sm_q && wf_la[31:13] == fpc[31:13] &&
 				     (tc_p || wf_la[12] == fpc[12]);
-				f1_hit <= atc_hit || (wm && wf_ok);
-				f1_ea  <= atc_e;
-				f1_ew  <= wf_e;
-				f1_ah  <= atc_hit;
-				f1_wff <= !atc_hit && wm && !wf_ok;
+				f1_hv   <= atc_hv;
+				f1_went <= atc_went;
+				f1_ew   <= wf_e;
+				f1_wmok <= wm && wf_ok;
+				f1_wmf  <= wm && !wf_ok;
 			end
 			fnew   <= 1'b0;
 		end
@@ -1483,6 +1517,19 @@ always_ff @(posedge clk)
 		$display("FAIL: fetch: the count's thermometer %b, the count %0d", cth_q, cnt);
 		$finish;
 	end
+// the pipelined lookup against the one-port lookup of the same address
+logic  ref_v, ref_hit;
+atce_t ref_e;
+always_ff @(posedge clk) begin
+	ref_v   <= f0_go && (atc_set == atc_sx(atc_la, tc_p));   // (a TC.P change aside)
+	ref_hit <= atc_hit1;
+	ref_e   <= atc_e1;
+	if (nrst && ref_v && f1_v && (f1_ah != ref_hit || (ref_hit && f1_ea != ref_e))) begin
+		$display("FAIL: fetch: the I-ATC's pipelined lookup %b %h, the one-port lookup's %b %h",
+		         f1_ah, f1_ea, ref_hit, ref_e);
+		$finish;
+	end
+end
 always_ff @(posedge clk)
 	if (nreset && md_v && f2_v) begin
 		$display("FAIL: fetch: the miss engine's words with F2's");
