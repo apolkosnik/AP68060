@@ -738,6 +738,42 @@ pg_done:
         ; OVFL and UNFL are not changed: the M68060SP forms those
         fmove.l #0,fpsr
 
+;------------------------------------------------ unimplemented from NULL
+        ; an unimplemented instruction does not leave the NULL state
+        ; (MC68060UM 6.7: NULL until an implemented instruction; the
+        ; M68060SP's _fpsp_unimp: "the !NULL bit does not get set in the
+        ; fsave frame when the machine encounters an fp unimp exception"),
+        ; FMOVECR with its <ea> field 0 neither: the handler's FSAVE is a
+        ; NULL frame.  An implemented instruction then leaves it: IDLE.
+        ; (Last: the NULL frame's FRESTORE resets the FPU.)
+        lea     (XSTO).l,a0
+        clr.l   (a0)
+        clr.l   4(a0)
+        clr.l   8(a0)
+        frestore (a0)                  ; the NULL state
+        fsave   (FRAME).l
+        move.l  (FRAME).l,d0
+        check   d0,$00000000,620
+        move.l  (CNTFL).l,d6
+        move.l  #-1,(FRAME).l
+        fsin.x  fp0                    ; unimplemented: vector 11, format $2
+        move.l  (CNTFL).l,d0
+        sub.l   d6,d0
+        check   d0,1,621
+        move.l  (FRAME).l,d0
+        check   d0,$00000000,622
+        move.l  #-1,(FRAME).l
+        fmovecr #0,fp1                 ; the same
+        move.l  (CNTFL).l,d0
+        sub.l   d6,d0
+        check   d0,2,623
+        move.l  (FRAME).l,d0
+        check   d0,$00000000,624
+        fmove.l #1,fp0                 ; implemented: IDLE
+        fsave   (FRAME).l
+        move.l  (FRAME).l,d0
+        check   d0,$00006000,625
+
         check   sp,$e000,99
         move.w  #$600d,($f102).l
         bra.s   *
