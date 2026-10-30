@@ -93,12 +93,21 @@ module ap68060
 // the processor stays in reset for another 27 CLK cycles (7.13).
 logic [1:0] rst_q = 2'b00;
 logic [4:0] rst_hold = 5'd27;
+// The reset itself is a register, from the values the synchronizer and the
+// counter take (the same clocks as their compare), with a copy for the
+// back end and one for the DMU: each drives its own registers' resets.
+(* preserve *) logic nreset = 1'b0, nrst_be = 1'b0, nrst_dm = 1'b0;
 always_ff @(posedge clk) begin
-	if (bclk_en) rst_q <= {rst_q[0], rsti_n};
-	if (!rst_q[1])            rst_hold <= 5'd27;
-	else if (rst_hold != 5'd0) rst_hold <= rst_hold - 5'd1;
+	logic [1:0] q;
+	logic [4:0] h;
+	q = bclk_en ? {rst_q[0], rsti_n} : rst_q;
+	h = !rst_q[1] ? 5'd27 : (rst_hold != 5'd0) ? rst_hold - 5'd1 : 5'd0;
+	rst_q    <= q;
+	rst_hold <= h;
+	nreset   <= q[1] && (h == 5'd0);
+	nrst_be  <= q[1] && (h == 5'd0);
+	nrst_dm  <= q[1] && (h == 5'd0);
 end
-wire nreset = rst_q[1] && (rst_hold == 5'd0);
 
 // the special modes (7.14): IPL2-IPL0 and D15-D0 registered on the bus
 // clock edges while RSTI is asserted; the last one stands
@@ -280,7 +289,7 @@ logic        uo_rdy;
 
 ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
                   .PCR_REV(PCR_REV)) be (
-	.clk(clk), .nreset(nreset),
+	.clk(clk), .nreset(nrst_be),
 	.in_v(uq_n != 2'd0), .in_u(uq0), .in_rdy(uo_rdy),
 	.redir_v(redir_v), .redir_pc(redir_pc), .flush(flush), .fe_flush(fe_flush),
 	.ras_rv(ras_rv), .ras_rtp(ras_rtp), .ras_rn(ras_rn),
@@ -312,7 +321,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 );
 
 ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
-	.clk(clk), .nreset(nreset),
+	.clk(clk), .nreset(nrst_dm),
 	.adv_ag(adv_ag), .dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem),
 	.dm_msz(dm_msz), .dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke),
 	.dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .iack_lvl(iack_lvl),
