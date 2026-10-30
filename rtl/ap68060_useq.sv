@@ -63,6 +63,10 @@ module ap68060_useq
 	output logic  [1:0] uq_n,
 	output logic        uq_e,           // ... none (uq_n == 0), a register
 	output uop_t        uq0,
+	// the head's next base and index, for the back end's register-file
+	// selects: D2c's uop's (the head when the queue is empty, or is popped
+	// to it) and the queue's other word's (popped to with two queued)
+	output logic  [4:0] nx_b0, nx_i0, nx_b1, nx_i1,
 	input  logic        uq_pop      // the back end takes uq0 this cycle
 );
 
@@ -218,6 +222,10 @@ function automatic uhd_t uhd(input uop_t u);
 	uhd = {u.a_reg, u.b_reg, u.base_v, u.idx_v, u.base, u.idx, u.upd_v, u.upd2_v, u.upd_reg, u.upd2_reg};
 endfunction
 uhd_t        hd;
+assign nx_b0 = nu.base;
+assign nx_i0 = nu.idx;
+assign nx_b1 = uq_rp ? ue[0].base : ue[1].base;
+assign nx_i1 = uq_rp ? ue[0].idx  : ue[1].idx;
 always_comb begin
 	uq0          = uq_rp ? ue[1] : ue[0];
 	uq0.a_reg    = hd.a_reg;

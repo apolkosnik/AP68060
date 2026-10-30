@@ -286,6 +286,7 @@ logic  [7:0] dm_fvec;
 logic [31:0] dm_fslw, dm_st_fslw;
 
 logic  [1:0] uq_n;
+logic  [4:0] nx_b0, nx_i0, nx_b1, nx_i1;
 logic        rq_e, uq_e;      // the record / uop FIFO is empty (registers)
 uop_t        uq0;
 logic        uo_rdy;
@@ -293,7 +294,8 @@ logic        uo_rdy;
 ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
                   .PCR_REV(PCR_REV)) be (
 	.clk(clk), .nreset(nrst_be),
-	.in_v(uq_n != 2'd0), .in_u(uq0), .in_rdy(uo_rdy),
+	.in_v(uq_n != 2'd0), .in_u(uq0), .in_rdy(uo_rdy), .uq_n(uq_n),
+	.nx_b0(nx_b0), .nx_i0(nx_i0), .nx_b1(nx_b1), .nx_i1(nx_i1),
 	.redir_v(redir_v), .redir_pc(redir_pc), .flush(flush), .fe_flush(fe_flush),
 	.ras_rv(ras_rv), .ras_rtp(ras_rtp), .ras_rn(ras_rn),
 	.exc_go(exc_go), .exc_kind(exc_kind), .exc_ssp(exc_ssp),
@@ -463,7 +465,8 @@ ap68060_useq useq (
 	.rq_n(rq_n), .rq0(rq0), .rq1(rq1), .rq_pop(rq_pop),
 	.smode(sr[13]),
 	.exc_go(exc_go), .exc_kind(exc_kind), .exc_ssp(exc_ssp),
-	.uq_n(uq_n), .uq_e(uq_e), .uq0(uq0), .uq_pop(uo_rdy && uq_n != 2'd0)
+	.uq_n(uq_n), .uq_e(uq_e), .uq0(uq0), .nx_b0(nx_b0), .nx_i0(nx_i0), .nx_b1(nx_b1), .nx_i1(nx_i1),
+	.uq_pop(uo_rdy && uq_n != 2'd0)
 );
 
 endmodule

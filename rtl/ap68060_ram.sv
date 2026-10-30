@@ -128,8 +128,9 @@ module ap68060_rf #(
 	parameter int NW = 3,             // write ports (2 or 3): the later wins
 	parameter logic [NR-1:0] REGSEL = '0   // read ports whose bank select is
 	                                       // registered from next clock's
-	                                       // address: ran1 if rsel, else ran0
-	                                       // (rsel comes late: it picks last)
+	                                       // address: ran2 if rsel2, ran1 if
+	                                       // rsel1, else ran0 (the selects
+	                                       // come late and pick last)
 )(
 	input  logic        clk,
 	input  logic  [2:0] we,
@@ -139,7 +140,9 @@ module ap68060_rf #(
 	input  logic  [4:0] ra [NR],
 	input  logic  [4:0] ran0 [NR],
 	input  logic  [4:0] ran1 [NR],
-	input  logic [NR-1:0] rsel,
+	input  logic  [4:0] ran2 [NR],
+	input  logic [NR-1:0] rsel1,
+	input  logic [NR-1:0] rsel2,
 	output logic [31:0] rd [NR]
 );
 	logic [1:0]  lvt [32];
@@ -177,9 +180,20 @@ module ap68060_rf #(
 			if (we[w] && wa[w] == a) v = 2'(w);
 		nsel = v;
 	endfunction
+	// (the candidates kept as nodes: the late selects are the one level
+	// before the flip-flop)
+	(* keep *) logic [1:0] ns0 [NR], ns1 [NR], ns2 [NR];
+	always_comb
+		for (int r = 0; r < NR; r++) begin
+			ns0[r] = nsel(ran0[r]);
+			ns1[r] = nsel(ran1[r]);
+			ns2[r] = nsel(ran2[r]);
+		end
 	always_ff @(posedge clk)
 		for (int r = 0; r < NR; r++)
-			sel_q[r] <= rsel[r] ? nsel(ran1[r]) : nsel(ran0[r]);
+			sel_q[r] <= ({2{rsel2[r]}} & ns2[r]) |
+			            ({2{rsel1[r] && !rsel2[r]}} & ns1[r]) |
+			            ({2{!rsel1[r] && !rsel2[r]}} & ns0[r]);
 	// synthesis translate_off
 	always_ff @(posedge clk)
 		for (int w = 0; w < NW; w++)

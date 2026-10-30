@@ -38,6 +38,9 @@ module ap68060_backend
 	input  logic        in_v,
 	input  uop_t        in_u,
 	output logic        in_rdy,
+	input  logic  [1:0] uq_n,           // the sequencer's queue count, and the
+	input  logic  [4:0] nx_b0, nx_i0,   // head's next base/index candidates:
+	input  logic  [4:0] nx_b1, nx_i1,   // D2c's uop's, the queue's other word's
 
 	// redirect of the front end (registered)
 	output logic        redir_v,
@@ -472,26 +475,35 @@ assign ag_hold = ilk_q;
 // (ports 2-6 address registers whose next value is known: their bank
 // selects, and their front-or-back selects fsel_q, are registered from
 // next clock's address, rran; ports 0/1 address the sequencer's uop)
-// (two candidates each, the held address and the one loaded, the load
-// decision -- the stall chain -- picking last)
-logic [4:0] rran0 [7], rran1 [7];
-logic [6:0] rrsel;
-localparam logic [6:0] RSEL = 7'b1111100;
-ap68060_rf #(.NR(7), .REGSEL(RSEL)) rff (.clk(clk), .we(fwe), .wa(fwa), .woh(fwoh), .wd(fwd), .ra(rra), .ran0(rran0), .ran1(rran1), .rsel(rrsel), .rd(frd));
-ap68060_rf #(.NR(7), .NW(2), .REGSEL(RSEL)) rfb (.clk(clk), .we(bwe), .wa(bwa), .woh(bwoh), .wd(bwd), .ra(rra), .ran0(rran0), .ran1(rran1), .rsel(rrsel), .rd(brd));
+// (every port's address is a register whose next value is one of up to
+// three candidates: ports 0/1 the sequencer's head -- held, loaded from
+// D2c's uop, or from the queue's other word --, ports 2-4 AG's uop held
+// or loaded, 5/6 the skid's; the load decisions come late and pick last)
+logic [4:0] rran0 [7], rran1 [7], rran2 [7];
+logic [6:0] rrsel1, rrsel2;
+localparam logic [6:0] RSEL = 7'b1111111;
+ap68060_rf #(.NR(7), .REGSEL(RSEL)) rff (.clk(clk), .we(fwe), .wa(fwa), .woh(fwoh), .wd(fwd), .ra(rra),
+                                         .ran0(rran0), .ran1(rran1), .ran2(rran2), .rsel1(rrsel1), .rsel2(rrsel2), .rd(frd));
+ap68060_rf #(.NR(7), .NW(2), .REGSEL(RSEL)) rfb (.clk(clk), .we(bwe), .wa(bwa), .woh(bwoh), .wd(bwd), .ra(rra),
+                                                 .ran0(rran0), .ran1(rran1), .ran2(rran2), .rsel1(rrsel1), .rsel2(rrsel2), .rd(brd));
 // AG loads ain_u when it takes it (not under a flush); the skid loads the
-// sequencer's uop when AG does not take it
+// sequencer's uop when AG does not take it; the sequencer's head takes
+// D2c's uop when its queue is empty or pops its last word, the other
+// queued word when it pops with two queued (uq_pop = in_rdy && in_v)
 wire ag_ld = !flush && ag_take && ain_v;
 wire sk_ld = !flush && !sk_v && SKID && in_v && in_rdy && !ag_take;
-assign rrsel = {sk_ld, sk_ld, ag_ld, ag_ld, ag_ld, 2'b00};
-assign rran0[0] = in_u.base;        assign rran1[0] = in_u.base;
-assign rran0[1] = in_u.idx;         assign rran1[1] = in_u.idx;
-assign rran0[2] = ag_u.upd2_reg;    assign rran1[2] = ain_u.upd2_reg;
-assign rran0[3] = ag_u.a_reg;       assign rran1[3] = ain_u.a_reg;
-assign rran0[4] = ag_u.b_reg;       assign rran1[4] = ain_u.b_reg;
-assign rran0[5] = sk_u.base;        assign rran1[5] = in_u.base;
-assign rran0[6] = sk_u.idx;         assign rran1[6] = in_u.idx;
-// the front-valid bits as they will be (fv's next value), and ports 2-6's
+wire hd_nu = (uq_n == 2'd0) || (in_rdy && uq_n == 2'd1);
+wire hd_ue = in_rdy && (uq_n == 2'd2);
+assign rrsel1 = {sk_ld, sk_ld, ag_ld, ag_ld, ag_ld, hd_nu, hd_nu};
+assign rrsel2 = {2'b00, 3'b000, hd_ue, hd_ue};
+assign rran0[0] = in_u.base;        assign rran1[0] = nx_b0;            assign rran2[0] = nx_b1;
+assign rran0[1] = in_u.idx;         assign rran1[1] = nx_i0;            assign rran2[1] = nx_i1;
+assign rran0[2] = ag_u.upd2_reg;    assign rran1[2] = ain_u.upd2_reg;   assign rran2[2] = ag_u.upd2_reg;
+assign rran0[3] = ag_u.a_reg;       assign rran1[3] = ain_u.a_reg;      assign rran2[3] = ag_u.a_reg;
+assign rran0[4] = ag_u.b_reg;       assign rran1[4] = ain_u.b_reg;      assign rran2[4] = ag_u.b_reg;
+assign rran0[5] = sk_u.base;        assign rran1[5] = in_u.base;        assign rran2[5] = sk_u.base;
+assign rran0[6] = sk_u.idx;         assign rran1[6] = in_u.idx;         assign rran2[6] = sk_u.idx;
+// the front-valid bits as they will be (fv's next value), and the ports'
 // front-or-back selects from them
 logic [31:0] fv_n;
 logic  [6:0] fsel_q;
@@ -513,11 +525,20 @@ function automatic logic fvn_at(input logic [4:0] a);
 	for (int w = 0; w < 3; w++) if (fwe[w] && fwa[w] == a) v = 1'b1;
 	fvn_at = v && !fv_clr[0];
 endfunction
+(* keep *) logic [6:0] fs0, fs1, fs2;   // (the candidates kept: the selects pick last)
+always_comb
+	for (int r = 0; r < 7; r++) begin
+		fs0[r] = fvn_at(rran0[r]);
+		fs1[r] = fvn_at(rran1[r]);
+		fs2[r] = fvn_at(rran2[r]);
+	end
 always_ff @(posedge clk)
-	for (int r = 2; r < 7; r++) fsel_q[r] <= rrsel[r] ? fvn_at(rran1[r]) : fvn_at(rran0[r]);
+	for (int r = 0; r < 7; r++)
+		fsel_q[r] <= (rrsel2[r] & fs2[r]) | (rrsel1[r] & !rrsel2[r] & fs1[r]) |
+		             (!rrsel1[r] & !rrsel2[r] & fs0[r]);
 // synthesis translate_off
 always_ff @(posedge clk)
-	for (int r = 2; r < 7; r++)
+	for (int r = 0; r < 7; r++)
 		if (fsel_q[r] !== fv[rra[r]]) begin
 			$display("FAIL: read port %0d's registered front select %b, fv's %b (register %0d)", r, fsel_q[r], fv[rra[r]], rra[r]);
 			$finish;
@@ -534,8 +555,8 @@ assign rra[5] = sk_u.base;
 assign rra[6] = sk_u.idx;
 // AG's entering base and index from the file: front or back copy, the
 // skid's or the sequencer's (= ain_u's)
-wire [31:0] ain_fb = sk_vr ? (fsel_q[5] ? frd[5] : brd[5]) : (fv[in_u.base] ? frd[0] : brd[0]);
-wire [31:0] ain_fx = sk_vr ? (fsel_q[6] ? frd[6] : brd[6]) : (fv[in_u.idx]  ? frd[1] : brd[1]);
+wire [31:0] ain_fb = sk_vr ? (fsel_q[5] ? frd[5] : brd[5]) : (fsel_q[0] ? frd[0] : brd[0]);
+wire [31:0] ain_fx = sk_vr ? (fsel_q[6] ? frd[6] : brd[6]) : (fsel_q[1] ? frd[1] : brd[1]);
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && wb_commit && wb_dwe && wb_u.upd2_v) begin
