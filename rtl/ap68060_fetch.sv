@@ -584,11 +584,13 @@ end
 // (two words for each stage that may hold some, and the miss engine's)
 wire [4:0] inflight = {f1_v, 1'b0} + {f2_v || md_v, 1'b0} + {3'd0, f3_n} +
                       {3'd0, f4_n} + {3'd0, f5_n} + {3'd0, f6_n};
-// (registered: room_q, formed a clock ahead for each take and for F0
-// issuing or not; a stage that may hold words counts two)
+// (registered: room_q, formed a clock ahead for each take and for F1
+// receiving a fetch or not -- F0 issuing, the BTB's redirect not dropping
+// it -- from what the stages will hold: F2 F1's fetch unless F2 misses
+// (two words; the miss engine's), F3 F2's words, F4-F6 F3-F5's)
 logic      room_q;
 logic      m_setpc;            // the miss engine moves fpc on, a clock late
-wire [5:0] infl_b  = {f1_v || (st != S_RUN), 2'b00} + {f2_v || md_v, 2'b00} +
+wire [5:0] infl_b  = {(f1_v && !f2_miss) || (st != S_RUN), 2'b00} + {4'd0, o2_n} +
                      {4'd0, f3_n} + {4'd0, f4_n} + {4'd0, f5_n};
 logic [1:0] room_n [3];
 // the target FIFO cannot overflow: count the flagged words on their way
@@ -857,7 +859,7 @@ always_ff @(posedge clk) begin
 		cnt   <= qs_n[tsel].cnt;
 		qh    <= qs_n[tsel].qh;
 		fits_q  <= fits_n[tsel];
-		room_q  <= room_n[tsel][f0_go];
+		room_q  <= room_n[tsel][f0_go && !(f1_v && !f2_miss && f1_bt) && !f2_miss];
 		qfany_q <= qfany_n[tsel];
 		tq_n <= qs_n[tsel].tq_n;
 		f6_n  <= f5_n;
