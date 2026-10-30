@@ -266,6 +266,20 @@ endfunction
 // an operand selector's register terms (valid, source kind, register):
 // D2a forms them from the word and the record, D2b takes them as they are
 // (its immediates come by class: imm_cls)
+// an EA as an operand: its register, the immediate, the uop's memory
+// access, or (a register-only selector) none
+function automatic osel_t ea_os(input ea_t e, input logic [4:0] spr, input logic ronly);
+	osel_t o;
+	o     = '0;
+	o.v   = 1'b1;
+	o.src = OS_REG;
+	if (e.m == EM_DN) o.r = dreg(e.r);
+	else if (e.m == EM_AN) o.r = areg(e.r, spr);
+	else if (e.m == EM_IMM) o.src = OS_IMM;
+	else if (ronly) o.v = 1'b0;
+	else o.src = OS_MEM;
+	ea_os = o;
+endfunction
 function automatic osel_t osel(input logic [5:0] s, input dinst_t rc, input logic [4:0] spr,
                                input logic [4:0] sspr);
 	osel_t o;
@@ -274,15 +288,11 @@ function automatic osel_t osel(input logic [5:0] s, input dinst_t rc, input logi
 	o.src = OS_REG;
 	if (s >= 6'd40) o.r = 5'(s - 6'd25);
 	else case (s)
-		S_EA0, S_EA0R, S_EA1, S_EA1R: begin
-			ea_t e;
-			e = (s == S_EA0 || s == S_EA0R) ? rc.ea0 : rc.ea1;
-			if (e.m == EM_DN) o.r = dreg(e.r);
-			else if (e.m == EM_AN) o.r = areg(e.r, spr);
-			else if (e.m == EM_IMM) o.src = OS_IMM;
-			else if (s == S_EA0R || s == S_EA1R) o.v = 1'b0;
-			else o.src = OS_MEM;
-		end
+		// (each EA's terms from the record alone: the selector picks last)
+		S_EA0:   o = ea_os(rc.ea0, spr, 1'b0);
+		S_EA0R:  o = ea_os(rc.ea0, spr, 1'b1);
+		S_EA1:   o = ea_os(rc.ea1, spr, 1'b0);
+		S_EA1R:  o = ea_os(rc.ea1, spr, 1'b1);
 		S_DX:    o.r = dreg(rc.opw[11:9]);
 		S_DY:    o.r = dreg(rc.opw[2:0]);
 		S_AX:    o.r = areg(rc.opw[11:9], spr);

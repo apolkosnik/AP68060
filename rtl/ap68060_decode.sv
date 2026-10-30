@@ -794,6 +794,10 @@ always_ff @(posedge clk) begin
 						            win[fp1], win[3'(fp1 + 3'd1)], 16'd0, 16'd0, 16'd0);
 						e0.bd = 32'd0;
 						e1.bd = 32'd0;
+						// (brief extensions only: no full-format fields --
+						// kept off the words' selection by b and p1)
+						e0.od = 32'd0; e0.bs = 1'b0; e0.is = 1'b0; e0.mi = 2'd0;
+						e1.od = 32'd0; e1.bs = 1'b0; e1.is = 1'b0; e1.mi = 2'd0;
 						f0  = 1'b1;
 						f1  = 1'b1;
 						pc0 = (pd0.i0 == EM_PC16) || (pd0.i0 == EM_PCX && !e0.bs);
