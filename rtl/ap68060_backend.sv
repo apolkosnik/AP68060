@@ -518,7 +518,7 @@ end
 // flip-flops (ex_a/ex_b keep the register operands as they were)
 logic [31:0] ex_av, ex_bv;
 
-logic [31:0] alu_res;
+logic [31:0] alu_res, alu_sum;
 logic  [4:0] alu_flags;
 logic        alu_cc, alu_trap;
 
@@ -526,7 +526,7 @@ ap68060_alu alu (
 	.op(ex_u.op), .sz(ex_u.sz), .cond(ex_u.cond),
 	.a(ex_av), .b(ex_bv), .ea(ex_ea),
 	.flags_in(ccr_f),
-	.res(alu_res), .flags_out(alu_flags),
+	.res(alu_res), .res_sum(alu_sum), .flags_out(alu_flags),
 	.cc_true(alu_cc), .trap(alu_trap)
 );
 
@@ -1086,7 +1086,7 @@ logic        cas_cc, cas_tr;
 ap68060_alu cas_alu (
 	.op(OP_CMP), .sz(ex_u.sz), .cond(4'd0),
 	.a(cas_dc_m), .b(ex_bv), .ea(32'd0), .flags_in(ccr_f),
-	.res(cas_res), .flags_out(cas_flags), .cc_true(cas_cc), .trap(cas_tr)
+	.res(cas_res), .res_sum(), .flags_out(cas_flags), .cc_true(cas_cc), .trap(cas_tr)
 );
 wire cas_eq = cas_flags[2];
 
@@ -1200,10 +1200,81 @@ wire        exw_fw  = exw_v;
 assign exw_reg = ex_u.d_reg;
 // DC2's operands as they enter EX: EX's broadcast of this cycle, then the
 // load data and A's sign extension (ex_av, ex_bv)
-wire [31:0] dc2_af  = (exw_fw && dc2_u.a_src == OS_REG && dc2_u.a_reg == exw_reg) ? exw_val : dc2_a;
-wire [31:0] dc2_bf  = (exw_fw && dc2_u.b_src == OS_REG && dc2_u.b_reg == exw_reg) ? exw_val : dc2_b;
+// (whether EX's uop writes a DC2 operand's register is known before EX's
+// result: EX's uop only changes when DC2 moves into it or leaves it empty,
+// so the compare is made as the uop enters DC2 and registered, mx_a/mx_b)
+logic       mx_a, mx_b;
+wire [31:0] dc2_af  = (exw_fw && mx_a) ? exw_val : dc2_a;
+wire [31:0] dc2_bf  = (exw_fw && mx_b) ? exw_val : dc2_b;
+always_ff @(posedge clk) begin
+	if (adv_dt) begin
+		// the uop EX holds next cycle: DC2's if it moves on, else EX's own
+		// if it stays
+		logic nv;
+		uop_t nu;
+		nv = adv_dc2 ? dc2_v : (ex_v && stall_ex);
+		nu = adv_dc2 ? dc2_u : ex_u;
+		mx_a <= dt_u.a_src == OS_REG && nv && nu.d_v && nu.d_reg == dt_u.a_reg;
+		mx_b <= dt_u.b_src == OS_REG && nv && nu.d_v && nu.d_reg == dt_u.b_reg;
+	end
+	else if (adv_ex || !ex_v) begin
+		mx_a <= 1'b0;
+		mx_b <= 1'b0;
+	end
+end
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && dc2_v && !flush &&
+	    (mx_a != (dc2_u.a_src == OS_REG && ex_v && ex_u.d_v && ex_u.d_reg == dc2_u.a_reg) ||
+	     mx_b != (dc2_u.b_src == OS_REG && ex_v && ex_u.d_v && ex_u.d_reg == dc2_u.b_reg))) begin
+		$display("FAIL: DC2's EX-writer flags %b%b disagree (pc %h)", mx_a, mx_b, dc2_u.pc);
+		$finish;
+	end
+// synthesis translate_on
 wire [31:0] dc2_av0 = (dc2_u.a_src == OS_MEM) ? dm_ldata : dc2_af;
-assign exw_val = (ex_u.op == OP_CAS) ? ((ex_bv & ex_szm) | (ex_latch & ~ex_szm)) : ex_res;
+// EX's result, as one flat select of its sources, the one-hot selects
+// registered as the uop enters EX (ex_rs): the adder's sum, which comes
+// last, passes one AND-OR, not the chain of the ALU's case, the op's case,
+// the slow ops' and CAS's multiplexers (checked against that chain)
+logic [10:0] ex_rs;
+localparam int RS_SUM = 0, RS_ALU = 1, RS_SLOW = 2, RS_FP = 3, RS_MD = 4, RS_MDLO = 5,
+               RS_MDREM = 6, RS_BV = 7, RS_AV = 8, RS_BFSET = 9, RS_CAS = 10;
+function automatic logic [10:0] rsel(input uop_t u);
+	logic [10:0] r;
+	r = '0;
+	if (nphase(u.op) != 2'd0) r[RS_SLOW] = 1'b1;
+	else case (u.op)
+		OP_ADD, OP_SUB, OP_ADDX, OP_SUBX, OP_NEGX, OP_NEG: r[RS_SUM] = 1'b1;
+		OP_FPU:            r[RS_FP]    = 1'b1;
+		OP_MUL, OP_DIV:    r[RS_MD]    = 1'b1;
+		OP_MDRES:          if (u.cond[0]) r[RS_MDLO] = 1'b1; else r[RS_MDREM] = 1'b1;
+		OP_CCRLOG:         r[RS_BV]    = 1'b1;
+		OP_SPW, OP_LATCH:  r[RS_AV]    = 1'b1;
+		OP_BFSET:          r[RS_BFSET] = 1'b1;
+		OP_CAS:            r[RS_CAS]   = 1'b1;
+		default:           r[RS_ALU]   = 1'b1;
+	endcase
+	rsel = r;
+endfunction
+always_comb begin
+	logic [31:0] bfs;
+	bfs = ex_u.cond[0] ? {24'd0, bf_lonew} : {{3{ex_av[31]}}, ex_av[31:3]};
+	exw_val = ({32{ex_rs[RS_SUM]}}   & alu_sum)   | ({32{ex_rs[RS_ALU]}}   & alu_res)  |
+	          ({32{ex_rs[RS_SLOW]}}  & xs_q.res)  | ({32{ex_rs[RS_FP]}}    & fp_res)   |
+	          ({32{ex_rs[RS_MD]}}    & md_q_res)  | ({32{ex_rs[RS_MDLO]}}  & md_lol)   |
+	          ({32{ex_rs[RS_MDREM]}} & md_rem)    | ({32{ex_rs[RS_BV]}}    & ex_bv)    |
+	          ({32{ex_rs[RS_AV]}}    & ex_av)     | ({32{ex_rs[RS_BFSET]}} & bfs)      |
+	          ({32{ex_rs[RS_CAS]}}   & ((ex_bv & ex_szm) | (ex_latch & ~ex_szm)));
+end
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && ex_fin && ex_u.d_v &&
+	    exw_val != ((ex_u.op == OP_CAS) ? ((ex_bv & ex_szm) | (ex_latch & ~ex_szm)) : ex_res)) begin
+		$display("FAIL: EX's flat result %h, the case chain gives %h (op %0d, pc %h)", exw_val,
+		         (ex_u.op == OP_CAS) ? ((ex_bv & ex_szm) | (ex_latch & ~ex_szm)) : ex_res, ex_u.op, ex_u.pc);
+		$finish;
+	end
+// synthesis translate_on
 
 //--------------------------------------------------------------------------
 // WB
@@ -1651,6 +1722,7 @@ always_ff @(posedge clk) begin
 		if (adv_dc2) begin
 			ex_u     <= dc2_u;
 			ex_npc   <= dc2_u.pc + {27'd0, dc2_u.ilen, 1'b0};
+			ex_rs    <= rsel(dc2_u);
 			ex_kc    <= {dc2_u.op == OP_DBCC, dc2_u.op == OP_MDRES, dc2_u.op == OP_DIV,
 			             dc2_u.op == OP_FPU};
 			ex_a     <= dc2_af;

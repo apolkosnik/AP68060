@@ -29,6 +29,8 @@ module ap68060_alu
 	input  logic [31:0] ea,
 	input  logic  [4:0] flags_in,   // X N Z V C
 	output logic [31:0] res,
+	output logic [31:0] res_sum,    // the adder's result merged at the size (ADD SUB
+	                                // ADDX SUBX NEGX NEG): the late one, for a flat select
 	output logic  [4:0] flags_out,
 	output logic        cc_true,    // cond evaluated on flags_in
 	output logic        trap        // CHK / CHK2 / TRAPcc exception
@@ -129,6 +131,7 @@ wire        l_msb  = b_zero ? 1'b0  : b_msb;
 wire        r_msb  = b_zero ? b_msb : a_msb;
 wire        sum_v  = is_sub ? ((l_msb != r_msb) && (sum_n != l_msb))
                             : ((l_msb == r_msb) && (sum_n != l_msb));
+assign      res_sum = merge(sum[31:0], b, szmask);
 
 //--------------------------------------------------------------------------
 // bit operations: a holds the bit number, already reduced mod 32 (register)
