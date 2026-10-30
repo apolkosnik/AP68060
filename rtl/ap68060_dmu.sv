@@ -968,6 +968,21 @@ function automatic logic [31:0] grab(input logic [31:0] d, input logic [2:0] n,
 	endcase
 endfunction
 
+// a record's hit is cleared by this clock's invalidation of its line: the
+// snoop port's, or the engine's by source -- E_S_ACT's line (e_va, e_x's
+// way), the clear sweep's set (clr_i, every way), the scan's (ms_i), the
+// push's (f_set, f_way) -- each compared from its own registers, not after
+// the port's set select (checked against it)
+function automatic logic hitc(input logic [6:0] st, input logic [1:0] wy,
+                              input logic vsi, input logic [6:0] vss, input logic [3:0] vsw,
+                              input logic [3:0] vei);
+	hitc = (vsi && vss == st && vsw[wy]) ||
+	       (vei[0] && e_va[10:4] == st && e_x.way == wy) ||
+	       (vei[1] && clr_i == st) ||
+	       (vei[2] && ms_i[8:2] == st && ms_i[1:0] == wy) ||
+	       (vei[3] && f_set == st && f_way == wy);
+endfunction
+
 // the victim way of a set: the first invalid way, else the counter
 function automatic logic [1:0] victim(input logic [3:0] valid, input logic [1:0] rr,
                                       input logic half);
@@ -1361,11 +1376,13 @@ always_ff @(posedge clk) begin
 		logic [3:0] vf_wm, ve_wm, vs_wm;
 		logic       vf_lwe, vf_lv, vf_dwe, vf_dv, ve_lwe, ve_lv, ve_dwe, ve_dv;
 		logic       vs_lwe, vs_lv, vs_dwe, vs_dv;
+		logic [3:0] ve_inv;             // the engine's invalidation, by source (the records' hit clears)
 		vp_set = '0; vp_wm = '0; vp_lwe = 1'b0; vp_lv = 1'b0;
 		vp_dwe = 1'b0; vp_dv = 1'b0;
 		vf_set = '0; vf_wm = '0; vf_lwe = 1'b0; vf_lv = 1'b0; vf_dwe = 1'b0; vf_dv = 1'b0;
 		ve_set = '0; ve_wm = '0; ve_lwe = 1'b0; ve_lv = 1'b0; ve_dwe = 1'b0; ve_dv = 1'b0;
 		vs_set = '0; vs_wm = '0; vs_lwe = 1'b0; vs_lv = 1'b0; vs_dwe = 1'b0; vs_dv = 1'b0;
+		ve_inv = 4'd0;
 		m1s_n = m1_stale; mts_n = mt_stale; m2ss_n = m2_ss;
 
 		//--------------------------------------------------------------
@@ -1801,6 +1818,7 @@ always_ff @(posedge clk) begin
 				if (e_x.hit && dc_en) begin
 					ve_set = e_va[10:4]; ve_wm[e_x.way] = 1'b1;
 					ve_lwe = 1'b1; ve_lv = 1'b0; ve_dwe = 1'b1; ve_dv = 1'b0;
+					ve_inv[0] = 1'b1;
 					e_x.hit <= 1'b0;
 				end
 				e_st <= E_S_NEXT;
@@ -2141,6 +2159,7 @@ always_ff @(posedge clk) begin
 			// every line invalid, a set a cycle (CINVA; and after reset)
 			ve_set = clr_i; ve_wm = 4'hF;
 			ve_lwe = 1'b1; ve_lv = 1'b0;
+			ve_inv[1] = 1'b1;
 			clr_i <= clr_i + 7'd1;
 			if (clr_i == 7'd127) begin
 				clr_rst <= 1'b0;
@@ -2269,6 +2288,7 @@ always_ff @(posedge clk) begin
 				if (m && !(mt_op == MT_CPUSH && dc_dpi)) begin
 					ve_set = s; ve_wm[w] = 1'b1;
 					ve_lwe = 1'b1; ve_lv = 1'b0; ve_dwe = 1'b1; ve_dv = 1'b0;
+					ve_inv[2] = 1'b1;           // (s, w: ms_i)
 				end
 				if ((mt_scope == 2'd1 && w == 2'd3) || ms_i == 9'h1FF) e_st <= E_M_IC;
 				else begin
@@ -2435,6 +2455,7 @@ always_ff @(posedge clk) begin
 			// invalidated, or (pv_keep) left valid and clean
 			ve_set = f_set; ve_wm[f_way] = 1'b1;
 			ve_lwe = 1'b1; ve_lv = pv_keep && fv_lv; ve_dwe = 1'b1; ve_dv = 1'b0;
+			ve_inv[3] = !(pv_keep && fv_lv);
 		end
 		E_PUSHV_B: begin
 			bo.line <= 1'b1; bo.rd <= 1'b0; bo.tt <= TT_NORMAL; bo.tm <= TM_PUSH;
@@ -2937,42 +2958,61 @@ always_ff @(posedge clk) begin
 			// (the engine taking the access this cycle copies its record)
 			if (e_st == E_S_START && !sn_frz) e_x.hit <= 1'b0;
 		end
-		if (iv_v) begin
-			for (int j = 0; j < 4; j++) if (iv_wm[j]) begin
-				if (!adv_dt) begin
-					if (m2.x.hit && m2.x.pa[10:4] == iv_set && m2.x.way == 2'(j)) begin
-						xres_t xm;
-						xm = m2.x;
-						xm.hit = 1'b0;
-						m2.x.hit <= 1'b0;
-						m2ss_n   = st_simp(m2.r, xm, m2.split);
-					end
-					if (m2.x1.hit && m2.x1.pa[10:4] == iv_set && m2.x1.way == 2'(j)) m2.x1.hit <= 1'b0;
-				end
-				if (adv_dc2) begin
-					if (m2.x.hit && m2.x.pa[10:4] == iv_set && m2.x.way == 2'(j)) m3.x.hit <= 1'b0;
-					if (m2.x1.hit && m2.x1.pa[10:4] == iv_set && m2.x1.way == 2'(j)) m3.x1.hit <= 1'b0;
-				end
-				else begin
-					if (m3.x.hit && m3.x.pa[10:4] == iv_set && m3.x.way == 2'(j)) m3.x.hit <= 1'b0;
-					if (m3.x1.hit && m3.x1.pa[10:4] == iv_set && m3.x1.way == 2'(j)) m3.x1.hit <= 1'b0;
-				end
-				if (adv_ex) begin
-					if (m3.x.hit && m3.x.pa[10:4] == iv_set && m3.x.way == 2'(j)) begin
-						m4.x.hit <= 1'b0;
-						m4_fq    <= 1'b0;
-					end
-					if (m3.x1.hit && m3.x1.pa[10:4] == iv_set && m3.x1.way == 2'(j)) m4.x1.hit <= 1'b0;
-				end
-				else begin
-					if (m4.x.hit && m4.x.pa[10:4] == iv_set && m4.x.way == 2'(j)) begin
-						m4.x.hit <= 1'b0;
-						m4_fq    <= 1'b0;
-					end
-					if (m4.x1.hit && m4.x1.pa[10:4] == iv_set && m4.x1.way == 2'(j)) m4.x1.hit <= 1'b0;
-				end
-				if (e_x.hit && e_x.pa[10:4] == iv_set && e_x.way == 2'(j)) e_x.hit <= 1'b0;
+		begin
+			logic vsi, c2, c21, c3, c31, c4, c41, ce;
+			vsi = vs_lwe && !vs_lv;
+			c2  = m2.x.hit  && hitc(m2.x.pa[10:4],  m2.x.way,  vsi, vs_set, vs_wm, ve_inv);
+			c21 = m2.x1.hit && hitc(m2.x1.pa[10:4], m2.x1.way, vsi, vs_set, vs_wm, ve_inv);
+			c3  = m3.x.hit  && hitc(m3.x.pa[10:4],  m3.x.way,  vsi, vs_set, vs_wm, ve_inv);
+			c31 = m3.x1.hit && hitc(m3.x1.pa[10:4], m3.x1.way, vsi, vs_set, vs_wm, ve_inv);
+			c4  = m4.x.hit  && hitc(m4.x.pa[10:4],  m4.x.way,  vsi, vs_set, vs_wm, ve_inv);
+			c41 = m4.x1.hit && hitc(m4.x1.pa[10:4], m4.x1.way, vsi, vs_set, vs_wm, ve_inv);
+			ce  = e_x.hit   && hitc(e_x.pa[10:4],   e_x.way,   vsi, vs_set, vs_wm, ve_inv);
+			// synthesis translate_off
+			if (c2  != (iv_v && m2.x.hit  && m2.x.pa[10:4]  == iv_set && iv_wm[m2.x.way]) ||
+			    c21 != (iv_v && m2.x1.hit && m2.x1.pa[10:4] == iv_set && iv_wm[m2.x1.way]) ||
+			    c3  != (iv_v && m3.x.hit  && m3.x.pa[10:4]  == iv_set && iv_wm[m3.x.way]) ||
+			    c31 != (iv_v && m3.x1.hit && m3.x1.pa[10:4] == iv_set && iv_wm[m3.x1.way]) ||
+			    c4  != (iv_v && m4.x.hit  && m4.x.pa[10:4]  == iv_set && iv_wm[m4.x.way]) ||
+			    c41 != (iv_v && m4.x1.hit && m4.x1.pa[10:4] == iv_set && iv_wm[m4.x1.way]) ||
+			    ce  != (iv_v && e_x.hit   && e_x.pa[10:4]   == iv_set && iv_wm[e_x.way])) begin
+				$display("FAIL: DMU: a record's hit clear by source disagrees with the invalidation select");
+				$finish;
 			end
+			// synthesis translate_on
+			if (!adv_dt) begin
+				if (c2) begin
+					xres_t xm;
+					xm = m2.x;
+					xm.hit = 1'b0;
+					m2.x.hit <= 1'b0;
+					m2ss_n   = st_simp(m2.r, xm, m2.split);
+				end
+				if (c21) m2.x1.hit <= 1'b0;
+			end
+			if (adv_dc2) begin
+				if (c2)  m3.x.hit  <= 1'b0;
+				if (c21) m3.x1.hit <= 1'b0;
+			end
+			else begin
+				if (c3)  m3.x.hit  <= 1'b0;
+				if (c31) m3.x1.hit <= 1'b0;
+			end
+			if (adv_ex) begin
+				if (c3) begin
+					m4.x.hit <= 1'b0;
+					m4_fq    <= 1'b0;
+				end
+				if (c31) m4.x1.hit <= 1'b0;
+			end
+			else begin
+				if (c4) begin
+					m4.x.hit <= 1'b0;
+					m4_fq    <= 1'b0;
+				end
+				if (c41) m4.x1.hit <= 1'b0;
+			end
+			if (ce) e_x.hit <= 1'b0;
 		end
 		end
 
