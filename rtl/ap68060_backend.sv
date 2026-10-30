@@ -1347,6 +1347,11 @@ wire        ex_fin  = ex_v && !ex_hold;
 assign exw_v   = ex_fin && ex_d_eff;
 wire        exw_ag  = exw_v;
 wire        exw_fw  = exw_v;
+// (the stages' captures of it from their own copies, kept: one net to the
+// file, the FPU's hold inside, fanned out to three stages' operands too far)
+(* keep *) wire exw_f1 = ex_v && !ex_hold && ex_d_eff;
+(* keep *) wire exw_f2 = ex_v && !ex_hold && ex_d_eff;
+(* keep *) wire exw_f3 = ex_v && !ex_hold && ex_d_eff;
 assign exw_reg = ex_u.d_reg;
 // DC2's operands as they enter EX: EX's broadcast of this cycle, then the
 // load data and A's sign extension (ex_av, ex_bv)
@@ -2019,11 +2024,11 @@ always_ff @(posedge clk) begin
 		end
 		if (!stall_dc1) dc1_v <= adv_ag;
 		else begin
-			if (exw_fw && dc1_u.a_src == OS_REG && dc1_u.a_reg == exw_reg) dc1_a <= exw_val;
-			if (exw_fw && dc1_u.b_src == OS_REG && dc1_u.b_reg == exw_reg) dc1_b <= exw_val;
+			if (exw_f1 && dc1_u.a_src == OS_REG && dc1_u.a_reg == exw_reg) dc1_a <= exw_val;
+			if (exw_f1 && dc1_u.b_src == OS_REG && dc1_u.b_reg == exw_reg) dc1_b <= exw_val;
 		end
 		// snoop into the uop entering DC1
-		if (adv_ag && exw_fw) begin
+		if (adv_ag && exw_f1) begin
 			if (ag_u.a_src == OS_REG && ag_u.a_reg == exw_reg) dc1_a <= exw_val;
 			if (ag_u.b_src == OS_REG && ag_u.b_reg == exw_reg) dc1_b <= exw_val;
 		end
@@ -2033,13 +2038,13 @@ always_ff @(posedge clk) begin
 		//------------------------------------------------------------------
 		if (adv_dc1) begin
 			dt_u    <= dc1_u;
-			dt_a    <= (exw_fw && dc1_u.a_src == OS_REG && dc1_u.a_reg == exw_reg) ? exw_val : dc1_a;
-			dt_b    <= (exw_fw && dc1_u.b_src == OS_REG && dc1_u.b_reg == exw_reg) ? exw_val : dc1_b;
+			dt_a    <= (exw_f2 && dc1_u.a_src == OS_REG && dc1_u.a_reg == exw_reg) ? exw_val : dc1_a;
+			dt_b    <= (exw_f2 && dc1_u.b_src == OS_REG && dc1_u.b_reg == exw_reg) ? exw_val : dc1_b;
 			dt_ea   <= dc1_ea;
 			dt_upd  <= dc1_upd;
 			dt_upd2 <= dc1_upd2;
 		end
-		else if (dt_v && exw_fw) begin
+		else if (dt_v && exw_f2) begin
 			if (dt_u.a_src == OS_REG && dt_u.a_reg == exw_reg) dt_a <= exw_val;
 			if (dt_u.b_src == OS_REG && dt_u.b_reg == exw_reg) dt_b <= exw_val;
 		end
@@ -2051,13 +2056,13 @@ always_ff @(posedge clk) begin
 		if (adv_dt) begin
 			dc2_u    <= dt_u;
 			dc2_mx   <= (dt_u.mem != M_NONE) && (dt_u.exc == 8'd0);
-			dc2_a    <= (exw_fw && dt_u.a_src == OS_REG && dt_u.a_reg == exw_reg) ? exw_val : dt_a;
-			dc2_b    <= (exw_fw && dt_u.b_src == OS_REG && dt_u.b_reg == exw_reg) ? exw_val : dt_b;
+			dc2_a    <= (exw_f3 && dt_u.a_src == OS_REG && dt_u.a_reg == exw_reg) ? exw_val : dt_a;
+			dc2_b    <= (exw_f3 && dt_u.b_src == OS_REG && dt_u.b_reg == exw_reg) ? exw_val : dt_b;
 			dc2_ea   <= dt_ea;
 			dc2_upd  <= dt_upd;
 			dc2_upd2 <= dt_upd2;
 		end
-		else if (dc2_v && exw_fw) begin
+		else if (dc2_v && exw_f3) begin
 			if (dc2_u.a_src == OS_REG && dc2_u.a_reg == exw_reg) dc2_a <= exw_val;
 			if (dc2_u.b_src == OS_REG && dc2_u.b_reg == exw_reg) dc2_b <= exw_val;
 		end

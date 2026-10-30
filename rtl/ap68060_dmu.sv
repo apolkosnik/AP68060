@@ -1238,10 +1238,13 @@ wire  [2:0]  sp_n0    = 3'(5'd16 - {1'b0, m2.r.a[3:0]});
 wire         etk_sp   = (e_st == E_SP_3);
 wire  [3:0]  etk_o    = etk_sp ? 4'd0 : e_va[3:0];
 wire  [2:0]  etk_n    = etk_sp ? 3'(nbytes(m2.r.msz) - sp_n0) : e_n;
-wire [31:0]  etk      = take(dq_rn[e_x.way], etk_o, etk_n);
 wire [31:0]  etk_b    = take(bo_line, e_va[3:0], e_n);
-// (from the RAM's output, registered before it is merged: E_S_RD3, E_SP_4)
-logic [31:0] etk_q;
+// (the way's line from the RAM's output, registered with the offset and
+// count before the bytes are taken and merged: E_S_RD3, E_SP_4)
+logic [127:0] etk_l;
+logic   [3:0] etk_oq;
+logic   [2:0] etk_nq;
+wire   [31:0] etk_q    = take(etk_l, etk_oq, etk_nq);
 
 always_ff @(posedge clk) begin
 	// a store's answer is kept until WB takes it: WB can be held in the
@@ -1589,6 +1592,10 @@ always_ff @(posedge clk) begin
 		E_SP_3: begin
 			logic [2:0] n0;
 			n0 = 3'(5'd16 - {1'b0, m2.r.a[3:0]});
+			// (the first part's translation back, whichever way: the
+			// second's goes to m2.x1 or is looked up again, and its
+			// register's enable stays off the decision below)
+			e_x <= m2.x;
 			if (!e_kill && m2.sfast && m2.r.mem == M_ST && e_x.ok && !e_x.flt && !e_x.walk &&
 			    e_x.hit && e_x.cm == 2'b01) begin
 				// a copyback store across a line: both parts hit, nothing
@@ -1602,14 +1609,13 @@ always_ff @(posedge clk) begin
 			    !sp_dw && !(dw && (dw_set == m2.r.a[10:4] || dw_set == st_set))) begin
 				// the first part from DC2's copy, the rest from the stolen read
 				// (registered here, merged in E_SP_4)
-				etk_q <= etk;
+				etk_l <= dq_rn[e_x.way]; etk_oq <= etk_o; etk_nq <= etk_n;
 				m2.x1 <= e_x;
 				e_st  <= E_SP_4;
 			end
 			else begin
 				steal  <= 1'b0;
 				sp_job <= 1'b0;
-				e_x    <= m2.x;
 				e_st   <= m2.x.ok ? E_S_ACT : E_S_XL;
 			end
 		end
@@ -1856,7 +1862,7 @@ always_ff @(posedge clk) begin
 				e_st    <= E_S_NEXT;
 			end
 			else begin
-				etk_q <= etk;
+				etk_l <= dq_rn[e_x.way]; etk_oq <= etk_o; etk_nq <= etk_n;
 				e_st  <= E_S_RD3;
 			end
 		end
