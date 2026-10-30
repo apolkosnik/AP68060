@@ -125,7 +125,10 @@ endmodule
 //--------------------------------------------------------------------------
 module ap68060_rf #(
 	parameter int NR = 5,
-	parameter int NW = 3              // write ports (2 or 3): the later wins
+	parameter int NW = 3,             // write ports (2 or 3): the later wins
+	parameter logic [NR-1:0] REGSEL = '0   // read ports whose bank select is
+	                                       // registered from ran, the address
+	                                       // the port presents next clock
 )(
 	input  logic        clk,
 	input  logic  [2:0] we,
@@ -133,11 +136,11 @@ module ap68060_rf #(
 	input  logic [31:0] woh [3],      // wa one-hot (the caller's registers)
 	input  logic [31:0] wd [3],
 	input  logic  [4:0] ra [NR],
+	input  logic  [4:0] ran [NR],
 	output logic [31:0] rd [NR]
 );
-	// (one live value table per read port, written identically: the table's
-	// fanout is a read port's 32 muxes, not all of them)
-	(* preserve *) logic [1:0]  lvt [NR][32];
+	logic [1:0]  lvt [32];
+	logic [1:0]  sel_q [NR];
 	logic [31:0] q [NW][NR];
 	genvar gw, gr;
 	generate
@@ -150,15 +153,28 @@ module ap68060_rf #(
 			end
 		end
 	endgenerate
-	initial for (int r = 0; r < NR; r++) for (int i = 0; i < 32; i++) lvt[r][i] = 2'd0;
-	// (the live value tables' entries written by the one-hot selects, not a
+	initial begin
+		for (int i = 0; i < 32; i++) lvt[i] = 2'd0;
+		for (int r = 0; r < NR; r++) sel_q[r] = 2'd0;
+	end
+	// (the live value table's entries written by the one-hot selects, not a
 	// decode of the address after the late write enables)
 	always_ff @(posedge clk)
-		for (int r = 0; r < NR; r++)
+		for (int w = 0; w < NW; w++)
+			if (we[w])
+				for (int i = 0; i < 32; i++)
+					if (woh[w][i]) lvt[i] <= 2'(w);
+	// a registered port's select: the table's entry for next clock's
+	// address, as this clock's writes leave it (the later port wins, as in
+	// the table) -- the table's 32:1 read is off the read path
+	always_ff @(posedge clk)
+		for (int r = 0; r < NR; r++) begin
+			logic [1:0] v;
+			v = lvt[ran[r]];
 			for (int w = 0; w < NW; w++)
-				if (we[w])
-					for (int i = 0; i < 32; i++)
-						if (woh[w][i]) lvt[r][i] <= 2'(w);
+				if (we[w] && wa[w] == ran[r]) v = 2'(w);
+			sel_q[r] <= v;
+		end
 	// synthesis translate_off
 	always_ff @(posedge clk)
 		for (int w = 0; w < NW; w++)
@@ -166,10 +182,16 @@ module ap68060_rf #(
 				$display("FAIL: register file: port %0d's one-hot select %h, its address %0d", w, woh[w], wa[w]);
 				$finish;
 			end
+	always_ff @(posedge clk)
+		for (int r = 0; r < NR; r++)
+			if (REGSEL[r] && sel_q[r] !== lvt[ra[r]]) begin
+				$display("FAIL: register file: read port %0d's registered select %0d, the table's %0d (register %0d)", r, sel_q[r], lvt[ra[r]], ra[r]);
+				$finish;
+			end
 	// synthesis translate_on
 	always_comb
 		for (int r = 0; r < NR; r++)
-			rd[r] = q[lvt[r][ra[r]]][r];
+			rd[r] = q[REGSEL[r] ? sel_q[r] : lvt[ra[r]]][r];
 endmodule
 
 //--------------------------------------------------------------------------

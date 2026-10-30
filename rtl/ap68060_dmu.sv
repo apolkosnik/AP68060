@@ -1245,6 +1245,13 @@ logic [127:0] etk_l;
 logic   [3:0] etk_oq;
 logic   [2:0] etk_nq;
 wire   [31:0] etk_q    = take(etk_l, etk_oq, etk_nq);
+// (registered every clock, no enable off the states' decisions: the merge
+// reads it the clock after the RAM's read)
+always_ff @(posedge clk) begin
+	etk_l  <= dq_rn[e_x.way];
+	etk_oq <= etk_o;
+	etk_nq <= etk_n;
+end
 
 always_ff @(posedge clk) begin
 	// a store's answer is kept until WB takes it: WB can be held in the
@@ -1609,7 +1616,6 @@ always_ff @(posedge clk) begin
 			    !sp_dw && !(dw && (dw_set == m2.r.a[10:4] || dw_set == st_set))) begin
 				// the first part from DC2's copy, the rest from the stolen read
 				// (registered here, merged in E_SP_4)
-				etk_l <= dq_rn[e_x.way]; etk_oq <= etk_o; etk_nq <= etk_n;
 				m2.x1 <= e_x;
 				e_st  <= E_SP_4;
 			end
@@ -1862,7 +1868,6 @@ always_ff @(posedge clk) begin
 				e_st    <= E_S_NEXT;
 			end
 			else begin
-				etk_l <= dq_rn[e_x.way]; etk_oq <= etk_o; etk_nq <= etk_n;
 				e_st  <= E_S_RD3;
 			end
 		end

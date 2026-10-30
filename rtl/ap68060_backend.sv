@@ -423,8 +423,48 @@ wire [31:0] dc2_capv = dc2_u.a_sxw ? {{16{dm_ldata_al[15]}}, dm_ldata_al[15:0]} 
 
 assign ag_hold = ilk_q;
 
-ap68060_rf #(.NR(7)) rff (.clk(clk), .we(fwe), .wa(fwa), .woh(fwoh), .wd(fwd), .ra(rra), .rd(frd));
-ap68060_rf #(.NR(7), .NW(2)) rfb (.clk(clk), .we(bwe), .wa(bwa), .woh(bwoh), .wd(bwd), .ra(rra), .rd(brd));
+// (ports 2-6 address registers whose next value is known: their bank
+// selects, and their front-or-back selects fsel_q, are registered from
+// next clock's address, rran; ports 0/1 address the sequencer's uop)
+logic [4:0] rran [7];
+localparam logic [6:0] RSEL = 7'b1111100;
+ap68060_rf #(.NR(7), .REGSEL(RSEL)) rff (.clk(clk), .we(fwe), .wa(fwa), .woh(fwoh), .wd(fwd), .ra(rra), .ran(rran), .rd(frd));
+ap68060_rf #(.NR(7), .NW(2), .REGSEL(RSEL)) rfb (.clk(clk), .we(bwe), .wa(bwa), .woh(bwoh), .wd(bwd), .ra(rra), .ran(rran), .rd(brd));
+// AG loads ain_u when it takes it (not under a flush); the skid loads the
+// sequencer's uop when AG does not take it
+wire ag_ld = !flush && ag_take && ain_v;
+wire sk_ld = !flush && !sk_v && SKID && in_v && in_rdy && !ag_take;
+assign rran[0] = in_u.base;
+assign rran[1] = in_u.idx;
+assign rran[2] = ag_ld ? ain_u.upd2_reg : ag_u.upd2_reg;
+assign rran[3] = ag_ld ? ain_u.a_reg    : ag_u.a_reg;
+assign rran[4] = ag_ld ? ain_u.b_reg    : ag_u.b_reg;
+assign rran[5] = sk_ld ? in_u.base : sk_u.base;
+assign rran[6] = sk_ld ? in_u.idx  : sk_u.idx;
+// the front-valid bits as they will be (fv's next value), and ports 2-6's
+// front-or-back selects from them
+logic [31:0] fv_n;
+logic  [6:0] fsel_q;
+// front-valid bits: a front write makes the register's front copy
+// current; a redirect, a refetch or an exception drops them all
+// (the drop's term in four kept copies, a byte each: x_go comes late and
+// one copy reached every bit)
+(* keep *) wire [3:0] fv_clr = {4{(wb_commit && wb_redir) || wb_refetch || x_go || !nreset}};
+always_comb begin
+	fv_n = fv;
+	for (int i = 0; i < 3; i++) if (fwe[i]) fv_n = fv_n | fwoh[i];
+	for (int b = 0; b < 4; b++) if (fv_clr[b]) fv_n[8*b +: 8] = 8'd0;
+end
+always_ff @(posedge clk)
+	for (int r = 2; r < 7; r++) fsel_q[r] <= fv_n[rran[r]];
+// synthesis translate_off
+always_ff @(posedge clk)
+	for (int r = 2; r < 7; r++)
+		if (fsel_q[r] !== fv[rra[r]]) begin
+			$display("FAIL: read port %0d's registered front select %b, fv's %b (register %0d)", r, fsel_q[r], fv[rra[r]], rra[r]);
+			$finish;
+		end
+// synthesis translate_on
 // AG's base and index are read as the uop enters AG (ports 0/1 address
 // the incoming uop) and kept in registers, so AG's address adders, and the
 // data cache's set index after them, start from flip-flops
@@ -436,8 +476,8 @@ assign rra[5] = sk_u.base;
 assign rra[6] = sk_u.idx;
 // AG's entering base and index from the file: front or back copy, the
 // skid's or the sequencer's (= ain_u's)
-wire [31:0] ain_fb = sk_vr ? (fv[sk_u.base] ? frd[5] : brd[5]) : (fv[in_u.base] ? frd[0] : brd[0]);
-wire [31:0] ain_fx = sk_vr ? (fv[sk_u.idx]  ? frd[6] : brd[6]) : (fv[in_u.idx]  ? frd[1] : brd[1]);
+wire [31:0] ain_fb = sk_vr ? (fsel_q[5] ? frd[5] : brd[5]) : (fv[in_u.base] ? frd[0] : brd[0]);
+wire [31:0] ain_fx = sk_vr ? (fsel_q[6] ? frd[6] : brd[6]) : (fv[in_u.idx]  ? frd[1] : brd[1]);
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && wb_commit && wb_dwe && wb_u.upd2_v) begin
@@ -453,7 +493,7 @@ always_ff @(posedge clk)
 assign rra[2] = ag_u.upd2_reg;
 assign rra[3] = ag_u.a_reg;
 assign rra[4] = ag_u.b_reg;
-always_comb for (int i = 0; i < 7; i++) rrd[i] = fv[rra[i]] ? frd[i] : brd[i];
+always_comb for (int i = 0; i < 7; i++) rrd[i] = (RSEL[i] ? fsel_q[i] : fv[rra[i]]) ? frd[i] : brd[i];
 
 logic [31:0] agb_q, agx_q;     // the base, and the index sign-extended
 wire  [31:0] ag_base = agb_q;
@@ -2477,13 +2517,7 @@ always_ff @(posedge clk) begin
 
 		// front-valid bits: a front write makes the register's front copy
 		// current; a redirect, a refetch or an exception drops them all
-		begin
-			logic [31:0] fs;
-			fs = fv;
-			for (int i = 0; i < 3; i++) if (fwe[i]) fs = fs | fwoh[i];
-			fv <= fs;
-		end
-		if ((wb_commit && wb_redir) || wb_refetch || x_go) fv <= 32'd0;
+		fv <= fv_n;
 
 		// a store that took a bus error at WB becomes an access fault of
 		// its instruction (WB holds one cycle, then takes it)
