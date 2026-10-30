@@ -580,14 +580,16 @@ ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 // EX holds while the unit runs, until the cycle its result is presented
 // (a divide by zero holds its first cycle too: the zero test of the
 // operand stays off the stall path, and the exception goes a cycle later)
-assign ex_hold = (ex_v && ex_is_md && !md_z && !ex_fault && !md_done && !md_fin) ||
+// (multiply/divide: the result, flags and kill are registered from the
+// unit's result in its done cycle, md_q_*, and presented the cycle after)
+assign ex_hold = (ex_v && ex_is_md && !md_z && !ex_fault && !md_fin) ||
                  (ex_v && ex_slow && ex_sp != ex_np) ||
                  (ex_v && ex_is_fp && !ex_fault && ex_u.exc == 8'd0 && fp_hold);
 
 // multiply/divide result and flags
-logic [31:0] md_res;
-logic  [4:0] md_flags;
-logic        md_dkill;
+logic [31:0] md_res, md_q_res;
+logic  [4:0] md_flags, md_q_flags;
+logic        md_dkill, md_q_dkill;
 always_comb begin
 	md_res   = ex_bv;
 	md_flags = ccr_f;
@@ -914,9 +916,9 @@ always_comb begin
 			xf.xvec  = fp_xvec;
 		end
 		OP_MUL, OP_DIV: begin
-			xf.res   = md_res;
-			xf.flags = md_flags;
-			xf.dkill = md_dkill;
+			xf.res   = md_q_res;
+			xf.flags = md_q_flags;
+			xf.dkill = md_q_dkill && (ex_u.op == OP_DIV);   // (a multiply never kills)
 			if (ex_div0) begin
 				xf.xvec  = 8'd5;
 				xf.flags = {ccr_f[4:1], 1'b0};
@@ -1064,7 +1066,7 @@ always_comb begin
 	// enter EX, so the kill is an AND-OR of its sources: no op decode on
 	// the way to the forwarding enable; the others never kill, slow ones
 	// included)
-	ex_dkill  = (ex_kc[0] && fp_dkill) || (ex_kc[1] && md_dkill) ||
+	ex_dkill  = (ex_kc[0] && fp_dkill) || (ex_kc[1] && md_q_dkill) ||
 	            (ex_kc[2] && md_ovfl) || (ex_kc[3] && alu_cc);
 	// synthesis translate_off
 	ex_dkill_chk = x.dkill;
@@ -1834,11 +1836,14 @@ always_ff @(posedge clk) begin
 		// for it, and the done belongs to the one leaving)
 		if (md_done && md_go && !adv_dc2) md_fin <= 1'b1;
 		if (md_done) begin
+			md_q_res   <= md_res;
+			md_q_flags <= md_flags;
+			md_q_dkill <= md_dkill;
 			md_rem  <= md_hi;
 			md_lol  <= md_lo;
 		end
 		// overflow of the uop leaving EX (word forms check 16 bits)
-		if (adv_ex && (ex_u.op == OP_DIV || ex_u.op == OP_MUL)) md_ovfl <= (ex_u.op == OP_DIV) && md_dkill;
+		if (adv_ex && (ex_u.op == OP_DIV || ex_u.op == OP_MUL)) md_ovfl <= (ex_u.op == OP_DIV) && md_q_dkill;
 		if (!stall_wb) wb_v <= adv_ex;
 
 		//------------------------------------------------------------------

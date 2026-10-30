@@ -4,8 +4,9 @@
 // ap68060_muldiv.sv - iterative multiply and divide (from AP040's          //
 // ap040_muldiv.v, which the cputest corpus validated)                       //
 //                                                                          //
-// MUL: 32x32 -> 64, signed or unsigned, one registered DSP product        //
-// DIV: 32/32 -> q32,r32 restoring, 2 bits per cycle (the 68060 has no     //
+// MUL: 32x32 -> 64, signed or unsigned: four registered 16x16 DSP       //
+//      partial products, their sum, then the sign                         //
+// DIV: 32/32 -> q32,r32 restoring, 1 bit per cycle (the 68060 has no     //
 //      64-bit dividend: those forms trap); ovf for the one signed quotient //
 //      that does not fit, -2^31 / -1.  Signed quotients truncate toward    //
 //      zero, the remainder takes the dividend's sign.                       //
@@ -38,18 +39,20 @@ reg        neg_r;                 // negate remainder
 reg  [6:0] count;
 reg [31:0] den;                   // divisor / multiplier (absolute)
 reg [31:0] mcand;                 // multiplicand (absolute)
-reg [63:0] prod;                  // registered DSP product
+reg [31:0] pp [4];                // the four 16x16 partial products
+reg [63:0] prod;                  // their sum
 reg [64:0] acc;                   // divide: remainder [64:32], dividend/quotient [31:0]
+reg  [1:0] mph;                   // multiply: 2 partial products, 1 their sum, 0 the result
 
 // absolute values for signed operations
 wire [31:0] abs_a  = (sign_op && op_a[31]) ? (32'd0 - op_a) : op_a;
 wire [31:0] abs_m  = (sign_op && op_lo[31]) ? (32'd0 - op_lo) : op_lo;   // also |dividend|
 
-// divide: DSTEPS cascaded restoring steps per cycle (2: 32 bits in 16
-// rounds, the 68060's own DIVU.L takes 38 clocks),
-// each exactly one former one-bit iteration; the divisor is an explicit
-// argument so the function stays pure (module-level variables read from
-// inside a function are unreliable in continuous assignments under iverilog)
+// divide: one restoring step per cycle (32 rounds: at 120 MHz the time
+// the former two steps a cycle took at 60), each exactly one former
+// one-bit iteration; the divisor is an explicit argument so the function
+// stays pure (module-level variables read from inside a function are
+// unreliable in continuous assignments under iverilog)
 function [64:0] div_step;
 	input [64:0] a;
 	input [31:0] d;
@@ -62,10 +65,6 @@ function [64:0] div_step;
 		else        div_step = sh;
 	end
 endfunction
-
-localparam int DSTEPS = 2;
-wire [64:0] div4 = (DSTEPS == 4) ? div_step(div_step(div_step(div_step(acc, den), den), den), den)
-                                 : div_step(div_step(acc, den), den);
 
 wire [63:0] q_raw = div_r ? {32'd0, acc[31:0]} : prod;
 wire [31:0] r_raw = acc[63:32];
@@ -82,6 +81,7 @@ always @(posedge clk) begin
 		mcand   <= 0;
 		prod    <= 0;
 		acc     <= 0;
+		mph     <= 0;
 		res_hi  <= 0;
 		res_lo  <= 0;
 		ovf     <= 0;
@@ -100,29 +100,36 @@ always @(posedge clk) begin
 			if (is_div) begin
 				den   <= abs_a;
 				acc   <= {33'd0, abs_m};
-				count <= 7'(32 / DSTEPS);
+				count <= 7'd32;
 				neg_q <= sign_op && (op_lo[31] ^ op_a[31]);
 				neg_r <= sign_op && op_lo[31];
 			end
 			else begin
 				den   <= abs_a;
 				mcand <= abs_m;
-				count <= 7'd1;
+				count <= 7'd0;
+				mph   <= 2'd2;
 				neg_q <= sign_op && (op_a[31] ^ op_lo[31]) && (op_a != 0) && (op_lo != 0);
 				neg_r <= 0;
 			end
 		end
 		else if (running) begin
-			if (count != 0) begin
+			if (div_r && count != 0) begin
 				count <= count - 7'd1;
-				if (div_r) begin
-					acc <= div4;
-				end
-				else begin
-					// one registered 32x32 DSP-tree product, exactly the
-					// value the former 32-cycle shift-add loop accumulated
-					prod <= mcand * den;
-				end
+				acc   <= div_step(acc, den);
+			end
+			else if (!div_r && mph == 2'd2) begin
+				// the 16x16 partial products (four DSP multipliers)
+				pp[0] <= mcand[15:0]  * den[15:0];
+				pp[1] <= mcand[31:16] * den[15:0];
+				pp[2] <= mcand[15:0]  * den[31:16];
+				pp[3] <= mcand[31:16] * den[31:16];
+				mph   <= 2'd1;
+			end
+			else if (!div_r && mph == 2'd1) begin
+				// their sum: exactly the 32x32 product
+				prod <= {pp[3], pp[0]} + ({31'd0, {1'b0, pp[1]} + {1'b0, pp[2]}} << 16);
+				mph  <= 2'd0;
 			end
 			else begin
 				running <= 1'b0;
@@ -133,15 +140,23 @@ always @(posedge clk) begin
 					ovf    <= sign_op & !neg_q & q_raw[31];
 				end
 				else begin
-					res_lo <= neg_q ? (32'd0 - q_raw[31:0]) : q_raw[31:0];
-					res_hi <= neg_q ? (~q_raw[63:32] + {31'd0, (q_raw[31:0] == 32'd0)})
-					                : q_raw[63:32];
+					{res_hi, res_lo} <= neg_q ? (64'd0 - q_raw) : q_raw;
 					ovf    <= 0;
 				end
 			end
 		end
 	end
 end
+
+// synthesis translate_off
+always @(posedge clk)
+	if (nreset && running && !div_r && mph == 2'd1 &&
+	    {pp[3], pp[0]} + ({31'd0, {1'b0, pp[1]} + {1'b0, pp[2]}} << 16) != 64'(mcand) * 64'(den)) begin
+		$display("FAIL: muldiv: partial products sum to %h, the product is %h",
+		         {pp[3], pp[0]} + ({31'd0, {1'b0, pp[1]} + {1'b0, pp[2]}} << 16), 64'(mcand) * 64'(den));
+		$finish;
+	end
+// synthesis translate_on
 
 assign busy = running;
 
