@@ -910,6 +910,7 @@ logic [15:0] ex_sr_new;
 
 // special register read: the MOVEC numbers as {ext[11], ext[3:0]}
 // ($000-$008 -> $00-$08, $800-$808 -> $10-$18), then SR and CCR
+logic [31:0] spr_q;           // MOVEC's register, read the clock before (its phase 0)
 function automatic logic [31:0] spr_read(input logic [7:0] n);
 	case (n)
 		8'h00: spr_read = {29'd0, sfc_r};
@@ -1083,8 +1084,9 @@ always_comb begin
 			xs.flags  = xs.sr_new[4:0];
 		end
 		OP_SPR: begin
+			// (the register read in the op's first clock: spr_q)
 			logic [31:0] v, m;
-			v = spr_read(ex_u.imm[7:0]);
+			v = spr_q;
 			m = (ex_u.sz == SZ_B) ? 32'h0000_00FF : (ex_u.sz == SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF;
 			xs.res = (v & m) | (ex_bv & ~m);
 			xs.flags = ccr_f;
@@ -1705,6 +1707,11 @@ always_ff @(posedge clk)
 			         ex_tgt, ex_target, ex_tkn, ex_taken, ex_u.pc);
 			$finish;
 		end
+		if (ex_v && ex_u.op == OP_SPR && ex_sp == 2'd1 && spr_q != spr_read(ex_u.imm[7:0])) begin
+			$display("FAIL: MOVEC's registered read %h, the register's %h (pc %h)", spr_q,
+			         spr_read(ex_u.imm[7:0]), ex_u.pc);
+			$finish;
+		end
 		if (wb_v && wb_xf != xflags(wb_exc)) begin
 			$display("FAIL: WB's registered exception cases %b disagree with %0d (pc %h)", wb_xf, wb_exc, wb_u.pc);
 			$finish;
@@ -2104,6 +2111,7 @@ always_ff @(posedge clk) begin
 			bf_zf_q   <= bf_zf;
 			bf_r31_q  <= bf_rot_q[31];
 		end
+		spr_q <= spr_read(ex_u.imm[7:0]);
 		if (ex_v && ex_slow && ex_sp == ex_np - 2'd1) begin
 			xs_q   <= xs;
 			xs_xnz <= xs.xvec != 8'd0;
