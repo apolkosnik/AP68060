@@ -76,6 +76,8 @@ localparam int SW = $bits(slot_t);
 logic [3:0] v   [16];     // valid, per set and way
 logic [3:0] g   [16];     // global
 logic [1:0] rr;           // replacement counter
+logic       fp_v;         // a page flush's clear: pending, its set and ways
+logic [3:0] fp_s, fp_m;
 
 wire [3:0] lset = p8k ? la[16:13]  : la[15:12];
 wire [3:0] wset = p8k ? wla[16:13] : wla[15:12];
@@ -183,10 +185,19 @@ always_ff @(posedge clk)
 			end
 // synthesis translate_on
 
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (fp_v && (wr || flush_all)) begin
+		$display("FAIL: ATC: an install or a flush of all in the clock a page flush clears");
+		$finish;
+	end
+// synthesis translate_on
+
 // ATC entries survive RSTI (MC68040UM 3.6.1): only configuration clears them
 initial begin
 	for (int i = 0; i < 16; i++) begin v[i] = 4'd0; g[i] = 4'd0; end
 	rr = 2'd0;
+	fp_v = 1'b0;
 end
 
 // the install's way as each set would choose it, from that set's own valid
@@ -224,11 +235,17 @@ always_ff @(posedge clk) begin
 	if (flush_all)
 		for (int i = 0; i < 16; i++)
 			v[i] <= flush_nonglobal ? (v[i] & g[i]) : 4'd0;
-	if (flush_page)
-		for (int i = 0; i < 4; i++)
-			if (v[lset][i] && tag_eq(s[i], la, fc2, p8k) &&
-			    !(flush_nonglobal && g[lset][i]))
-				v[lset][i] <= 1'b0;
+	// (a page flush clears the entries it found a clock later, from
+	// registers: PFLUSH serializes, so nothing that survives it looks up
+	// in between)
+	fp_v <= flush_page;
+	fp_s <= lset;
+	for (int i = 0; i < 4; i++)
+		fp_m[i] <= v[lset][i] && tag_eq(s[i], la, fc2, p8k) && !(flush_nonglobal && g[lset][i]);
+	if (fp_v)
+		for (int k = 0; k < 16; k++)
+			if (fp_s == 4'(k))
+				v[k] <= (flush_all ? (flush_nonglobal ? (v[k] & g[k]) : 4'd0) : v[k]) & ~fp_m;
 end
 
 endmodule
