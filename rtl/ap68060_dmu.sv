@@ -372,7 +372,19 @@ initial for (int i = 0; i < 128; i++) lv[i] = 4'd0;
 // read is of a valid line, and whatever makes a line valid writes its
 // dirty bit
 logic  [6:0] ld_ra;
-wire   [7:0] lsm_q = lse[lv_ra];
+// The write port's read-modify-write runs a clock after its request, from
+// flip-flops (vq_*: the request's set, ways and bits); the copies' readers
+// in that clock see it through a bypass, as if written at the request's
+// edge
+logic        vq_v, vq_lwe, vq_lv, vq_dwe, vq_dv;
+logic  [6:0] vq_set;
+logic  [3:0] vq_wm;
+function automatic logic [7:0] vmerge(input logic [7:0] wo);
+	vmerge[7:4] = vq_dwe ? ((wo[7:4] & ~vq_wm) | (vq_wm & {4{vq_dv}})) : wo[7:4];
+	vmerge[3:0] = vq_lwe ? ((wo[3:0] & ~vq_wm) | (vq_wm & {4{vq_lv}})) : wo[3:0];
+endfunction
+wire   [7:0] lsm_r = lse[lv_ra];
+wire   [7:0] lsm_q = (vq_v && vq_set == lv_ra) ? vmerge(lsm_r) : lsm_r;
 wire   [3:0] ld_q  = lsm_q[7:4];
 // the maintenance scan's set, its valid and dirty bits: a copy the write
 // port keeps current (the scan's decision reads 4 bits, not 256)
@@ -634,7 +646,8 @@ logic        tk_rdok;             // the ports read DT's address at the last edg
 logic        tk_dok;              // the data RAM's output this clock is DT's set, fresh
 assign tk_relook = mt.v && mt_stale;
 // the valid and dirty bits of DT's set, read every clock (always current)
-wire  [7:0] lsd_q = lsd[mt.a[10:4]];
+wire  [7:0] lsd_r = lsd[mt.a[10:4]];
+wire  [7:0] lsd_q = (vq_v && vq_set == mt.a[10:4]) ? vmerge(lsd_r) : lsd_r;
 wire  [3:0] lvd_q = lsd_q[3:0];
 wire  [3:0] ldd_q = lsd_q[7:4];
 wire        tk_wr = (mt.mem == M_ST) || (mt.mem == M_RMW);
@@ -1240,6 +1253,7 @@ always_ff @(posedge clk) begin
 		mv_line <= '0;
 		ms_i <= '0;
 		sc_set <= '0; sc_lv <= '0; sc_ld <= '0;
+		vq_v   <= 1'b0;
 		tw_lvl <= TW_ROOT; tw_va <= '0; tw_s <= 1'b0; tw_wr <= 1'b0; tw_pt <= 1'b0; tw_cause <= '0;
 		tw_i <= 1'b0; tw_da <= '0; tw_d <= '0; tw_wp <= 1'b0; tw_fail <= 1'b0;
 		tw_berr <= 1'b0; tw_pd <= '0; tw_upd <= 1'b0; tw_hw <= 4'd0; tw_use <= 1'b0; tw_e <= '0;
@@ -2863,14 +2877,17 @@ always_ff @(posedge clk) begin
 		// the valid/dirty write port
 		//--------------------------------------------------------------
 		begin
-			if ((vp_dwe || vp_lwe) && vp_wm != 4'd0) begin
-				logic [7:0] wo, wn;
-				wo = lsw[vp_set];
-				wn[7:4] = vp_dwe ? ((wo[7:4] & ~vp_wm) | (vp_wm & {4{vp_dv}})) : wo[7:4];
-				wn[3:0] = vp_lwe ? ((wo[3:0] & ~vp_wm) | (vp_wm & {4{vp_lv}})) : wo[3:0];
-				lsd[vp_set] <= wn;
-				lse[vp_set] <= wn;
-				lsw[vp_set] <= wn;
+			vq_v   <= (vp_dwe || vp_lwe) && vp_wm != 4'd0;
+			vq_set <= vp_set;
+			vq_wm  <= vp_wm;
+			vq_lwe <= vp_lwe; vq_lv <= vp_lv;
+			vq_dwe <= vp_dwe; vq_dv <= vp_dv;
+			if (vq_v) begin
+				logic [7:0] wn;
+				wn = vmerge(lsw[vq_set]);
+				lsd[vq_set] <= wn;
+				lse[vq_set] <= wn;
+				lsw[vq_set] <= wn;
 			end
 			for (int j = 0; j < 4; j++)
 				if (vp_wm[j]) begin
@@ -3014,7 +3031,7 @@ assign pq1_l  = bo_pa[31:4];
 
 // the valid copies' reads: DC1's lookup; the engine state's set (a
 // split's next line, the slow path's, the scan's, else the fill/push set), or the snooped set while the engine is frozen
-wire  [7:0] lse_q = lse[lv_ra];
+wire  [7:0] lse_q = lsm_q;              // (with the pending write's bypass)
 assign lve_q = lse_q[3:0];
 always_comb
 	lv_ra = (sn_ph == SN_B)                            ? sn_pa[10:4] :
