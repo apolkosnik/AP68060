@@ -1050,7 +1050,8 @@ wire         sb_sel  = (sb_n != 3'd0) && !sb_fly;
 // (a buffered write on the bus: more writes behind it, or the engine's)
 assign       bi_more = sb_fly && (sb_n > 3'd1 || b_req);
 wire         sb_pop  = own_sb && (bi_done || bi_err);
-assign       sb_empty = (sb_n == 3'd0);
+logic        sb_mt;               // (sb_n == 0, a register)
+assign       sb_empty = sb_mt;
 assign       sb_ne_n  = (sb_n > 3'd1) || (sb_n == 3'd1 && !sb_pop) || sb_push;
 // a TEA on a buffered write (SBE) or on a push (PBE): recorded, reported
 // as an access error once the buffers are empty (MC68060UM 8.4.6)
@@ -1089,7 +1090,7 @@ end
 
 always_ff @(posedge clk) begin
 	if (!nreset) begin
-		sb_n <= '0; sel_q <= 1'b0; own_sb <= 1'b0; sb_fly <= 1'b0; sbe_r <= 1'b0;
+		sb_n <= '0; sb_mt <= 1'b1; sel_q <= 1'b0; own_sb <= 1'b0; sb_fly <= 1'b0; sbe_r <= 1'b0;
 		for (int i = 0; i < SBN; i++) sb[i] <= '0;
 	end
 	else begin
@@ -1118,7 +1119,8 @@ always_ff @(posedge clk) begin
 			sb[n[$clog2(SBN)-1:0]] <= e;
 			n = n + 3'd1;
 		end
-		sb_n <= n;
+		sb_n  <= n;
+		sb_mt <= (n == 3'd0);
 		if (sb_err_ack) sbe_r <= 1'b0;
 	end
 end

@@ -291,6 +291,33 @@ logic stall_wb, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag;
 // DT's (the DMU's), AG's interlock (ilk_q).  A registered hold may be on a
 // clock longer than the stage's state needs, never shorter (checked).
 logic wbh_q;                  // WB holds but for its store's answer
+// MOVEC's control register at WB, one-hot (decoded as the uop enters WB)
+localparam int CR_SFC = 0, CR_DFC = 1, CR_CACR = 2, CR_TC = 3, CR_ITT0 = 4, CR_ITT1 = 5,
+               CR_DTT0 = 6, CR_DTT1 = 7, CR_BUSCR = 8, CR_VBR = 9, CR_URP = 10, CR_SRP = 11,
+               CR_PCR = 12;
+logic [12:0] wb_crs;
+function automatic logic [12:0] cr_sel(input uop_t u);
+	logic [12:0] c;
+	c = '0;
+	if (u.op == OP_SPW)
+		case (u.imm_b[7:0])
+			8'h00: c[CR_SFC]   = 1'b1;
+			8'h01: c[CR_DFC]   = 1'b1;
+			8'h02: c[CR_CACR]  = 1'b1;
+			8'h03: c[CR_TC]    = 1'b1;
+			8'h04: c[CR_ITT0]  = 1'b1;
+			8'h05: c[CR_ITT1]  = 1'b1;
+			8'h06: c[CR_DTT0]  = 1'b1;
+			8'h07: c[CR_DTT1]  = 1'b1;
+			8'h08: c[CR_BUSCR] = 1'b1;
+			8'h11: c[CR_VBR]   = 1'b1;
+			8'h16: c[CR_URP]   = 1'b1;
+			8'h17: c[CR_SRP]   = 1'b1;
+			8'h18: c[CR_PCR]   = 1'b1;
+			default: ;
+		endcase
+	cr_sel = c;
+endfunction
 logic dc2_mx;                 // DC2's uop accesses memory, no exception (registered)
 logic ex_mdw, ex_fpw;         // EX's uop runs the multiply/divide unit, the FPU
 logic ilk_q;                  // AG's interlock
@@ -846,6 +873,11 @@ always_ff @(posedge clk)
 logic        ex_taken;        // control transfer taken
 logic [31:0] ex_target;
 logic  [7:0] ex_xvec;         // exception raised in EX
+// (... whether there is one, from flags registered as the uop enters EX
+// and, for a slow op, as its result is: not through the vector's
+// multiplexers and compare)
+logic        ex_xnz, xs_xnz;
+logic  [2:0] ex_kx;           // EX's uop is FPU, DIV, TRAPcc
 logic [31:0] ex_st;           // store data
 logic        ex_sr_we;
 logic [15:0] ex_sr_new;
@@ -979,7 +1011,7 @@ always_comb begin
 			xf.taken = !alu_cc && (ex_bv[15:0] != 16'd0);
 			xf.dkill = alu_cc;
 		end
-		OP_TRAPCC: if (alu_trap) xf.xvec = 8'd7;
+		OP_TRAPCC: if (alu_cc) xf.xvec = 8'd7;     // (alu_trap: CHK's subtract too)
 		OP_CCRLOG: xf.res = ex_bv;
 		OP_SPW:    xf.res = ex_av;
 		OP_LATCH:  xf.res = ex_av;
@@ -1173,6 +1205,8 @@ logic       eredir_pend, wb_eredir;
 wire        ex_bdb_tk = (ex_u.op == OP_BCC) ? alu_cc : (!alu_cc && (ex_bv[15:0] != 16'd0));
 wire [31:0] ex_bdb_nx = ex_bdb_tk ? ex_u.target : ex_npc;
 wire        ex_xok   = (ex_u.exc == 8'd0) && !ex_snw;   // no exception, no snoop refetch
+assign      ex_xnz   = ex_slow ? xs_xnz :
+                       ((ex_kx[2] && fp_xvec != 8'd0) || (ex_kx[1] && ex_div0) || (ex_kx[0] && alu_cc));
 wire        ex_early = ((ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC)) && (ex_u.br != BR_NONE) && (ex_bdb_tk != ex_u.pred) &&
                        !ex_u.ser && !(ex_u.last && smc_pend) && ex_xok &&
                        !ex_fault && !ex_u.target[0] && !kill_now && !flush;
@@ -1361,8 +1395,12 @@ always_ff @(posedge clk)
 // level 7 is also recognised by level comparison whenever the mask is
 // below 7 (MC68060UM 8.2.9, figure 8-3: RTE or MOVE to SR lowering the
 // mask with IPL still at 7 takes it again); at mask 7 only its edge
-wire         irq_pend = nmi_edge || (ipl_q > irq_mask) ||
-                        (ipl_q != 3'd7 && ipend_r && ipl_q >= ipend_lvl);
+wire         irq_pend_c = nmi_edge || (ipl_q > irq_mask) ||
+                          (ipl_q != 3'd7 && ipend_r && ipl_q >= ipend_lvl);
+// (a register: the same terms from the values their registers take,
+// irq_pend_n below; checked against them)
+logic        irq_pend_q, irq_pend_n;
+wire         irq_pend = irq_pend_q;
 wire  [2:0]  irq_lvl  = nmi_edge ? 3'd7 : ipl_q;
 
 logic        stopped;         // STOP / LPSTOP: waiting for an interrupt
@@ -1469,7 +1507,7 @@ always_ff @(posedge clk)
 // exception (L and LE go to SL and SLE) or a MOVEC clearing BUSCR.L ends it
 // (MC68060UM 7.4) -- not a pipeline flush, a NOP's included
 assign lk_abandon = x_go || dbl_fault ||
-                    (wb_commit && wb_u.op == OP_SPW && wb_u.imm_b[7:0] == 8'h08 && !wb_res[31]);
+                    (wb_commit && wb_crs[CR_BUSCR] && !wb_res[31]);
 
 // register file write ports.  Front: the AG address updates and the EX
 // result.  Back: the WB commit (a result beats an address update), the
@@ -1542,17 +1580,13 @@ assign wb_hold = wb_v && (halted || (!wb_is_exc &&
 // known early -- the interrupt level, the store buffer draining, RSTO --
 // taken at its worst (a clock longer at most)
 always_ff @(posedge clk) begin
-	logic [2:0] mk_n;
 	logic       irq_n, tr_n, hlt_n, ok_new, x_new, h_new, ok_stay, x_stay, h_stay;
-	// an interrupt may be pending next cycle (irq_pend's terms, from the
-	// values its registers take; IPEND's level at its worst)
-	mk_n   = (wb_v && wb_sr_we && wb_ok) ? wb_sr_new[10:8] : sr_r[10:8];
-	irq_n  = nmi_edge || (ipl == 3'd7 && ipl_q != 3'd7) || (ipl > mk_n) ||
-	         (ipl != 3'd7 && (ipend_r || ipl_q > sr_r[10:8]));
+	// an interrupt pending next cycle
+	irq_n  = irq_pend_n;
 	tr_n   = sr_r[15] || (wb_v && wb_sr_we && wb_sr_new[15]);
 	hlt_n  = halted || dbl_fault || (wb_commit && wb_u.op == OP_MISC && wb_u.cond == 4'd10);
 	// entering: RESET, maintenance and an SR write each wait at least a clock
-	ok_new = ex_xok && !ex_fault && ex_xvec == 8'd0 && !ex_odd;
+	ok_new = ex_xok && !ex_fault && !ex_xnz && !ex_odd;
 	x_new  = ((ex_u.op == OP_MISC) && (ex_u.cond == 4'd1 || (ex_u.cond >= 4'd3 && ex_u.cond <= 4'd5))) ||
 	         ex_sr_we;
 	h_new  = hlt_n || (ok_new && x_new) ||
@@ -1567,9 +1601,44 @@ always_ff @(posedge clk) begin
 	          (sb_ne_n && (!ok_stay || wb_u.ser || (wb_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
 	wbh_q <= nreset && (adv_ex ? h_new : h_stay);
 end
+// irq_pend's registers as they will be (the main block's ipl_q, nmi_edge,
+// ipend_r, ipend_lvl and irq_mask assignments, in their order)
+always_comb begin
+	logic       nm, ir;
+	logic [2:0] il, mk;
+	nm = nmi_edge;
+	if (ipl == 3'd7 && ipl_q != 3'd7) nm = 1'b1;
+	else if (ipl != 3'd7) nm = 1'b0;
+	ir = ipend_r; il = ipend_lvl;
+	if (ipl_q == 3'd0 || ipl_q == 3'd7 || (ipend_r && ipl_q < ipend_lvl) || x_go || xwin)
+		ir = 1'b0;
+	else if (ipl_q > sr_r[10:8] && (!ipend_r || ipl_q > ipend_lvl)) begin
+		ir = 1'b1;
+		il = ipl_q;
+	end
+	if (x_go && take_irq && !(adv_wb && wb_is_exc)) begin
+		ir = 1'b0;
+		if (irq_lvl == 3'd7) nm = 1'b0;
+	end
+	mk = (wb_v && wb_sr_we && wb_ok) ? wb_sr_new[10:8] : sr_r[10:8];
+	irq_pend_n = nm || (ipl > mk) || (ipl != 3'd7 && ir && ipl >= il);
+end
+always_ff @(posedge clk) irq_pend_q <= nreset && irq_pend_n;
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset) begin
+		if (wb_v && wb_crs != cr_sel(wb_u)) begin
+			$display("FAIL: WB's control register select %b disagrees (pc %h)", wb_crs, wb_u.pc);
+			$finish;
+		end
+		if (ex_v && ex_xnz != (ex_xvec != 8'd0)) begin
+			$display("FAIL: EX's exception flag %b, its vector %0d (pc %h)", ex_xnz, ex_xvec, ex_u.pc);
+			$finish;
+		end
+		if (irq_pend_q != irq_pend_c) begin
+			$display("FAIL: the registered interrupt pending %b, its terms' %b", irq_pend_q, irq_pend_c);
+			$finish;
+		end
 		if (wb_v && wb_hold && !wb_hold_r) begin
 			$display("FAIL: WB's registered hold is off while WB holds (pc %h)", wb_u.pc);
 			$finish;
@@ -1877,6 +1946,7 @@ always_ff @(posedge clk) begin
 			ex_npc   <= dc2_u.pc + {27'd0, dc2_u.ilen, 1'b0};
 			ex_rs    <= rsel(dc2_u);
 			ex_ac    <= alu_ctl(dc2_u.op);
+			ex_kx    <= {dc2_u.op == OP_FPU, dc2_u.op == OP_DIV, dc2_u.op == OP_TRAPCC};
 			ex_sk    <= (rsel(dc2_u) & 11'd1 << RS_SUM) != 11'd0 ?
 			            ((dc2_u.sz == SZ_B) ? 32'h0000_00FF : (dc2_u.sz == SZ_W) ? 32'h0000_FFFF : 32'hFFFF_FFFF) :
 			            32'd0;
@@ -1932,7 +2002,10 @@ always_ff @(posedge clk) begin
 			bf_zf_q   <= bf_zf;
 			bf_r31_q  <= bf_rot_q[31];
 		end
-		if (ex_v && ex_slow && ex_sp == ex_np - 2'd1) xs_q <= xs;
+		if (ex_v && ex_slow && ex_sp == ex_np - 2'd1) begin
+			xs_q   <= xs;
+			xs_xnz <= xs.xvec != 8'd0;
+		end
 		if (ex_v && ex_slow && ex_sp != ex_np) ex_sp <= ex_sp + 2'd1;
 		if (adv_ex || kill_now) ex_sp <= 2'd0;
 
@@ -1950,8 +2023,8 @@ always_ff @(posedge clk) begin
 			// (the same, and no exception: the DMU's store valid from a
 			// flip-flop -- wb_exc's compare sat on the stall chain)
 			wb_stv      <= (ex_u.mem == M_ST || ex_u.mem == M_RMW) && !ex_stkill &&
-			               ex_xok && !ex_fault && ex_xvec == 8'd0 && !ex_odd;
-			wb_ok       <= ex_xok && !ex_fault && ex_xvec == 8'd0 && !ex_odd;
+			               ex_xok && !ex_fault && !ex_xnz && !ex_odd;
+			wb_ok       <= ex_xok && !ex_fault && !ex_xnz && !ex_odd;
 			wb_st_data  <= ex_st;
 			// a store into the instruction stream just ahead (the fetch
 			// queue and the instructions in flight) refetches after itself:
@@ -1976,6 +2049,7 @@ always_ff @(posedge clk) begin
 			// where execution continues, predicted correctly or not
 			wb_redir_pc <= ex_br ? ex_next : ex_npc;
 			wb_sr_we    <= ex_sr_we;
+			wb_crs      <= cr_sel(ex_u);
 			wb_reset    <= (ex_u.op == OP_MISC) && (ex_u.cond == 4'd1);
 			wb_mt       <= (ex_u.op == OP_MISC) && (ex_u.cond >= 4'd3) && (ex_u.cond <= 4'd5);
 			wb_is_stop  <= (ex_u.op == OP_MISC) && (ex_u.cond == 4'd2 || ex_u.cond == 4'd8);
@@ -2021,12 +2095,12 @@ always_ff @(posedge clk) begin
 				wb_exc_addr <= ex_faddr;
 				wb_exc_fslw <= ex_fslw;
 			end
-			else if (ex_xvec == 8'd0 && ex_odd) begin
+			else if (!ex_xnz && ex_odd) begin
 				wb_exc      <= 8'd3;
 				wb_exc_addr <= {ex_otgt[31:1], 1'b0};
 				wb_exc_fslw <= 32'd0;
 			end
-			else if (ex_is_fp && ex_xvec != 8'd0) begin
+			else if (ex_is_fp && ex_xnz) begin
 				// FPU exceptions bring their frame format, PC and address;
 				// the FPU-disabled frame ($4) has the instruction's PC at +$C
 				wb_exc      <= ex_xvec;
@@ -2038,20 +2112,20 @@ always_ff @(posedge clk) begin
 				wb_exc_addr <= ex_u.pc;
 				wb_exc_fslw <= 32'd0;
 			end
-			wb_exc_pcv <= ex_xok && !ex_fault && ex_xvec == 8'd0 && ex_odd;
+			wb_exc_pcv <= ex_xok && !ex_fault && !ex_xnz && ex_odd;
 			wb_exc_pc  <= ex_odd_pc;
 			wb_exc_fmtv <= 1'b0;
 			wb_xcommit  <= 1'b0;
-			if (ex_xok && !ex_fault && ex_is_fp && ex_xvec != 8'd0) begin
+			if (ex_xok && !ex_fault && ex_is_fp && ex_xnz) begin
 				wb_exc_pcv  <= 1'b1;
 				wb_exc_pc   <= fp_xnext ? ex_npc : ex_u.pc;
 				wb_exc_fmtv <= 1'b1;
 				wb_exc_fmt  <= fp_xfmt;
 				wb_xcommit  <= fp_xcommit;
 			end
-			wb_oddrte  <= ex_xok && !ex_fault && ex_xvec == 8'd0 && ex_odd &&
+			wb_oddrte  <= ex_xok && !ex_fault && !ex_xnz && ex_odd &&
 			              ex_u.op == OP_RTE;
-			wb_hodd    <= ex_xok && !ex_fault && ex_xvec == 8'd0 && ex_odd &&
+			wb_hodd    <= ex_xok && !ex_fault && !ex_xnz && ex_odd &&
 			              ex_u.br == BR_A && ex_u.op == OP_MOV && ex_u.cond == 4'hF;
 			// CCR after this uop (CHK, CHK2, TRAPcc and divide-by-zero set
 			// their flags and then trap: the stacked SR carries them)
@@ -2103,36 +2177,32 @@ always_ff @(posedge clk) begin
 			dbg_retire <= wb_u.last;
 			// architectural commit: the back file's write ports (bwe)
 			ccr_b <= wb_ccr;
-			if (wb_u.op == OP_SPW) begin
-				// MOVEC to the 68060's control registers (masks: WinUAE
-				// m68k_move2c; CABC and CUBC act and read as zero)
-				case (wb_u.imm_b[7:0])
-					8'h00: sfc_r  <= wb_res[2:0];
-					8'h01: dfc_r  <= wb_res[2:0];
-					8'h02: begin
-						cacr_r <= wb_res & 32'hF880_E000;
-						bc_clr <= wb_res[22] || wb_res[21];
-					end
-					8'h03: tc_r   <= wb_res & 32'h0000_FFFE;
-					8'h04: itt0_r <= wb_res & 32'hFFFF_E364;
-					8'h05: itt1_r <= wb_res & 32'hFFFF_E364;
-					8'h06: dtt0_r <= wb_res & 32'hFFFF_E364;
-					8'h07: dtt1_r <= wb_res & 32'hFFFF_E364;
-					8'h08: begin
-						bus_l      <= wb_res[31];
-						bus_le     <= wb_res[29];
-						bus_lkdone <= 1'b0;
-					end
-					8'h11: vbr_r  <= wb_res;
-					8'h16: urp_r  <= wb_res & 32'hFFFF_FE00;
-					8'h17: srp_r  <= wb_res & 32'hFFFF_FE00;
-					8'h18: begin
-						pcr_edebug <= wb_res[7];
-						pcr_dfp    <= wb_res[1];
-						pcr_ess    <= wb_res[0];
-					end
-					default: ;
-				endcase
+			// MOVEC to the 68060's control registers (masks: WinUAE
+			// m68k_move2c; CABC and CUBC act and read as zero), the register
+			// decoded as the uop enters WB (wb_crs)
+			if (wb_crs[CR_SFC])  sfc_r  <= wb_res[2:0];
+			if (wb_crs[CR_DFC])  dfc_r  <= wb_res[2:0];
+			if (wb_crs[CR_CACR]) begin
+				cacr_r <= wb_res & 32'hF880_E000;
+				bc_clr <= wb_res[22] || wb_res[21];
+			end
+			if (wb_crs[CR_TC])   tc_r   <= wb_res & 32'h0000_FFFE;
+			if (wb_crs[CR_ITT0]) itt0_r <= wb_res & 32'hFFFF_E364;
+			if (wb_crs[CR_ITT1]) itt1_r <= wb_res & 32'hFFFF_E364;
+			if (wb_crs[CR_DTT0]) dtt0_r <= wb_res & 32'hFFFF_E364;
+			if (wb_crs[CR_DTT1]) dtt1_r <= wb_res & 32'hFFFF_E364;
+			if (wb_crs[CR_BUSCR]) begin
+				bus_l      <= wb_res[31];
+				bus_le     <= wb_res[29];
+				bus_lkdone <= 1'b0;
+			end
+			if (wb_crs[CR_VBR])  vbr_r  <= wb_res;
+			if (wb_crs[CR_URP])  urp_r  <= wb_res & 32'hFFFF_FE00;
+			if (wb_crs[CR_SRP])  srp_r  <= wb_res & 32'hFFFF_FE00;
+			if (wb_crs[CR_PCR]) begin
+				pcr_edebug <= wb_res[7];
+				pcr_dfp    <= wb_res[1];
+				pcr_ess    <= wb_res[0];
 			end
 			if (wb_sr_we) begin
 				sr_r  <= {wb_sr_new[15:5], 5'd0};
