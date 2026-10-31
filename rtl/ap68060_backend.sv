@@ -1516,6 +1516,12 @@ always_ff @(posedge clk)
 	if (adv_dc2) ex_bdb <= (dc2_u.op == OP_BCC) || (dc2_u.op == OP_DBCC);
 // synthesis translate_off
 always_ff @(posedge clk)
+	if (ex_v && ex_is_fp && ((ex_kx[2] && (fp_xvec != 8'd0)) !== ex_xnz)) begin
+		$display("FAIL: an FPU uop's exception term %b differs from ex_xnz %b (pc %h)", ex_kx[2] && (fp_xvec != 8'd0), ex_xnz, ex_u.pc);
+		$finish;
+	end
+// synthesis translate_off
+always_ff @(posedge clk)
 	if (ex_v && ex_bdb !== ((ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC))) begin
 		$display("FAIL: EX's branch flag %b, its op's %b (pc %h)", ex_bdb, (ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC), ex_u.pc);
 		$finish;
@@ -2614,7 +2620,11 @@ always_ff @(posedge clk) begin
 			wb_exc_pc  <= ex_odd_pc;
 			wb_exc_fmtv <= 1'b0;
 			wb_xcommit  <= 1'b0;
-			if (ex_xok && !ex_fault && ex_is_fp && ex_xnz) begin
+			// (an FPU uop's exception: its vector alone -- the divide's zero
+			// and the ALU's condition, the other units' terms of ex_xnz, are
+			// not its; the select of the exception registers is then two
+			// levels shorter)
+			if (ex_xok && !ex_fault && ex_is_fp && ex_kx[2] && (fp_xvec != 8'd0)) begin
 				wb_exc_pcv  <= 1'b1;
 				wb_exc_pc   <= fp_xnext ? ex_npc : ex_u.pc;
 				wb_exc_fmtv <= 1'b1;
