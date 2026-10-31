@@ -222,13 +222,15 @@ function automatic uhd_t uhd(input uop_t u);
 	uhd = {u.a_reg, u.b_reg, u.base_v, u.idx_v, u.base, u.idx, u.upd_v, u.upd2_v, u.upd_reg, u.upd2_reg};
 endfunction
 uhd_t        hd;
-uop_t        ueo;              // the queue's other word
+uhd_t        hdo;              // the queue's other word's head fields
+// (through uhd(): Quartus resolves no member of a variable copied from
+// the queue's array, which it infers as a memory)
 always_comb begin
-	ueo   = uq_rp ? ue[0] : ue[1];
+	hdo   = uhd(uq_rp ? ue[0] : ue[1]);
 	nx_b0 = nu.base;
 	nx_i0 = nu.idx;
-	nx_b1 = ueo.base;
-	nx_i1 = ueo.idx;
+	nx_b1 = hdo.base;
+	nx_i1 = hdo.idx;
 	uq0          = uq_rp ? ue[1] : ue[0];
 	uq0.a_reg    = hd.a_reg;
 	uq0.b_reg    = hd.b_reg;
