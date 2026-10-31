@@ -3140,8 +3140,9 @@ wire dc2h_n0  = dc2_v_n && dc2_mx_n && !dm_dc2r_n0;
 // LUT before each flip-flop
 (* keep *) wire [1:0] swb_c, sex_c;
 (* keep *) wire [1:0] sdc2_c [2], sdt_c [2], sdc1_c [2], sag_c [2];
+genvar gs;
 generate
-	for (genvar gs = 0; gs < 2; gs++) begin : g_s
+	for (gs = 0; gs < 2; gs++) begin : g_s
 		wire stok = gs ? dm_st_ok_n1 : dm_st_ok_n0;
 		wire h1k  = gs ? dm_hold1_nk1 : dm_hold1_nk0;
 		assign swb_c[gs] = wb_v_n && (wbh_n || (wb_stv_n && !stok));
