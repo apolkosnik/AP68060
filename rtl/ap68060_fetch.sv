@@ -807,6 +807,7 @@ always_comb begin
 	qpr_rda = pd_t'(ha[0] ? qpr_oa[ha[3:1]] : qpr_ea[ha[3:1]]);
 	qpr_rdb = pd_t'(hb[0] ? qpr_ob[hb[3:1]] : qpr_eb[hb[3:1]]);
 end
+wire [6:0] room_base = {2'b00, cnt} + {5'd0, f6_n} + {1'b0, infl_b};   // (the room compares' shared sum)
 always_comb begin
 	for (int c = 0; c < 3; c++) begin
 		logic [4:0] keep;
@@ -860,8 +861,22 @@ always_comb begin
 	qp0_n[2] = (cnt == {2'b00, tk[2]}) ? f6_p[0] : qpr_rdb;
 	for (int c = 0; c < 3; c++) begin
 		fits_n[c]  = (qs_n[c].cnt >= 5'd8) || ({1'b0, qp0_n[c].tot} <= qs_n[c].cnt);
-		room_n[c][0] = {1'b0, qs_n[c].cnt} + infl_b <= 6'(QN - 2);
-		room_n[c][1] = {1'b0, qs_n[c].cnt} + infl_b + 6'd2 <= 6'(QN - 2);
+		// (cnt - tk + f6_n + infl_b <= QN-2, as one shared sum of the
+		// registers against a threshold raised by the take: two adders in
+		// series, not three; the take never exceeds the count)
+		room_n[c][0] = room_base <= 7'(QN - 2) + {4'd0, tk[c]};
+		room_n[c][1] = room_base <= 7'(QN - 4) + {4'd0, tk[c]};
+		// synthesis translate_off
+		// (a candidate taking more than the queue holds is never the one
+		// taken: its count wrapped, its room is not compared)
+		if ({2'b00, tk[c]} <= cnt &&
+		    (({1'b0, qs_n[c].cnt} + infl_b <= 6'(QN - 2)) != room_n[c][0] ||
+		     ({1'b0, qs_n[c].cnt} + infl_b + 6'd2 <= 6'(QN - 2)) != room_n[c][1])) begin
+			$display("FAIL: fetch: the queue's room %b%b differs from its sum (cnt %0d take %0d f6_n %0d infl %0d)",
+			         room_n[c][0], room_n[c][1], cnt, tk[c], f6_n, infl_b);
+			$finish;
+		end
+		// synthesis translate_on
 	end
 end
 // The take (the head instruction, the decided length, or none) picks the

@@ -96,6 +96,7 @@ module ap68060_backend
 	input  logic        dm_hold1_b, dm_hold_dt_b, dm_dc2_rdy_b, dm_st_ok_b,   // the four holds' twins, for the stall chain alone
 	input  logic        dm_hold1_n, dm_dc2r_n, dm_st_ok_n, dm_hold_dt_n,   // ... and their next values (dc2r conservative), for the registered stalls
 	input  logic        dm_hold1_nk, dm_dc2r_n1, dm_dc2r_n0, dm_rdy_dt,   // hold1_n without the kill; dc2r_n for DT's late decision 1 / 0
+	input  logic        dm_hold1_nk0, dm_hold1_nk1, dm_st_ok_n0, dm_st_ok_n1, dm_sf_late,   // ... and for the snooper's late request 0 / 1
 	input  logic        dm_hold1_c,     // ... as its state gives it now (checks)
 	input  logic        dm_hold_dt,     // ... and DT (a register)
 	// WB maintenance (CINV/CPUSH/PFLUSH/PTEST) in the DMU
@@ -3126,23 +3127,34 @@ wire fph_n    = ex_v_n && (hs_n || (!safe_nk && !ns_n));
 wire exho_n   = exh_nk || (ex_v_n && ex_fpw_n && fph_n);
 wire dc2h_n1  = dc2_v_n && dc2_mx_n && !dm_dc2r_n1;
 wire dc2h_n0  = dc2_v_n && dc2_mx_n && !dm_dc2r_n0;
-wire swb_n    = wb_v_n  && (wbh_n || (wb_stv_n && !dm_st_ok_n));
-wire sex_n    = ex_v_n  && (exho_n || swb_n);
-wire sdc2_n1  = dc2_v_n && (dc2h_n1 || sex_n);
-wire sdc2_n0  = dc2_v_n && (dc2h_n0 || sex_n);
-wire sdt_n1   = dt_v_n  && (sdc2_n1 || dm_hold_dt_n);
-wire sdt_n0   = dt_v_n  && (sdc2_n0 || dm_hold_dt_n);
-wire sdc1_n1  = dc1_v_n && (sdt_n1  || dm_hold1_nk);
-wire sdc1_n0  = dc1_v_n && (sdt_n0  || dm_hold1_nk);
-wire sag_n1   = ag_v_n  && (ilk_nk  || sdc1_n1);
-wire sag_n0   = ag_v_n  && (ilk_nk  || sdc1_n0);
+// the candidates: [s] the snooper's late request taken as s, [r] DT's
+// late decision taken as r; kept as nets, so the two picks are the one
+// LUT before each flip-flop
+(* keep *) wire [1:0] swb_c, sex_c;
+(* keep *) wire [1:0] sdc2_c [2], sdt_c [2], sdc1_c [2], sag_c [2];
+generate
+	for (genvar gs = 0; gs < 2; gs++) begin : g_s
+		wire stok = gs ? dm_st_ok_n1 : dm_st_ok_n0;
+		wire h1k  = gs ? dm_hold1_nk1 : dm_hold1_nk0;
+		assign swb_c[gs] = wb_v_n && (wbh_n || (wb_stv_n && !stok));
+		assign sex_c[gs] = ex_v_n && (exho_n || swb_c[gs]);
+		assign sdc2_c[gs][1] = dc2_v_n && (dc2h_n1 || sex_c[gs]);
+		assign sdc2_c[gs][0] = dc2_v_n && (dc2h_n0 || sex_c[gs]);
+		assign sdt_c[gs][1]  = dt_v_n  && (sdc2_c[gs][1] || dm_hold_dt_n);
+		assign sdt_c[gs][0]  = dt_v_n  && (sdc2_c[gs][0] || dm_hold_dt_n);
+		assign sdc1_c[gs][1] = dc1_v_n && (sdt_c[gs][1]  || h1k);
+		assign sdc1_c[gs][0] = dc1_v_n && (sdt_c[gs][0]  || h1k);
+		assign sag_c[gs][1]  = ag_v_n  && (ilk_nk || sdc1_c[gs][1]);
+		assign sag_c[gs][0]  = ag_v_n  && (ilk_nk || sdc1_c[gs][0]);
+	end
+endgenerate
 always_ff @(posedge clk) begin
-	stall_wb  <= !kill_now && swb_n;
-	stall_ex  <= !kill_now && sex_n;
-	stall_dc2 <= !kill_now && (dm_rdy_dt ? sdc2_n1 : sdc2_n0);
-	stall_dt  <= !kill_now && (dm_rdy_dt ? sdt_n1  : sdt_n0);
-	stall_dc1 <= !kill_now && (dm_rdy_dt ? sdc1_n1 : sdc1_n0);
-	stall_ag  <= !kill_now && (dm_rdy_dt ? sag_n1  : sag_n0);
+	stall_wb  <= !kill_now && swb_c[dm_sf_late];
+	stall_ex  <= !kill_now && sex_c[dm_sf_late];
+	stall_dc2 <= !kill_now && sdc2_c[dm_sf_late][dm_rdy_dt];
+	stall_dt  <= !kill_now && sdt_c[dm_sf_late][dm_rdy_dt];
+	stall_dc1 <= !kill_now && sdc1_c[dm_sf_late][dm_rdy_dt];
+	stall_ag  <= !kill_now && sag_c[dm_sf_late][dm_rdy_dt];
 end
 // synthesis translate_off
 // the registered stalls against the chain: equal, but for a DMU "not
