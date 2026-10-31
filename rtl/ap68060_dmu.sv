@@ -1765,6 +1765,9 @@ always_ff @(posedge clk) begin
 		else begin
 			logic cach, alloc, rd, move16;
 			move16 = (m2.r.msz == SZ_Q);
+			// (the fill's tag in every clock here: only a fill decided below
+			// reads it, and its enable stays off the decision)
+			f_tag <= e_x.pa[31:11];
 			cach   = dc_en && !e_x.cm[1] && !m2.r.lock && (m2.r.ack == 2'd0) && !move16;
 			alloc  = cach && !m2.r.noalloc && !dc_nad;
 			rd     = (m2.r.mem == M_LD) || (m2.r.mem == M_RMW);
@@ -1827,7 +1830,6 @@ always_ff @(posedge clk) begin
 				// a store: a copyback miss allocates the line for WB
 				if (alloc && e_x.cm == 2'b01 && !e_x.hit && !e_falloc) begin
 					f_set  <= e_va[10:4];
-					f_tag  <= e_x.pa[31:11];
 					f_way  <= victim(lve_q, rrc, dc_foc);
 					e_sret <= E_S_XL;
 					e_st   <= E_FILL;
@@ -1860,7 +1862,6 @@ always_ff @(posedge clk) begin
 			end
 			else if (alloc && rd && !e_x.hit) begin
 				f_set  <= e_va[10:4];
-				f_tag  <= e_x.pa[31:11];
 				f_way  <= victim(lve_q, rrc, dc_foc);
 				e_sret <= E_S_XL;
 				e_st   <= E_FILL;
@@ -2200,6 +2201,11 @@ always_ff @(posedge clk) begin
 			wpt  = isp ? (it0 ? itt0[2] : itt1[2]) : (t0 ? dtt0[2] : dtt1[2]);
 			mt_pa   <= mt_addr;
 			mt_fslw <= mk_fslw(32'd0, 1'b0, mt_wr ? 2'b01 : 2'b10, SZ_L, mt_fc);
+			// (the walk's registers loaded whichever way the decision goes:
+			// only a walk started below reads them, and their enables stay
+			// off the TTR compares of the address)
+			tw_va <= mt_addr; tw_s <= mt_fc[2]; tw_wr <= mt_wr;
+			tw_pt <= 1'b1; tw_i <= isp; tw_upd <= !isp && lk_hit; tw_hw <= lk_hv;
 			if (hitt) begin
 				if (mt_wr && wpt) begin
 					mt_fault <= 1'b1;
@@ -2224,8 +2230,6 @@ always_ff @(posedge clk) begin
 				e_st <= E_M_DONE;
 			end
 			else begin
-				tw_va <= mt_addr; tw_s <= mt_fc[2]; tw_wr <= mt_wr;
-				tw_pt <= 1'b1; tw_i <= isp; tw_upd <= !isp && lk_hit; tw_hw <= lk_hv;
 				e_ret <= E_M_PLD;
 				e_st  <= E_TW_START;
 			end

@@ -1496,6 +1496,41 @@ assign exw_reg = ex_u.d_reg;
 // result: EX's uop only changes when DC2 moves into it or leaves it empty,
 // so the compare is made as the uop enters DC2 and registered, mx_a/mx_b)
 logic       mx_a, mx_b;
+// (the same for DT's uop against EX's: four compares from registers, DT's
+// uop held or entering against EX's held or entering, the advances
+// picking last; DT's captures of EX's result select by them)
+logic       mxt_a, mxt_b;
+function automatic logic omatch(input logic [1:0] src, input logic [4:0] r, input uop_t x);
+	omatch = (src == OS_REG) && x.d_v && (x.d_reg == r);
+endfunction
+always_ff @(posedge clk) begin
+	logic exv_n;
+	exv_n = !(flush || kill_now || !nreset) && (stall_ex ? ex_v : adv_dc2);
+	if (adv_dc1) begin
+		mxt_a <= exv_n && (adv_dc2 ? omatch(dc1_u.a_src, dc1_u.a_reg, dc2_u) : omatch(dc1_u.a_src, dc1_u.a_reg, ex_u));
+		mxt_b <= exv_n && (adv_dc2 ? omatch(dc1_u.b_src, dc1_u.b_reg, dc2_u) : omatch(dc1_u.b_src, dc1_u.b_reg, ex_u));
+	end
+	else begin
+		mxt_a <= exv_n && (adv_dc2 ? omatch(dt_u.a_src, dt_u.a_reg, dc2_u) : omatch(dt_u.a_src, dt_u.a_reg, ex_u));
+		mxt_b <= exv_n && (adv_dc2 ? omatch(dt_u.b_src, dt_u.b_reg, dc2_u) : omatch(dt_u.b_src, dt_u.b_reg, ex_u));
+	end
+end
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (dt_v && ex_v && (mxt_a !== omatch(dt_u.a_src, dt_u.a_reg, ex_u) ||
+	                     mxt_b !== omatch(dt_u.b_src, dt_u.b_reg, ex_u))) begin
+		$display("FAIL: DT's operand matches %b%b against EX's uop, the compares %b%b", mxt_a, mxt_b,
+		         omatch(dt_u.a_src, dt_u.a_reg, ex_u), omatch(dt_u.b_src, dt_u.b_reg, ex_u));
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (dc2_v && ex_v && (mx_a !== omatch(dc2_u.a_src, dc2_u.a_reg, ex_u) ||
+	                      mx_b !== omatch(dc2_u.b_src, dc2_u.b_reg, ex_u))) begin
+		$display("FAIL: DC2's operand matches %b%b against EX's uop, the compares %b%b", mx_a, mx_b,
+		         omatch(dc2_u.a_src, dc2_u.a_reg, ex_u), omatch(dc2_u.b_src, dc2_u.b_reg, ex_u));
+		$finish;
+	end
+// synthesis translate_on
 wire [31:0] dc2_af  = (exw_fw && mx_a) ? exw_val : dc2_a;
 wire [31:0] dc2_bf  = (exw_fw && mx_b) ? exw_val : dc2_b;
 always_ff @(posedge clk) begin
@@ -2182,8 +2217,8 @@ always_ff @(posedge clk) begin
 			dt_upd2 <= dc1_upd2;
 		end
 		else if (dt_v && exw_f2) begin
-			if (dt_u.a_src == OS_REG && dt_u.a_reg == exw_reg) dt_a <= exw_val;
-			if (dt_u.b_src == OS_REG && dt_u.b_reg == exw_reg) dt_b <= exw_val;
+			if (mxt_a) dt_a <= exw_val;
+			if (mxt_b) dt_b <= exw_val;
 		end
 		if (!stall_dt) dt_v <= adv_dc1;
 
@@ -2193,15 +2228,15 @@ always_ff @(posedge clk) begin
 		if (adv_dt) begin
 			dc2_u    <= dt_u;
 			dc2_mx   <= (dt_u.mem != M_NONE) && (dt_u.exc == 8'd0);
-			dc2_a    <= (exw_f3 && dt_u.a_src == OS_REG && dt_u.a_reg == exw_reg) ? exw_val : dt_a;
-			dc2_b    <= (exw_f3 && dt_u.b_src == OS_REG && dt_u.b_reg == exw_reg) ? exw_val : dt_b;
+			dc2_a    <= (exw_f3 && mxt_a) ? exw_val : dt_a;
+			dc2_b    <= (exw_f3 && mxt_b) ? exw_val : dt_b;
 			dc2_ea   <= dt_ea;
 			dc2_upd  <= dt_upd;
 			dc2_upd2 <= dt_upd2;
 		end
 		else if (dc2_v && exw_f3) begin
-			if (dc2_u.a_src == OS_REG && dc2_u.a_reg == exw_reg) dc2_a <= exw_val;
-			if (dc2_u.b_src == OS_REG && dc2_u.b_reg == exw_reg) dc2_b <= exw_val;
+			if (mx_a) dc2_a <= exw_val;
+			if (mx_b) dc2_b <= exw_val;
 		end
 		if (!stall_dc2) dc2_v <= adv_dt;
 
