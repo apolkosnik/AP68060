@@ -3264,12 +3264,18 @@ logic stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q, stall_dc1_q, stall_ag_q;
 // address -- its adder's, late -- compared with the write's set, the last
 // OR of DC1's and AG's stall registers)
 wire dwm_h = dm_req && dm_dwm_v && (dm_dwm_set == ag_maddr[10:4]);
+// (the FPU hold next, the latest select, is the one LUT before every
+// flip-flop: DC1's and AG's other terms are ORed into both its candidates)
 always_ff @(posedge clk) begin
-	logic [5:0] st;
-	st = fph_n ? (ex_okn ? st_c11 : st_c01) : (ex_okn ? st_c10 : st_c00);
-	{stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q} <= {4{!kill_now}} & st[5:2];
-	stall_dc1_q <= !kill_now && (st[1] || (dc1_v_n && dwm_h));
-	stall_ag_q  <= !kill_now && (st[0] || (sk_v ? sag_sk : sag_in) || (ag_v_n && dc1_v_n && dwm_h));
+	logic [5:0] st0, st1;
+	logic dc1_o, ag_o;
+	st0   = ex_okn ? st_c10 : st_c00;
+	st1   = ex_okn ? st_c11 : st_c01;
+	dc1_o = dc1_v_n && dwm_h;
+	ag_o  = (sk_v ? sag_sk : sag_in) || (ag_v_n && dc1_v_n && dwm_h);
+	{stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q} <= {4{!kill_now}} & (fph_n ? st1[5:2] : st0[5:2]);
+	stall_dc1_q <= fph_n ? (!kill_now && (st1[1] || dc1_o)) : (!kill_now && (st0[1] || dc1_o));
+	stall_ag_q  <= fph_n ? (!kill_now && (st1[0] || ag_o))  : (!kill_now && (st0[0] || ag_o));
 end
 // the stall nets: the registers, and DC2's hold for an access that entered
 // not ready (its registered "ready" from the DMU), one LUT from flip-flops
