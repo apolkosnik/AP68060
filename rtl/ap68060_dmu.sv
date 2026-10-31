@@ -2134,14 +2134,17 @@ always_ff @(posedge clk) begin
 		// maintenance at WB
 		//==============================================================
 		E_M_START: begin
+			// (the stolen lookup's address loaded whichever the op: only
+			// PLPA's and PFLUSH's states read it, and its enable stays off
+			// the op's decode)
+			st_la   <= mt_addr;
+			st_aset <= aset_of(mt_addr);
+			st_fc2  <= mt_fc[2];
 			case (mt_op)
 				MT_PLPA: begin
 					// PLPA: look the address up (the D-ATC, through the
 					// stolen port), in the space of the DFC
 					steal  <= 1'b1;
-					st_la  <= mt_addr;
-					st_aset <= aset_of(mt_addr);
-					st_fc2 <= mt_fc[2];
 					mt_fault <= 1'b0;
 					e_st   <= E_M_PLW;
 				end
@@ -2156,9 +2159,6 @@ always_ff @(posedge clk) begin
 					end
 					else begin
 						steal  <= 1'b1;
-						st_la  <= mt_addr;
-						st_aset <= aset_of(mt_addr);
-						st_fc2 <= mt_fc[2];
 						iatc_flush_la  <= mt_addr;
 						iatc_flush_fc2 <= mt_fc[2];
 						e_st <= E_M_PG;
