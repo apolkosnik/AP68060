@@ -588,6 +588,37 @@ ap68060_rf #(.NR(7), .NW(2), .REGSEL(RSEL)) rfb (.clk(clk), .we(bwe), .wa(bwa), 
 // D2c's uop when its queue is empty or pops its last word, the other
 // queued word when it pops with two queued (uq_pop = in_rdy && in_v)
 wire ag_ld = !flush && ag_take && a1_v;
+wire a1_ld = !flush && a1_take && ain_v;
+// AG2's capture compares as registers: AG2's update registers against
+// AG1's base and index, and DC2's destination against them, formed from
+// the uops the stages hold next (AG1's loaded or held, AG2's loaded or
+// held, DC2's entering or held; the loads pick last)
+logic cq_b1, cq_b0, cq_x1, cq_x0, cq_cb, cq_cx;
+always_ff @(posedge clk) begin
+	uop_t a1n, agn, c2n;
+	a1n = a1_ld ? ain_u : a1_u;
+	agn = ag_ld ? a1_u  : ag_u;
+	c2n = adv_dt ? dt_u : dc2_u;
+	cq_b1 <= (agn.upd2_reg == a1n.base);
+	cq_b0 <= (agn.upd_reg  == a1n.base);
+	cq_x1 <= (agn.upd2_reg == a1n.idx);
+	cq_x0 <= (agn.upd_reg  == a1n.idx);
+	cq_cb <= (c2n.d_reg == a1n.base);
+	cq_cx <= (c2n.d_reg == a1n.idx);
+end
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && a1_v && ag_v && (cq_b1 != (ag_u.upd2_reg == a1_u.base) || cq_b0 != (ag_u.upd_reg == a1_u.base) ||
+	                               cq_x1 != (ag_u.upd2_reg == a1_u.idx)  || cq_x0 != (ag_u.upd_reg == a1_u.idx))) begin
+		$display("FAIL: AG2's registered update compares %b%b%b%b differ (pc %h)", cq_b1, cq_b0, cq_x1, cq_x0, a1_u.pc);
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nreset && a1_v && dc2_v && (cq_cb != (dc2_u.d_reg == a1_u.base) || cq_cx != (dc2_u.d_reg == a1_u.idx))) begin
+		$display("FAIL: AG2's registered load compares %b%b differ (pc %h)", cq_cb, cq_cx, a1_u.pc);
+		$finish;
+	end
+// synthesis translate_on
 wire sk_ld = !flush && !sk_v && SKID && in_v && in_rdy && !a1_take;
 wire hd_nu = (uq_n == 2'd0) || (in_rdy && uq_n == 2'd1);
 wire hd_ue = in_rdy && (uq_n == 2'd2);
@@ -3182,8 +3213,8 @@ always_ff @(posedge clk) begin
 	// (a1_v's twin a1_vb: the select's own flip-flop)
 	ag_new = !flush && !stall_ag && a1_vb && !stopped;
 	// a plain load leaving DC2 whose data a base or index takes
-	cb_n = adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.base;
-	cx_n = adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.idx;
+	cb_n = adv_dc2 && dc2_capd && cq_cb;
+	cx_n = adv_dc2 && dc2_capd && cq_cx;
 	cb_o = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.base;
 	cx_o = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.idx;
 	// the value entering: AG1's word (the file's, with its entry clock's
@@ -3194,10 +3225,10 @@ always_ff @(posedge clk) begin
 	// source in parallel.  (EX2's broadcast of this cycle is written into
 	// the file at this edge: the flags wait for it, and xw_q brings it next
 	// clock.)
-	b1 = fwe_ag[1] && (fwa[1] == a1_u.base);
-	b0 = fwe_ag[0] && (fwa[0] == a1_u.base);
-	x1 = fwe_ag[1] && (fwa[1] == a1_u.idx);
-	x0 = fwe_ag[0] && (fwa[0] == a1_u.idx);
+	b1 = fwe_ag[1] && cq_b1;
+	b0 = fwe_ag[0] && cq_b0;
+	x1 = fwe_ag[1] && cq_x1;
+	x0 = fwe_ag[0] && cq_x0;
 	b = ({32{a1_u.base_v && b1}}                  & fwd[1])  |
 	    ({32{a1_u.base_v && !b1 && b0}}           & ag_updv);
 	x = ({32{x1}}                  & ixf(fwd[1], a1_u))  |

@@ -385,3 +385,8 @@ update-register compares into the capture (ag_u.upd_reg -> agx_q, -2.06
 x 47: the b1/b0 compares, formed each clock; to be registered from the
 uops' next values), the sequencer's MOVEM state into the file's selects
 (useq.mv_act -> rff.sel_q -1.89), xr_dbl -> ccr_f (3.5).
+
+Done 2026-10-31: AG2's capture compares (its update registers and DC2's
+destination against AG1's base and index) as registers formed from the
+uops the stages hold next, the loads picking last; the capture's
+one-hot selects are then flip-flop ANDs.  Regression 392.
