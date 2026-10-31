@@ -1695,9 +1695,14 @@ assign      ex_xnz   = ex_slow ? xs_xnz :
 // (a divide by zero holds its first EX cycle, md_z set from the second: the
 // uop leaves EX only with md_z, so the flag needs no zero test of its
 // operand; its first cycle, held, is not compared)
+// (not while an older branch's early redirect is pending: every uop
+// behind it is on the wrong path until WB flushes them -- with EX2 the
+// branch is in EX2, not yet at WB's kill, for a clock after it leaves EX,
+// and a wrong-path Bcc then in EX would turn the front end round again,
+// to its own target: Kickstart's InitStruct, t_initstruct)
 wire        ex_early = ((ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC)) && (ex_u.br != BR_NONE) && (ex_bdb_tk != ex_u.pred) &&
                        !ex_u.ser && !(ex_u.last && smc_pend) && ex_xok &&
-                       !ex_fault && !ex_u.target[0] && !kill_now && !flush;
+                       !ex_fault && !ex_u.target[0] && !kill_now && !flush && !eredir_pend;
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && ex_v && ((ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC)) && (ex_u.br != BR_NONE) &&
