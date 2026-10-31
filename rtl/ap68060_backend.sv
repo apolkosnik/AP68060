@@ -1746,18 +1746,22 @@ function automatic logic [10:0] rsel(input uop_t u);
 	endcase
 	rsel = r;
 endfunction
+// (the sources that are registers -- the operands, the slow result, the
+// units' -- as one AND-OR apart, kept as a node: the adder's sum and the
+// ALU's logic result, the late ones, are joined in the last level)
+(* keep *) logic [31:0] exw_oth;
 always_comb begin
 	logic [31:0] bfs;
 	bfs = ex_u.cond[0] ? {24'd0, bf_lonew} : {{3{ex_av[31]}}, ex_av[31:3]};
-	// (the sum at the size, ex_sk, in the last AND-OR; above it the
-	// destination's bits, from flip-flops)
-	exw_val = (ex_sk & alu_sumo) | ({32{ex_rs[RS_SUM]}} & ~ex_szm & ex_bv) |
-	          ({32{ex_rs[RS_ALU]}}   & alu_resf) |
+	exw_oth = ({32{ex_rs[RS_SUM]}} & ~ex_szm & ex_bv) |
 	          ({32{ex_rs[RS_SLOW]}}  & xs_q.res)  | ({32{ex_rs[RS_FP]}}    & fp_res)   |
 	          ({32{ex_rs[RS_MD]}}    & md_q_res)  | ({32{ex_rs[RS_MDLO]}}  & md_lol)   |
 	          ({32{ex_rs[RS_MDREM]}} & md_rem)    | ({32{ex_rs[RS_BV]}}    & ex_bv)    |
 	          ({32{ex_rs[RS_AV]}}    & ex_av)     | ({32{ex_rs[RS_BFSET]}} & bfs)      |
 	          ({32{ex_rs[RS_CAS]}}   & ((ex_bv & ex_szm) | (ex_latch & ~ex_szm)));
+	// (the sum at the size, ex_sk, in the last AND-OR; above it the
+	// destination's bits, from flip-flops)
+	exw_val = (ex_sk & alu_sumo) | ({32{ex_rs[RS_ALU]}} & alu_resf) | exw_oth;
 end
 // synthesis translate_off
 always_ff @(posedge clk)

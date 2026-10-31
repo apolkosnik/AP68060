@@ -42,6 +42,7 @@ logic [31:0] qpc;
 logic        cs_fire;
 logic        cr_fire;
 logic  [2:0] cr_use;
+wire  [31:0] cr_use_oh = {4{8'd1 << cr_use}};   // (the decoder's one-hot copies)
 logic        q_simple;
 logic        q_odd;
 logic        bc_clr;

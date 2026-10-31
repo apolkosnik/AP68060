@@ -64,6 +64,7 @@ module ap68060_decode
 	output logic        cs_fire,
 	output logic        cr_fire,
 	output logic  [2:0] cr_use,
+	output logic [31:0] cr_use_oh,    // ... one-hot (1 << cr_use), four copies: the queue's quarters' selects
 	output logic        d_redir_v,
 	output logic [31:0] d_redir_pc,
 
@@ -418,6 +419,7 @@ logic        r_v, r_go, r_part;
 logic        rx_q;          // ... the head has a decode-time exception
 logic  [2:0] r_use;
 (* preserve *) logic [2:0] r_use_f;   // (its copy for the fetch's queue: placed by it)
+(* preserve *) logic [7:0] r_use_oh [4];   // (one-hot, a copy per quarter of the queue's words)
 ph_t         r_nph;
 
 // the record FIFO's room for what D1a takes now (D1b pushes it next
@@ -467,6 +469,7 @@ wire s_ok   = ph_idle && q_simple;
 assign cs_fire = s_ok && !r_v && !stall;      // (registers: one LUT)
 assign cr_fire = r_v && !stall;
 assign cr_use  = r_use_f;
+assign cr_use_oh = {r_use_oh[3], r_use_oh[2], r_use_oh[1], r_use_oh[0]};
 wire   fire    = cs_fire || cr_fire;
 
 // the general case (decided a clock ahead of its fire): the length of the
@@ -720,6 +723,7 @@ always_ff @(posedge clk) begin
 		r_part    <= 1'b0;
 		r_use     <= '0;
 		r_use_f   <= '0;
+		for (int k = 0; k < 4; k++) r_use_oh[k] <= 8'd1;
 		r_nph     <= PH_IDLE;
 		rx_q      <= 1'b0;
 		ir_v      <= 1'b0;
@@ -753,6 +757,7 @@ always_ff @(posedge clk) begin
 			r_part <= g_part;
 			r_use  <= g_use;
 			r_use_f <= g_use;
+			for (int k = 0; k < 4; k++) r_use_oh[k] <= 8'd1 << g_use;
 			r_nph  <= g_nph;
 			rx_q   <= (ph == PH_IDLE) && g_exc;
 		end

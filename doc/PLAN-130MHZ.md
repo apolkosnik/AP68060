@@ -341,3 +341,19 @@ broadcast after a captured load is tracked by the load's position (in
 EX: refuse xw; one clock longer for xw_q) rather than a fixed two-clock
 window, in AG2 too.  Regression 392/392, Dhrystone 1,107 (+0.5 %),
 Whetstone 790,634 (+0.1 %).
+
+Worst paths of f130_d read in full (sta_to.tcl): each is 4-6 cells and
+2-4 wires of 1.0-2.5 ns -- the wires from a register with a fan-out of
+50-120 (e2_dwe 46, the decoder's consumed count 116, its adder 84).
+Two small steps from that, 2026-10-31:
+- EX's flat result select: the sources that are registers (operands,
+  the slow result, the units') as one kept AND-OR, the adder's sum and
+  the ALU's logic result joined in the last level (exw_oth).
+- 3.6, the fetch queue's take: the decoder's consumed count and the
+  head's length as registered one-hots, four copies each (one per
+  quarter of the queue's words), every word's next value an AND-OR of
+  constant-index reads -- no index arithmetic or 16:1 select in the
+  words' path.
+Corpus runs stopped on request (2026-10-31): the full run of the
+pre-split HEAD ended at 3,759 of 4,504 slices, 3,640 pass, 99 known, no
+failure under the current rules; the smoke on the AG split passed 5/5.

@@ -106,6 +106,7 @@ module ap68060_fetch
 	input  logic        cs_fire,
 	input  logic        cr_fire,
 	input  logic  [2:0] cr_use,
+	input  logic [31:0] cr_use_oh,    // ... one-hot, a copy per quarter of the queue
 	output logic        q_odd,        // the stream starts at an odd address
 	input  logic        bc_clr,       // CACR.CABC/CUBC: clear the branch cache
 	input  logic        btb_we,       // D1 writes a BTB entry
@@ -214,6 +215,7 @@ logic [15:0]   qw [QN];
 (* ramstyle = "MLAB, no_rw_check" *) logic [$bits(pd_t)-1:0] qpr_ob [QN/2];
 logic  [3:0]   qh;             // the ring's head
 pd_t           qp0;
+(* preserve *) logic [7:0] qp0_toh [4];   // the head's length one-hot, a copy per quarter of the queue
 // synthesis translate_off
 pd_t           qps [QN];       // (simulation: the shifting model, checked)
 // synthesis translate_on
@@ -829,32 +831,43 @@ always_comb begin
 		cfl  = 1'b0;
 		for (int i = 0; i < 7; i++) if (3'(i) < tk[c] && qb[i]) cfl = 1'b1;
 		qs_n[c] = '0;
+		// each word's next value as an AND-OR over the take's one-hot (a
+		// register: the decoder's for its length, the head's for its own,
+		// a copy per quarter of the words), every term a constant-index
+		// read: no index arithmetic in the words' select
 		for (int i = 0; i < QN; i++) begin
-			logic [5:0] src;
-			logic       kept, k0;
-			src  = 6'(i) + {3'b000, tk[c]};
-			// i < keep and i < keep + F6's count, read off the count's
-			// thermometers at i + the take (no subtraction in the words'
-			// select); the F6 word's parity is i - keep's
-			kept = cth[src[4:0]];
-			k0   = i[0] ^ keep[0];
-			// (a word past the count is never read: the words and their
-			// flags but the fault flag take F6's there whether it brings
-			// them or not -- F6's count stays off the words' select; the
-			// fault flags past the count are clear: qfany)
-			if (kept) begin
-				qw_n[c][i]    = qw[src[3:0]];
-				qs_n[c].qf[i] = qf[src[3:0]];
-				qs_n[c].qd[i] = qd[src[3:0]];
-				qs_n[c].qa[i] = qa[src[3:0]];
-				qs_n[c].qb[i] = qb[src[3:0]];
-			end
-			else begin
-				qw_n[c][i]    = f6_w[k0];
-				qs_n[c].qf[i] = cthf[src[4:0]] && f6_f;
-				qs_n[c].qd[i] = f6_d;
-				qs_n[c].qa[i] = f6_a;
-				qs_n[c].qb[i] = f6_b[k0];
+			logic [7:0] oh;
+			oh = (c == 0) ? 8'd1 : (c == 1) ? qp0_toh[i / 4] : cr_use_oh[8 * (i / 4) +: 8];
+			qw_n[c][i] = '0;
+			for (int k = 0; k < 8; k++) begin
+				logic [5:0] src;
+				logic       kept, k0;
+				src  = 6'(i) + 6'(k);
+				// i < keep and i < keep + F6's count, read off the count's
+				// thermometers at i + the take (no subtraction in the words'
+				// select); the F6 word's parity is i - keep's
+				kept = cth[src[4:0]];
+				k0   = i[0] ^ cnt[0] ^ k[0];
+				// (a word past the count is never read: the words and their
+				// flags but the fault flag take F6's there whether it brings
+				// them or not -- F6's count stays off the words' select; the
+				// fault flags past the count are clear: qfany)
+				if (oh[k]) begin
+					if (kept) begin
+						qw_n[c][i]    = qw_n[c][i]    | qw[src[3:0]];
+						qs_n[c].qf[i] = qs_n[c].qf[i] | qf[src[3:0]];
+						qs_n[c].qd[i] = qs_n[c].qd[i] | qd[src[3:0]];
+						qs_n[c].qa[i] = qs_n[c].qa[i] | qa[src[3:0]];
+						qs_n[c].qb[i] = qs_n[c].qb[i] | qb[src[3:0]];
+					end
+					else begin
+						qw_n[c][i]    = qw_n[c][i]    | f6_w[k0];
+						qs_n[c].qf[i] = qs_n[c].qf[i] | (cthf[src[4:0]] && f6_f);
+						qs_n[c].qd[i] = qs_n[c].qd[i] | f6_d;
+						qs_n[c].qa[i] = qs_n[c].qa[i] | f6_a;
+						qs_n[c].qb[i] = qs_n[c].qb[i] | f6_b[k0];
+					end
+				end
 			end
 		end
 		qs_n[c].cnt = keep + {3'b000, f6_n};
@@ -939,6 +952,7 @@ always_ff @(posedge clk) begin
 	qa    <= qn.s.qa;
 	qb    <= qn.s.qb;
 	qp0   <= qn.p0;
+	for (int k = 0; k < 4; k++) qp0_toh[k] <= 8'd1 << qn.p0.tot[2:0];
 	qpc_r <= redir_any ? redir_npc : qn.s.qpc;
 	// the predecode ring: appended at head + count (wherever D1's
 	// take puts the head)
@@ -1599,6 +1613,12 @@ always_ff @(posedge clk)
 always_ff @(posedge clk)
 	if (nreset && cnt != 5'd0 && qp0 != qps[0]) begin
 		$display("FAIL: fetch: the predecode ring's head %h, the queue's %h", qp0, qps[0]);
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nreset && cnt != 5'd0 && (qp0_toh[0] != 8'd1 << qp0.tot[2:0] || qp0_toh[3] != 8'd1 << qp0.tot[2:0] ||
+	                              cr_use_oh[7:0] != 8'd1 << cr_use || cr_use_oh[31:24] != 8'd1 << cr_use)) begin
+		$display("FAIL: fetch: the takes' one-hots %b %b differ from the lengths %0d %0d", qp0_toh[0], cr_use_oh[7:0], qp0.tot, cr_use);
 		$finish;
 	end
 always_ff @(posedge clk)
