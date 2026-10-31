@@ -1571,6 +1571,11 @@ fout_t  o0, o1;
 // the stall registers' next values, fp_hs0/1, fp_ns0/1)
 fview_t vq;
 fout_t  oqn;
+// (the staying uop's holds with act -- EX's own may-act, two flip-flops and
+// a LUT -- taken as 0 and 1, act picking last: it is the stall registers'
+// FPU hold next, fph_n, on their deepest path)
+fview_t v0a, v0n;
+fout_t  o0a, o0n;
 always_comb begin
 	p0 = pred_f(1'b0, act);
 	p1 = pred_f(1'b1, ex_v);
@@ -1596,7 +1601,11 @@ always_comb begin
 	v1.dout = f_dout; v1.xop = f_xop; v1.crrd = f_crrd; v1.cc = f_cc; v1.bsun_en = f_bsun_en;
 	o0 = out_f(v0);
 	o1 = out_f(v1);
-	hs0 = o0.hs; ns0 = o0.ns;
+	v0a = v0; v0a.r = pred_f(1'b0, 1'b1); v0a.r.pend = pend; v0a.r.pend_vec = pend_vec; v0a.pchg = pchg_f(1'b0, 1'b1);
+	v0n = v0; v0n.r = pred_f(1'b0, 1'b0); v0n.r.pend = pend; v0n.r.pend_vec = pend_vec; v0n.pchg = pchg_f(1'b0, 1'b0);
+	o0a = out_f(v0a);
+	o0n = out_f(v0n);
+	hs0 = act ? o0a.hs : o0n.hs; ns0 = act ? o0a.ns : o0n.ns;
 	hs1 = o1.hs; ns1 = o1.ns;
 	vq  = (ex_v && !adv) ? v0 : v1;
 	oqn = out_f(vq);
@@ -1608,6 +1617,11 @@ always_ff @(posedge clk)
 	if (!nreset) oq <= '0;
 	else oq <= oqn;
 // synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && (hs0 !== o0.hs || ns0 !== o0.ns)) begin
+		$display("FAIL: fpif: the staying uop's holds by act %b%b, the direct form's %b%b", hs0, ns0, o0.hs, o0.ns);
+		$finish;
+	end
 always_ff @(posedge clk)
 	if (nreset && oqn !== ((ex_v && !adv) ? o0 : o1)) begin
 		$display("FAIL: fpif: the selected view's outputs differ from the candidate's");
