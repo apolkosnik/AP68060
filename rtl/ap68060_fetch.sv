@@ -202,7 +202,8 @@ logic        atc_fc2;
 //--------------------------------------------------------------------------
 // queue
 //--------------------------------------------------------------------------
-logic [15:0]   qw [QN];
+// D1's window, words 0-7: flip-flops, shifted by D1's take (below)
+logic [15:0]   qw [8];
 // the words' predecode: D1 reads only the head's, so it is a ring (no
 // shift) with the head in a register (qp0) -- loaded from the ring at the
 // head after D1's take, or from F6 when the queue empties into it.  Two
@@ -219,8 +220,32 @@ pd_t           qp0;
 // synthesis translate_off
 pd_t           qps [QN];       // (simulation: the shifting model, checked)
 // synthesis translate_on
-logic [QN-1:0] qf, qd, qa;     // faulted, demand fetch, ATC fault
-logic [QN-1:0] qb;             // ends a branch the BTB took
+logic  [7:0]   qf, qd, qa;     // faulted, demand fetch, ATC fault
+logic  [7:0]   qb;             // ends a branch the BTB took
+// words 8-15: a ring from bh (word 8 + j in slot bh + j).  They stay where
+// F6 writes them -- a word entering at queue position cnt + m (before the
+// take) is written to slot bh + cnt + m whatever D1 takes, and the take
+// moves bh by its length -- so no shifter: D1's window reads the ring
+// through a rotation by bh (qwv), formed from registers.  A slot not
+// holding a queued word may hold anything: bml marks the queued ones.
+logic [15:0]   qwb [8];
+logic  [7:0]   qfb, qdb, qab, qbb;
+logic  [2:0]   bh;
+logic  [7:0]   bml;            // (from bh and the count, registers)
+// the queue as one: the window, then the ring from its head
+logic [15:0]   qwv [QN];
+logic [QN-1:0] qfv, qdv, qav, qbv;
+always_comb
+	for (int i = 0; i < QN; i++) begin
+		if (i < 8) begin
+			qwv[i] = qw[i]; qfv[i] = qf[i]; qdv[i] = qd[i]; qav[i] = qa[i]; qbv[i] = qb[i];
+		end
+		else begin
+			logic [2:0] sl;
+			sl = 3'(bh + 3'(i - 8));
+			qwv[i] = qwb[sl]; qfv[i] = qfb[sl]; qdv[i] = qdb[sl]; qav[i] = qab[sl]; qbv[i] = qbb[sl];
+		end
+	end
 logic [30:0]   tq [TQN];       // their targets: a ring from tq_h (a take moves
 logic  [2:0]   tq_h;           // the head only, so the entries are written
 logic  [3:0]   tq_n;           // at the tail whatever D1 takes)
@@ -791,8 +816,12 @@ typedef struct packed {
 	logic [31:0]   qpc;
 	logic [3:0]    tq_n;
 	logic          tq_sh;       // the targets shift (a flagged word was taken)
-	logic [QN-1:0] qf, qd, qa, qb;
+	logic  [7:0]   qf, qd, qa, qb;    // (the window's: the ring's are F6's writes)
+	logic [2:0]    bh;
 } qst_t;
+// every position's next words and flags per candidate (the window's go to
+// the kept candidates; positions 8-15 only to the simulation's model)
+logic [QN-1:0] qf_n [3], qd_n [3], qa_n [3], qb_n [3];
 logic [15:0] qw_n [3][QN];
 qst_t        qs_n [3];
 pd_t         qp0_n [3];
@@ -801,7 +830,10 @@ logic  [2:0] fits_n;
 // not only the eight D1 sees -- the faulted word is the last one fetch
 // delivers, so this only sends an instruction just before it down D1's
 // general path; the bits past the count are clear)
-wire         qfany = (|qf) || (f6_n != 2'd0 && f6_f);
+always_comb
+	for (int sl = 0; sl < 8; sl++)
+		bml[sl] = (cnt > 5'd8) && ({2'b00, 3'(3'(sl) - bh)} < cnt - 5'd8);
+wire         qfany = (|qf) || (|(qfb & bml)) || (f6_n != 2'd0 && f6_f);
 // the count as a thermometer (bit j: j < cnt; a register, kept with the
 // count), and the count with F6's words (j < cnt + f6_n), to 31
 logic [QN-1:0] cth_q;
@@ -831,6 +863,7 @@ always_comb begin
 		cfl  = 1'b0;
 		for (int i = 0; i < 7; i++) if (3'(i) < tk[c] && qb[i]) cfl = 1'b1;
 		qs_n[c] = '0;
+		qf_n[c] = '0; qd_n[c] = '0; qa_n[c] = '0; qb_n[c] = '0;
 		// each word's next value as an AND-OR over the take's one-hot (a
 		// register: the decoder's for its length, the head's for its own,
 		// a copy per quarter of the words), every term a constant-index
@@ -854,24 +887,28 @@ always_comb begin
 				// fault flags past the count are clear: qfany)
 				if (oh[k]) begin
 					if (kept) begin
-						qw_n[c][i]    = qw_n[c][i]    | qw[src[3:0]];
-						qs_n[c].qf[i] = qs_n[c].qf[i] | qf[src[3:0]];
-						qs_n[c].qd[i] = qs_n[c].qd[i] | qd[src[3:0]];
-						qs_n[c].qa[i] = qs_n[c].qa[i] | qa[src[3:0]];
-						qs_n[c].qb[i] = qs_n[c].qb[i] | qb[src[3:0]];
+						qw_n[c][i]    = qw_n[c][i]    | qwv[src[3:0]];
+						qf_n[c][i] = qf_n[c][i] | qfv[src[3:0]];
+						qd_n[c][i] = qd_n[c][i] | qdv[src[3:0]];
+						qa_n[c][i] = qa_n[c][i] | qav[src[3:0]];
+						qb_n[c][i] = qb_n[c][i] | qbv[src[3:0]];
 					end
 					else begin
 						qw_n[c][i]    = qw_n[c][i]    | f6_w[k0];
-						qs_n[c].qf[i] = qs_n[c].qf[i] | (cthf[src[4:0]] && f6_f);
-						qs_n[c].qd[i] = qs_n[c].qd[i] | f6_d;
-						qs_n[c].qa[i] = qs_n[c].qa[i] | f6_a;
-						qs_n[c].qb[i] = qs_n[c].qb[i] | f6_b[k0];
+						qf_n[c][i] = qf_n[c][i] | (cthf[src[4:0]] && f6_f);
+						qd_n[c][i] = qd_n[c][i] | f6_d;
+						qa_n[c][i] = qa_n[c][i] | f6_a;
+						qb_n[c][i] = qb_n[c][i] | f6_b[k0];
 					end
 				end
 			end
 		end
+		qs_n[c].qf = qf_n[c][7:0]; qs_n[c].qd = qd_n[c][7:0];
+		qs_n[c].qa = qa_n[c][7:0]; qs_n[c].qb = qb_n[c][7:0];
 		qs_n[c].cnt = keep + {3'b000, f6_n};
 		qs_n[c].qh  = 4'(qh + 4'(tk[c]));
+		// (the ring's head moves by the take)
+		qs_n[c].bh  = 3'(bh + tk[c]);
 		// D1 took the end of a BTB-taken branch: the stream continues at
 		// its target (the words after it in the queue came from there).
 		// (A decode that ran past the flag is refetched at WB: the PC of
@@ -911,7 +948,7 @@ end
 // candidates are kept nets -- synthesis would otherwise share their three
 // shifters as one shifter by the take's length, with the take first.
 typedef struct packed {
-	logic [QN-1:0][15:0] w;
+	logic    [7:0][15:0] w;          // (the window's)
 	qst_t                s;
 	pd_t                 p0;
 	logic                simple;
@@ -923,7 +960,7 @@ typedef struct packed {
 qc_t qc [3];
 always_comb
 	for (int c = 0; c < 3; c++) begin
-		for (int i = 0; i < QN; i++) qc[c].w[i] = qw_n[c][i];
+		for (int i = 0; i < 8; i++) qc[c].w[i] = qw_n[c][i];
 		qc[c].s      = qs_n[c];
 		qc[c].p0     = qp0_n[c];
 		qc[c].simple = qp0_n[c].simple && fits_n[c] && !qfany;
@@ -946,11 +983,25 @@ assign qn = qc_t'(cs_fire ? qk1 : cr_fire ? qk2 : qk0);
 // and the stages' word counts qualify them), no enable
 //--------------------------------------------------------------------------
 always_ff @(posedge clk) begin
-	for (int i = 0; i < QN; i++) qw[i] <= qn.w[i];
-	qf    <= qn.s.qf;
-	qd    <= qn.s.qd;
-	qa    <= qn.s.qa;
-	qb    <= qn.s.qb;
+	for (int i = 0; i < 8; i++) qw[i] <= qn.w[i];
+	qf    <= qn.s.qf[7:0];
+	qd    <= qn.s.qd[7:0];
+	qa    <= qn.s.qa[7:0];
+	qb    <= qn.s.qb[7:0];
+	// the ring: F6's words at slots bh + cnt + m (positions 8 and on,
+	// whatever the take; a word that lands in the window instead writes a
+	// slot no queued word holds)
+	begin
+		logic [2:0] s0, s1;
+		s0 = 3'(bh + cnt[2:0]);
+		s1 = 3'(s0 + 3'd1);
+		if (f6_n != 2'd0) begin
+			qwb[s0] <= f6_w[0]; qfb[s0] <= f6_f; qdb[s0] <= f6_d; qab[s0] <= f6_a; qbb[s0] <= f6_b[0];
+		end
+		if (f6_n == 2'd2) begin
+			qwb[s1] <= f6_w[1]; qfb[s1] <= f6_f; qdb[s1] <= f6_d; qab[s1] <= f6_a; qbb[s1] <= f6_b[1];
+		end
+	end
 	qp0   <= qn.p0;
 	for (int k = 0; k < 4; k++) qp0_toh[k] <= 8'd1 << qn.p0.tot[2:0];
 	qpc_r <= redir_any ? redir_npc : qn.s.qpc;
@@ -1002,6 +1053,7 @@ always_ff @(posedge clk) begin
 	iw_set = '0; iw_m = '0; iw_v = 1'b0; iw_fill = 1'b0;
 	if (!nrst) begin
 		cnt   <= '0;
+		bh    <= '0;
 		odd   <= 1'b0;
 		fpc   <= '0;
 		atc_la <= '0;
@@ -1091,6 +1143,7 @@ always_ff @(posedge clk) begin
 		// synthesis translate_on
 		cnt     <= qn.s.cnt;
 		qh      <= qn.s.qh;
+		bh      <= qn.s.bh;
 		qsimp_q <= qn.simple;
 		qcnt_q  <= qn.qcnt;
 		cth_q   <= qn.cth;
@@ -1625,6 +1678,26 @@ always_ff @(posedge clk)
 	if (nreset && !$onehot0({f2_mj, f2_lb, md_v})) begin
 		$display("FAIL: fetch: F2's words from more than one source (%b %b %b)", f2_mj, f2_lb, md_v);
 		$finish;
+	end
+// the shifting queue the ring replaces: its words 8-15 as the candidates
+// form them, against the ring's view, every queued position
+logic [15:0]   qwm [QN];
+logic [QN-1:0] qfm, qdm, qam, qbm;
+always_ff @(posedge clk) begin
+	int c;
+	c = cs_fire ? 1 : cr_fire ? 2 : 0;
+	for (int i = 0; i < QN; i++) qwm[i] <= qw_n[c][i];
+	qfm <= qf_n[c]; qdm <= qd_n[c]; qam <= qa_n[c]; qbm <= qb_n[c];
+end
+always_ff @(posedge clk)
+	if (nrst) begin
+		for (int i = 8; i < QN; i++)
+			if (5'(i) < cnt && (qwv[i] !== qwm[i] || qfv[i] !== qfm[i] || qdv[i] !== qdm[i] ||
+			                    qav[i] !== qam[i] || qbv[i] !== qbm[i])) begin
+				$display("FAIL: fetch: the ring's word %0d %h/%b%b%b%b, the shifting queue's %h/%b%b%b%b (cnt %0d bh %0d)",
+				         i, qwv[i], qfv[i], qdv[i], qav[i], qbv[i], qwm[i], qfm[i], qdm[i], qam[i], qbm[i], cnt, bh);
+				$finish;
+			end
 	end
 always_ff @(posedge clk)
 	if (nreset && q_simple && !(qp0.legal && !qp0.slow && !qp0.x0 && !qp0.x1 && qp0.tot <= 4'd7 &&
