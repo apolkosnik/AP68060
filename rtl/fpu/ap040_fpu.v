@@ -1131,6 +1131,12 @@ always @(posedge clk) begin : bin0
 	bo_sqodd <= sE[0];
 	// the divide's first, integer quotient bit (unshifted)
 	bo_q0    <= !d0[64];
+	// FCMP's compares from the same subtractions (b - a here): b > a is
+	// no borrow and not equal
+	c_eeq    <= (b_e == a_e);
+	c_meq    <= (b_m == a_m);
+	c_egt    <= !dx[17] && (b_e != a_e);
+	c_mgt    <= !d0[64] && (b_m != a_m);
 	bo_rem0  <= d0[64] ? {1'b0, b_m} : d0;
 end
 // (an inexact divide's 1.0: a divide that is exact by an unequal divisor)
@@ -1255,20 +1261,26 @@ end
 // Equal ZEROS and equal INFINITIES report the destination sign in N; equal
 // finite values compare as +0 (floatx80_cmp packs (0,0,0)), so N stays
 // clear even for two negatives.
-// (the operands' magnitude compares, registered: subtraction borrows --
-// carry chains -- and equalities; the classes and signs are registers of
+// (the operands' magnitude compares, registered: the borrows of F_BIN0's
+// subtractions of the same operands, d0 and dx, with the equalities --
+// registered there, bin0 below; the classes and signs are registers of
 // their own, so F_WB combines flip-flops)
 reg         c_egt, c_eeq, c_mgt, c_meq;
-always @(posedge clk) begin : fcmp
+// synthesis translate_off
+reg         egt_q, eeq_q, mgt_q, meq_q;
+always @(posedge clk) begin : fcmp_chk
 	reg [17:0] de;
 	reg [64:0] dm;
 	de = {a_e[16], a_e} - {b_e[16], b_e};       // negative: b_e > a_e
 	dm = {1'b0, a_m} - {1'b0, b_m};             // borrow: b_m > a_m
-	c_egt <= de[17];
-	c_eeq <= (b_e == a_e);
-	c_mgt <= dm[64];
-	c_meq <= (b_m == a_m);
+	egt_q <= de[17]; eeq_q <= (b_e == a_e); mgt_q <= dm[64]; meq_q <= (b_m == a_m);
 end
+always @(posedge clk)
+	if (nreset && (c_egt !== egt_q || c_eeq !== eeq_q || c_mgt !== mgt_q || c_meq !== meq_q)) begin
+		$display("FAIL: FPU FCMP compares %b%b%b%b, the direct forms %b%b%b%b", c_egt, c_eeq, c_mgt, c_meq, egt_q, eeq_q, mgt_q, meq_q);
+		$finish;
+	end
+// synthesis translate_on
 reg         cmp_n, cmp_z;
 always @* begin : fcmp_cc
 	reg dz, eq, gt, dbig;
