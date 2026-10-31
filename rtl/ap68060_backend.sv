@@ -2995,8 +2995,8 @@ end
 always_ff @(posedge clk) begin
 	logic ag_new, cb_n, cx_n, cb_o, cx_o, agv_n, qb_o, qx_o;
 	logic [4:0] nb, nx, nu, nu2;
-	logic [31:0] b, x, bh, xh;
-	logic        b1, b0, x1, x0;
+	logic [31:0] b, x, bh, xh, b_oth, x_oth;
+	logic        b1, b0, x1, x0, tf_b, tf_x;
 	// (ain_v from the twins sk_va and in_eb: the select's own flip-flops)
 	ag_new = !flush && !stall_ag && (sk_va || !in_eb) && !stopped;
 	// a plain load leaving DC2 whose data a base or index takes
@@ -3017,22 +3017,27 @@ always_ff @(posedge clk) begin
 	b0 = fwe_ag[0] && (sk_v ? (fwa[0] == sk_u.base) : (fwa[0] == in_u.base));
 	x1 = fwe_ag[1] && (sk_v ? (fwa[1] == sk_u.idx)  : (fwa[1] == in_u.idx));
 	x0 = fwe_ag[0] && (sk_v ? (fwa[0] == sk_u.idx)  : (fwa[0] == in_u.idx));
+	// (the file's word is the last to arrive -- the MLAB read, the bank and
+	// front selects --: everything else is formed apart, b_oth/x_oth, and
+	// the file's word is the one select before the flip-flops, below)
 	b = ({32{ain_u.base_v && b1}}                  & fwd[1])  |
-	    ({32{ain_u.base_v && !b1 && b0}}           & ag_updv)  |
-	    ({32{ain_u.base_v && !b1 && !b0}} & ain_fb);
+	    ({32{ain_u.base_v && !b1 && b0}}           & ag_updv);
 	x = ({32{x1}}                  & ixf(fwd[1], ain_u))  |
-	    ({32{!x1 && x0}}           & ixf(ag_updv, ain_u))  |
-	    ({32{!x1 && !x0}} & ixf(ain_fx, ain_u));
+	    ({32{!x1 && x0}}           & ixf(ag_updv, ain_u));
+	tf_b = ag_new && !(cb_n && ain_u.base_v) && ain_u.base_v && !b1 && !b0;
+	tf_x = ag_new && !cx_n && !x1 && !x0;
 	// the value staying: EX's result of last clock (exw_q), else its own
 	qb_o = exw_qv && exw_qreg == ag_u.base && !cbl;
 	qx_o = exw_qv && exw_qreg == ag_u.idx  && !cxl;
 	bh = (ag_v && ag_u.base_v && qb_o) ? exw_q : agb_q;
 	xh = (ag_v && ag_u.idx_v && qx_o) ? ixf(exw_q, ag_u) : agx_q;
 	// the load's capture, then the advance, select last
-	agb_q <= ag_new ? ((cb_n && ain_u.base_v) ? dc2_capv : b)
-	                : ((cb_o && ag_v && ag_u.base_v) ? dc2_capv : bh);
-	agx_q <= ag_new ? (cx_n ? ixf(dc2_capv, ain_u) : x)
-	                : ((cx_o && ag_v && ag_u.idx_v) ? ixf(dc2_capv, ag_u) : xh);
+	b_oth = ag_new ? ((cb_n && ain_u.base_v) ? dc2_capv : b)
+	               : ((cb_o && ag_v && ag_u.base_v) ? dc2_capv : bh);
+	x_oth = ag_new ? (cx_n ? ixf(dc2_capv, ain_u) : x)
+	               : ((cx_o && ag_v && ag_u.idx_v) ? ixf(dc2_capv, ag_u) : xh);
+	agb_q <= tf_b ? ain_fb : b_oth;
+	agx_q <= tf_x ? ixf(ain_fx, ain_u) : x_oth;
 	if (ag_new) begin
 		cbl   <= cb_n;
 		cxl   <= cx_n;
