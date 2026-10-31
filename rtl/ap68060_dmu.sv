@@ -1982,7 +1982,7 @@ always_ff @(posedge clk) begin
 				// a store: a copyback miss allocates the line for WB
 				if (alloc && e_x.cm == 2'b01 && !e_x.hit && !e_falloc) begin
 					f_set  <= e_va[10:4];
-					f_way  <= victim(lve_q, rrc, dc_foc);
+					f_way  <= victim(lve_a, rrc, dc_foc);
 					e_sret <= E_S_XL;
 					e_st   <= E_FILL;
 				end
@@ -1995,7 +1995,7 @@ always_ff @(posedge clk) begin
 				if (e_part ? (st_line(m3, e_x.pa[31:4]) || st_line(m4, e_x.pa[31:4])) : hz) begin
 					steal <= 1'b0; e_st <= E_IDLE;
 				end
-				else if (e_x.cm == 2'b00 && ld_q[e_x.way]) begin
+				else if (e_x.cm == 2'b00 && ldd_a[e_x.way]) begin
 					// a write-through read hit on a dirty line: the line is
 					// pushed and stays valid (MC68060UM 5.5.3), then read
 					f_set   <= e_va[10:4];
@@ -2014,7 +2014,7 @@ always_ff @(posedge clk) begin
 			end
 			else if (alloc && rd && !e_x.hit) begin
 				f_set  <= e_va[10:4];
-				f_way  <= victim(lve_q, rrc, dc_foc);
+				f_way  <= victim(lve_a, rrc, dc_foc);
 				e_sret <= E_S_XL;
 				e_st   <= E_FILL;
 			end
@@ -3606,6 +3606,22 @@ assign pq1_l  = bo_pa[31:4];
 // split's next line, the slow path's, the scan's, else the fill/push set), or the snooped set while the engine is frozen
 wire  [7:0] lse_q = lsm_q;              // (with the pending write's bypass)
 assign lve_q = lse_q[3:0];
+// E_S_ACT's valid and dirty bits of its set, registered every clock from
+// the read (the clock before it reads e_va's set), the port's pending
+// write laid over them from registers: the decision's victim and dirty
+// test start from flip-flops, not the state-selected RAM read; checked
+logic [7:0] lsm_act;
+always_ff @(posedge clk) lsm_act <= lsm_q;
+wire [7:0] lsm_a = (vq_v && vq_set == e_va[10:4]) ? vmerge(lsm_act) : lsm_act;
+wire [3:0] lve_a = lsm_a[3:0];
+wire [3:0] ldd_a = lsm_a[7:4];
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && e_st == E_S_ACT && !e_kill && (lve_a !== lve_q || ldd_a !== ld_q)) begin
+		$display("FAIL: dmu: E_S_ACT's registered valid/dirty bits %b/%b, the set's %b/%b", lve_a, ldd_a, lve_q, ld_q);
+		$finish;
+	end
+// synthesis translate_on
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && ((e_st == E_SP_2 && lve_fix(st_set) !== lve_q) || (e_st == E_S_XL2 && lve_fix(e_va[10:4]) !== lve_q))) begin
@@ -3616,13 +3632,16 @@ always_ff @(posedge clk)
 // (an AND-OR over one-hot selects -- the snoop's phase first, the engine's
 // states after it, the fill's set otherwise -- not a priority chain)
 always_comb begin
-	logic s_sn, s_sp, s_va, s_sc, s_f;
+	logic s_sn, s_sp, s_va, s_st, s_sc, s_f;
 	s_sn = (sn_ph == SN_B);
 	s_sp = !s_sn && (e_st == E_SP_W || e_st == E_SP_2);              // (the next set; read in the wait state, registered: lve_sp)
-	s_va = !s_sn && (e_st == E_S_XLW || e_st == E_S_XL2 || e_st == E_S_ACT || e_st == E_W_DEC);
+	// (E_SP_3 and, with the address being loaded into e_va, E_S_START: the
+	// clock before E_S_ACT, for lsm_act)
+	s_va = !s_sn && (e_st == E_SP_3 || e_st == E_S_XLW || e_st == E_S_XL2 || e_st == E_S_ACT || e_st == E_W_DEC);
+	s_st = !s_sn && (e_st == E_S_START);
 	s_sc = !s_sn && (e_st == E_M_SCANW || e_st == E_M_SCANW2 || e_st == E_M_SCAN2);
-	s_f  = !(s_sn || s_sp || s_va || s_sc);
-	lv_ra = ({7{s_sn}} & sn_pa[10:4]) | ({7{s_sp}} & st_set) | ({7{s_va}} & e_va[10:4]) |
+	s_f  = !(s_sn || s_sp || s_va || s_st || s_sc);
+	lv_ra = ({7{s_sn}} & sn_pa[10:4]) | ({7{s_sp}} & st_set) | ({7{s_va}} & e_va[10:4]) | ({7{s_st}} & m2.r.a[10:4]) |
 	        ({7{s_sc}} & sc_set) | ({7{s_f}} & f_set);
 end
 initial for (int i = 0; i < 128; i++) begin
