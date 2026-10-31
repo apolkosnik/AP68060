@@ -3115,23 +3115,37 @@ always_ff @(posedge clk) begin
 			// coincide with it, their uop waits for such a load)
 			if (!stall_a1) a1_v <= ain_v && !stopped && !halted;
 			if (!stall_a1) a1_vb <= ain_v && !stopped && !halted;
+			// (AG1's file words, entering or waiting: the same four writes,
+			// youngest first -- the load leaving DC2, AG2's updates, EX2's
+			// broadcast -- their compares formed for both uops and picked
+			// by the take, then one select; the file's word, the last to
+			// arrive, the one select before the flip-flop)
+			begin
+				logic tk, eb, ex1, cb, b1, b0, xb, cx, x1, x0, xx;
+				tk  = a1_take && ain_v;
+				cb = tk ? (adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.base) :
+				          (a1_v && adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.base);
+				b1 = tk ? (fwe[1] && fwa[1] == ain_u.base) : (a1_v && fwe[1] && fwa[1] == a1_u.base);
+				b0 = tk ? (fwe[0] && fwa[0] == ain_u.base) : (a1_v && fwe[0] && fwa[0] == a1_u.base);
+				xb = tk ? (xw_v && xw_reg == ain_u.base)   : (a1_v && xw_v && xw_reg == a1_u.base && !a1_lex);
+				cx = tk ? (adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.idx) :
+				          (a1_v && adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.idx);
+				x1 = tk ? (fwe[1] && fwa[1] == ain_u.idx)  : (a1_v && fwe[1] && fwa[1] == a1_u.idx);
+				x0 = tk ? (fwe[0] && fwa[0] == ain_u.idx)  : (a1_v && fwe[0] && fwa[0] == a1_u.idx);
+				xx = tk ? (xw_v && xw_reg == ain_u.idx)    : (a1_v && xw_v && xw_reg == a1_u.idx && !a1_lexx);
+				eb = cb || b1 || b0 || xb;
+				ex1 = cx || x1 || x0 || xx;
+				a1_fb <= (tk && !eb)  ? ain_fb :
+				         !eb ? a1_fb : (cb ? dc2_capv : b1 ? fwd[1] : b0 ? fwd[0] : e2_res_a);
+				a1_fx <= (tk && !ex1) ? ain_fx :
+				         !ex1 ? a1_fx : (cx ? dc2_capv : x1 ? fwd[1] : x0 ? fwd[0] : e2_res_a);
+			end
 			if (a1_take && ain_v) begin
-				logic cb1, cx1, bb1, bb0, bx1, bx0, xb1, xx1;
+				logic cb1, cx1;
 				cb1 = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.base;
 				cx1 = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.idx;
-				bb1 = fwe[1] && fwa[1] == ain_u.base;  bb0 = fwe[0] && fwa[0] == ain_u.base;
-				bx1 = fwe[1] && fwa[1] == ain_u.idx;   bx0 = fwe[0] && fwa[0] == ain_u.idx;
-				xb1 = xw_v && xw_reg == ain_u.base;
-				xx1 = xw_v && xw_reg == ain_u.idx;
 				a1_u      <= ain_u;
 				a1_u.disp <= ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp;
-				// (the file's word -- the MLAB read, the bank, front and skid
-				// selects -- is the last to arrive: the one select before the
-				// flip-flop, the other sources formed apart)
-				a1_fb     <= (!cb1 && !bb1 && !bb0 && !xb1) ? ain_fb :
-				             (cb1 ? dc2_capv : bb1 ? fwd[1] : bb0 ? fwd[0] : e2_res_a);
-				a1_fx     <= (!cx1 && !bx1 && !bx0 && !xx1) ? ain_fx :
-				             (cx1 ? dc2_capv : bx1 ? fwd[1] : bx0 ? fwd[0] : e2_res_a);
 				a1_lex    <= cb1;
 				a1_lexx   <= cx1;
 			end
@@ -3139,21 +3153,9 @@ always_ff @(posedge clk) begin
 				// waiting in AG1: the writes as they come, youngest first (AG2's
 				// updates, the load leaving DC2, EX2's broadcast unless an older
 				// writer's than a load captured)
-				logic cbo1, cxo1, bbo1, bbo0, bxo1, bxo0, xbo1, xxo1;
+				logic cbo1, cxo1;
 				cbo1 = adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.base;
 				cxo1 = adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.idx;
-				bbo1 = fwe[1] && fwa[1] == a1_u.base;  bbo0 = fwe[0] && fwa[0] == a1_u.base;
-				bxo1 = fwe[1] && fwa[1] == a1_u.idx;   bxo0 = fwe[0] && fwa[0] == a1_u.idx;
-				xbo1 = xw_v && xw_reg == a1_u.base && !a1_lex;
-				xxo1 = xw_v && xw_reg == a1_u.idx  && !a1_lexx;
-				if (cbo1)      a1_fb <= dc2_capv;
-				else if (bbo1) a1_fb <= fwd[1];
-				else if (bbo0) a1_fb <= fwd[0];
-				else if (xbo1) a1_fb <= e2_res_a;
-				if (cxo1)      a1_fx <= dc2_capv;
-				else if (bxo1) a1_fx <= fwd[1];
-				else if (bxo0) a1_fx <= fwd[0];
-				else if (xxo1) a1_fx <= e2_res_a;
 				a1_lex  <= cbo1 || (a1_lex  && !adv_ex);
 				a1_lexx <= cxo1 || (a1_lexx && !adv_ex);
 			end
