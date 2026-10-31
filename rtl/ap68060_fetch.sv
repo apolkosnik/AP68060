@@ -291,12 +291,8 @@ logic [30:0]  o2_t;
 (* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *) logic  [1:0]  f3_b, f4_b, f5_b, f6_b;
 (* altera_attribute = "-name AUTO_SHIFT_REGISTER_RECOGNITION OFF" *) logic [30:0]  f3_t, f4_t, f5_t, f6_t;
 pd_t          f6_p [2];
-genvar gp;
-generate
-	for (gp = 0; gp < 2; gp++) begin : g_pd
-		ap68060_predec pd (.clk(clk), .op(f3_w[gp]), .pd(f6_p[gp]));
-	end
-endgenerate
+// (both words in one predecoder: its ROMs have a port per word)
+ap68060_predec pd (.clk(clk), .op(f3_w), .pd(f6_p));
 
 //--------------------------------------------------------------------------
 // I-ATC, BTB

@@ -7,6 +7,11 @@ module tb_decode;
 	import ap68060_pkg::*, ap68060_upkg::*;
 	`include "gen/ap68060_dec_pla.svh"
 	logic [11:0] expect_t [0:65535];
+	// the predecoder's ROM (ap68060_predec: {hit, entry} of every word)
+	logic [9:0] pd_rom [0:65535];
+	initial begin
+`include "gen/ap68060_pd_rom.svh"
+	end
 	function automatic logic [3:0] ea_idx(input logic [2:0] m, input logic [2:0] r);
 		if (m != 3'd7) ea_idx = {1'b0, m};
 		else if (r <= 3'd4) ea_idx = 4'd7 + {1'b0, r};
@@ -37,6 +42,11 @@ module tb_decode;
 			if (dec_match(16'(op)) != (|s)) begin
 				bad++;
 				if (bad < 10) $display("op %04x: dec_match %b, an entry selected %b", op, dec_match(16'(op)), |s);
+			end
+			// the predecoder's ROM against the selection
+			if (pd_rom[op] !== {|s, (|s) ? sel_index(s) : 9'd0}) begin
+				bad++;
+				if (bad < 10) $display("op %04x: the predecoder's ROM %03x, the PLA's %b/%0d", op, pd_rom[op], |s, sel_index(s));
 			end
 			got = (|s) ? {1'b0, legal, 1'b0, 9'(sel_index(s) + 9'd1)} : 12'd0;
 			if (got != expect_t[op]) begin
