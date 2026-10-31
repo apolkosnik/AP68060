@@ -582,24 +582,32 @@ end
 // synthesis translate_on
 // (fv's own entry read at each candidate, this clock's writes -- their
 // enables late -- and the drop applied after it, not through fv_n's 32:1)
+// (port 2's write -- EX's result, its kill decided late -- applied after
+// the pick: fvn_at has ports 0/1's, fvm2 says whether port 2 names the
+// register)
 function automatic logic fvn_at(input logic [4:0] a);
 	logic v;
 	v = fv[a] && !fvc_q;                                                   // (the pending drop)
 	for (int w = 0; w < 3; w++) if (fq_e[w] && fq_wa[w] == a) v = 1'b1;   // pending writes
-	for (int w = 0; w < 3; w++) if (fwe[w] && fwa[w] == a) v = 1'b1;     // this clock's
+	for (int w = 0; w < 2; w++) if (fwe[w] && fwa[w] == a) v = 1'b1;     // this clock's, ports 0/1
 	fvn_at = v && !fv_clr[0];
 endfunction
+function automatic logic fvm2(input logic [4:0] a);
+	fvm2 = (fwa[2] == a);
+endfunction
 (* keep *) logic [6:0] fs0, fs1, fs2;   // (the candidates kept: the selects pick last)
+(* keep *) logic [6:0] fm0, fm1, fm2;   // (port 2 names the candidate)
 always_comb
 	for (int r = 0; r < 7; r++) begin
-		fs0[r] = fvn_at(rran0[r]);
-		fs1[r] = fvn_at(rran1[r]);
-		fs2[r] = fvn_at(rran2[r]);
+		fs0[r] = fvn_at(rran0[r]);  fm0[r] = fvm2(rran0[r]);
+		fs1[r] = fvn_at(rran1[r]);  fm1[r] = fvm2(rran1[r]);
+		fs2[r] = fvn_at(rran2[r]);  fm2[r] = fvm2(rran2[r]);
 	end
 always_ff @(posedge clk)
 	for (int r = 0; r < 7; r++)
-		fsel_q[r] <= (rrsel2[r] & fs2[r]) | (rrsel1[r] & !rrsel2[r] & fs1[r]) |
-		             (!rrsel1[r] & !rrsel2[r] & fs0[r]);
+		fsel_q[r] <= ((rrsel2[r] & fs2[r]) | (rrsel1[r] & !rrsel2[r] & fs1[r]) |
+		              (!rrsel1[r] & !rrsel2[r] & fs0[r])) ||
+		             (fwe[2] && !fv_clr[0] && (rrsel2[r] ? fm2[r] : rrsel1[r] ? fm1[r] : fm0[r]));
 // synthesis translate_off
 always_ff @(posedge clk)
 	for (int r = 0; r < 7; r++)

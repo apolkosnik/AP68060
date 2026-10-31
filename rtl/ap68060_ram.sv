@@ -191,12 +191,18 @@ module ap68060_rf #(
 	// address, as this clock's writes leave it (the later port wins, as in
 	// the table) -- the table's 32:1 read is off the read path, and the
 	// late enables are the last term
+	// (port 2's write enable -- EX's result, its kill decided late -- is
+	// applied after the pick: nsel has ports 0/1's writes, nsel2 says
+	// whether port 2 would write the register)
 	function automatic logic [1:0] nsel(input logic [4:0] a);
 		logic [1:0] v;
 		v = lvt_eff(a);
-		for (int w = 0; w < NW; w++)
+		for (int w = 0; w < NW && w < 2; w++)
 			if (we[w] && wa[w] == a) v = 2'(w);
 		nsel = v;
+	endfunction
+	function automatic logic nsel2(input logic [4:0] a);
+		nsel2 = (NW > 2) && (wa[2] == a);
 	endfunction
 	// synthesis translate_off
 	// the table as written at once (the model the selects are checked against)
@@ -211,17 +217,23 @@ module ap68060_rf #(
 	// (the candidates kept as nodes: the late selects are the one level
 	// before the flip-flop)
 	(* keep *) logic [1:0] ns0 [NR], ns1 [NR], ns2 [NR];
+	(* keep *) logic [NR-1:0] m20, m21, m22;
 	always_comb
 		for (int r = 0; r < NR; r++) begin
-			ns0[r] = nsel(ran0[r]);
-			ns1[r] = nsel(ran1[r]);
-			ns2[r] = nsel(ran2[r]);
+			ns0[r] = nsel(ran0[r]);  m20[r] = nsel2(ran0[r]);
+			ns1[r] = nsel(ran1[r]);  m21[r] = nsel2(ran1[r]);
+			ns2[r] = nsel(ran2[r]);  m22[r] = nsel2(ran2[r]);
 		end
 	always_ff @(posedge clk)
-		for (int r = 0; r < NR; r++)
-			sel_q[r] <= ({2{rsel2[r]}} & ns2[r]) |
-			            ({2{rsel1[r] && !rsel2[r]}} & ns1[r]) |
-			            ({2{!rsel1[r] && !rsel2[r]}} & ns0[r]);
+		for (int r = 0; r < NR; r++) begin
+			logic [1:0] v;
+			logic       m2;
+			v  = ({2{rsel2[r]}} & ns2[r]) |
+			     ({2{rsel1[r] && !rsel2[r]}} & ns1[r]) |
+			     ({2{!rsel1[r] && !rsel2[r]}} & ns0[r]);
+			m2 = rsel2[r] ? m22[r] : rsel1[r] ? m21[r] : m20[r];
+			sel_q[r] <= (we[2] && m2) ? 2'd2 : v;
+		end
 	// synthesis translate_off
 	always_ff @(posedge clk)
 		for (int w = 0; w < NW; w++)
