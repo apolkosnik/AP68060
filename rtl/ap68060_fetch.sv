@@ -359,7 +359,7 @@ ap68060_atc #(.SAME_SEARCH(0)) iatc (
 	.fc2(atc_fc2),
 	.hit(atc_hit1), .ent(atc_e1), .hv(), .wpa(),   // (the first port: page flushes)
 	.la_d(atc_la), .fc2_d(atc_fc2), .set_d(atc_set), .hv_d(atc_hv), .wpa_d(), .ent_d(atc_went),
-	.wr(iatc_wr), .wla(iatc_wla), .wfc2(iatc_wfc2), .went(iatc_went),
+	.wr(iatc_wr), .wla(iatc_wla), .wla_n(32'd0), .wfc2(iatc_wfc2), .went(iatc_went),
 	.wsame(1'b0), .wsame_hv(4'd0),
 	.flush_all(fl_all_q), .flush_page(fl_pg_q),
 	.flush_nonglobal(fl_ng_q)

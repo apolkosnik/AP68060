@@ -27,7 +27,8 @@ module ap68060_atc
 	// search -- the caller says whether the page is there (wsame) and in
 	// which way (the hit vector of the lookup that started the search)
 	parameter bit SAME_SEARCH = 1,
-	parameter bit SET_IN = 0           // the first port's set from the set input
+	parameter bit SET_IN = 0,          // the first port's set from the set input
+	parameter bit REG_WAY = 0          // the install's replacement way registered a clock ahead, from wla_n
 )
 (
 	input  logic        clk,
@@ -57,6 +58,7 @@ module ap68060_atc
 	// install (one cycle)
 	input  logic        wr,
 	input  logic [31:0] wla,
+	input  logic [31:0] wla_n,         // (REG_WAY) wla as it will be next clock (the walk's address)
 	input  logic        wfc2,
 	input  atce_t       went,
 	input  logic        wsame,         // (SAME_SEARCH 0) the page is in the set ...
@@ -166,6 +168,7 @@ always_ff @(posedge clk)
 
 // install way: the same page if present (an M-bit update), else invalid, else rr
 logic [1:0] wway;
+logic [1:0] wfree_q;             // (REG_WAY) the replacement way, registered
 always_comb begin
 	logic found;
 	found = 1'b0;
@@ -179,9 +182,32 @@ always_comb begin
 		wway  = wsame_hv[3] ? 2'd3 : wsame_hv[2] ? 2'd2 : wsame_hv[1] ? 2'd1 : 2'd0;
 	end
 	if (!found) begin
-		if (half) wway = {1'b0, rr[0]};
-		for (int i = 3; i >= 0; i--) if (!v[wset][i] && !(half && i >= 2)) wway = 2'(i);
+		if (!REG_WAY) begin
+			if (half) wway = {1'b0, rr[0]};
+			for (int i = 3; i >= 0; i--) if (!v[wset][i] && !(half && i >= 2)) wway = 2'(i);
+		end
+		else wway = wfree_q;
 	end
+end
+// (REG_WAY: the replacement way -- the first invalid way of the
+// install's set, else the counter -- registered a clock ahead, from the
+// set's valid bits and the counter as they will be (this clock's install
+// and flushes applied as the block below applies them); the install's
+// address is the walker's, held for clocks.  The set's 16:1 valid read
+// and the priority then leave the RAMs' write enables.  Checked exact.)
+wire [3:0] wset_n = p8k ? wla_n[16:13] : wla_n[15:12];
+always_ff @(posedge clk) begin
+	logic [3:0] vn;
+	logic [1:0] rrn, w;
+	// (next clock's install set's valid bits as they will be: this clock's
+	// install -- into its own set, which may be another -- and flushes)
+	vn  = flush_all ? (flush_nonglobal ? (v[wset_n] & g[wset_n]) : 4'd0)
+	                : ((wr && wset == wset_n) ? (v[wset_n] | pick(v[wset_n])) : v[wset_n]);
+	if (fp_v && fp_s == wset_n) vn = (flush_all ? (flush_nonglobal ? (v[wset_n] & g[wset_n]) : 4'd0) : v[wset_n]) & ~fp_m;
+	rrn = (wr && (half ? (v[wset][1:0] == 2'b11) : (v[wset] == 4'hF))) ? rr + 2'd1 : rr;
+	w = half ? {1'b0, rrn[0]} : rrn;
+	for (int i = 3; i >= 0; i--) if (!vn[i] && !(half && i >= 2)) w = 2'(i);
+	wfree_q <= w;
 end
 
 // synthesis translate_off
@@ -229,7 +255,7 @@ endfunction
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (wr && pick(v[wset]) != (4'b0001 << wway)) begin
-		$display("FAIL: ATC: the set's own install way %b, wway %0d", pick(v[wset]), wway);
+		$display("FAIL: ATC: the set's own install way %b, wway %0d (set %0d valid %b rr %0d)", pick(v[wset]), wway, wset, v[wset], rr);
 		$finish;
 	end
 // synthesis translate_on

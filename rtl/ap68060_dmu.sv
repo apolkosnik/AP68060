@@ -551,7 +551,7 @@ logic        atc_fall, atc_fpage, atc_fng;
 
 logic        tw_upd;              // the search updates an entry (first write: M)
 logic  [3:0] tw_hw;               // ... in this way (the ATC's hit vector then)
-ap68060_atc #(.SAME_SEARCH(0), .SET_IN(1)) datc (
+ap68060_atc #(.SAME_SEARCH(0), .SET_IN(1), .REG_WAY(1)) datc (
 	.clk(clk), .nreset(nreset), .p8k(tc_p), .half(tc[11]),
 	// (the first port is the engine's alone: its stolen address; DC1 and
 	// DT look up through the second)
@@ -560,7 +560,7 @@ ap68060_atc #(.SAME_SEARCH(0), .SET_IN(1)) datc (
 	// (the second port: DC1's lookup, or DT's while it looks up again)
 	.la_d(tk_relook ? mt.a : m1.a), .fc2_d(tk_relook ? mt.smode : m1.smode),
 	.set_d(tk_relook ? mt_aset : m1_aset), .hv_d(atc_hvd), .wpa_d(atc_wpad), .ent_d(atc_entd),
-	.wr(atc_wr), .wla(atc_wla), .wfc2(atc_wfc2), .went(atc_went),
+	.wr(atc_wr), .wla(atc_wla), .wla_n(tw_va), .wfc2(atc_wfc2), .went(atc_went),
 	.wsame(tw_upd), .wsame_hv(tw_hw),
 	.flush_all(atc_fall), .flush_page(atc_fpage), .flush_nonglobal(atc_fng)
 );
@@ -1313,6 +1313,7 @@ always_ff @(posedge clk) begin
 	iack_end  <= 1'b0;
 	iw_done   <= 1'b0;
 	atc_wr    <= 1'b0;
+	atc_wla   <= tw_va;   // (the install's address every clock: the ATC forms its replacement way a clock ahead)
 	atc_fall  <= 1'b0;
 	atc_fpage <= 1'b0;
 	iatc_flush_all  <= 1'b0;
