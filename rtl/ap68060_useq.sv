@@ -232,8 +232,6 @@ function automatic logic [4:0] uidx(input uop_t u);
 	uidx = u.idx;
 endfunction
 always_comb begin
-	nx_b0 = nu.base;
-	nx_i0 = nu.idx;
 	nx_b1 = ubase(uq_rp ? ue[0] : ue[1]);
 	nx_i1 = uidx(uq_rp ? ue[0] : ue[1]);
 	uq0          = uq_rp ? ue[1] : ue[0];
@@ -862,6 +860,10 @@ end
 // D2c: the uop the instruction's state makes of the base uop
 //--------------------------------------------------------------------------
 uop_t        nu;
+// (D2c's uop's base and index for the back end: after nu's declaration,
+// which Quartus requires)
+assign nx_b0 = nu.base;
+assign nx_i0 = nu.idx;
 logic        n_ptr;          // nu is a pointer load (memory indirect)
 logic        n_mv_pre;       // nu is the MOVEM address copy into T11
 logic        n_mv_tx;        // ... a MOVEM transfer
