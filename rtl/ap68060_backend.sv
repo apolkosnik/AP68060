@@ -552,8 +552,11 @@ always_ff @(posedge clk)
 // so the reads start from flip-flops and the skid's select comes after)
 assign rra[0] = in_u.base;
 assign rra[1] = in_u.idx;
-assign rra[5] = sk_u.base;
-assign rra[6] = sk_u.idx;
+// (the skid's base and index for the file's address ports from preserved
+// twins, placed by the file; the uop's own copies stay with the skid)
+(* preserve *) logic [4:0] sk_base_a, sk_idx_a;
+assign rra[5] = sk_base_a;
+assign rra[6] = sk_idx_a;
 // AG's entering base and index from the file: front or back copy, the
 // skid's or the sequencer's (= ain_u's)
 wire [31:0] ain_fb = sk_vr ? (fsel_q[5] ? frd[5] : brd[5]) : (fsel_q[0] ? frd[0] : brd[0]);
@@ -2678,6 +2681,8 @@ always_ff @(posedge clk) begin
 				sk_v  <= 1'b1;
 				sk_vr <= 1'b1;
 				sk_u  <= in_u;
+				sk_base_a <= in_u.base;
+				sk_idx_a  <= in_u.idx;
 			end
 		end
 		if (flush || kill_now) begin sk_v <= 1'b0; sk_vr <= 1'b0; end

@@ -1564,6 +1564,10 @@ endfunction
 pst_t   p0, p1;
 fview_t v0, v1;
 fout_t  o0, o1;
+// (the two candidates kept as nets: the advance -- the stall chain, late --
+// is then the one select before oq, not pushed into their logic)
+(* keep *) wire [$bits(fout_t)-1:0] ok0 = o0;
+(* keep *) wire [$bits(fout_t)-1:0] ok1 = o1;
 always_comb begin
 	p0 = pred_f(1'b0, act);
 	p1 = pred_f(1'b1, ex_v);
@@ -1595,7 +1599,7 @@ end
 // outputs are not used)
 always_ff @(posedge clk)
 	if (!nreset) oq <= '0;
-	else oq <= (ex_v && !adv) ? o0 : o1;
+	else oq <= (ex_v && !adv) ? fout_t'(ok0) : fout_t'(ok1);
 
 // the uop may act: it need not wait for the older uops (oq.ns), or they
 // are gone (safe)
