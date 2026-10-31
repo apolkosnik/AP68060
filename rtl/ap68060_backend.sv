@@ -258,6 +258,10 @@ logic [31:0] fv;
 // stays off the FPU's hold, and so the stall chain)
 logic ew_same;
 logic ex2_same;               // ex_u.pc == e2_u.pc, the same way
+// DC2's uop against EX's, EX2's and WB's pcs, registered from the uops the
+// stages hold next (each its own or its predecessor's; the advances pick
+// last)
+logic ds_x, ds_2, ds_w;
 // EX2: the uop's outcome as EX decided it, in registers; WB's registers
 // are formed from these (the exception select, the redirect, the CCR), so
 // EX's late decisions -- the ALU's condition, the exception-pending flag,
@@ -326,19 +330,21 @@ wire dc2_fpu  = (dc2_u.op == OP_FPU);
 // DC2's entering, or EX's own staying (same_q: its registered compare
 // with that stage's uop); an empty EX next clock counts as not (the older
 // uop is in flight: safe stays down, as the check requires)
-function automatic logic fps_n(input logic [31:0] pc, input logic same_q);
-	fps_n = adv_dc2 ? (dc2_fpu && (dc2_u.pc == pc)) : (ex_v && stall_ex && ex_kx[2] && same_q);
+// (dsame: DC2's uop is the given stage's instruction, dc2_u.pc == its pc,
+// a register below -- no 32-bit compare in the stall registers' cone)
+function automatic logic fps_n(input logic dsame, input logic same_q);
+	fps_n = adv_dc2 ? (dc2_fpu && dsame) : (ex_v && stall_ex && ex_kx[2] && same_q);
 endfunction
 function automatic logic safe_f(input logic k);
 	logic wbp, e2p;
 	if (stall_wb)
-		wbp = !wb_v || (!wb_u.last && wb_ok && memok(wb_u) && fps_n(wb_u.pc, ew_same));
+		wbp = !wb_v || (!wb_u.last && wb_ok && memok(wb_u) && fps_n(ds_w, ew_same));
 	else
-		wbp = !adv_e2 || (!e2_u.last && e2_ok && memok(e2_u) && fps_n(e2_u.pc, ex2_same));
+		wbp = !adv_e2 || (!e2_u.last && e2_ok && memok(e2_u) && fps_n(ds_2, ex2_same));
 	if (stall_e2)
-		e2p = !e2_v || (!e2_u.last && e2_ok && memok(e2_u) && fps_n(e2_u.pc, ex2_same));
+		e2p = !e2_v || (!e2_u.last && e2_ok && memok(e2_u) && fps_n(ds_2, ex2_same));
 	else
-		e2p = !adv_ex || (!ex_u.last && ex_okc && memok(ex_u) && fps_n(ex_u.pc, 1'b1));
+		e2p = !adv_ex || (!ex_u.last && ex_okc && memok(ex_u) && fps_n(ds_x, 1'b1));
 	safe_f = (flush || k || !nreset) || (wbp && e2p);
 endfunction
 always_comb safe_n  = safe_f(kill_now);
@@ -472,6 +478,24 @@ assign adv_dc2 = dc2_v && !stall_dc2;
 assign adv_dt  = dt_v  && !stall_dt;
 assign adv_dc1 = dc1_v && !stall_dc1;
 assign adv_ag  = ag_v  && !stall_ag;
+// (ds_*: see fps_n)
+always_ff @(posedge clk) begin
+	ds_x <= adv_dt ? (adv_dc2 ? (dt_u.pc == dc2_u.pc) : (dt_u.pc == ex_u.pc))
+	                : (adv_dc2 ? 1'b1                  : (dc2_u.pc == ex_u.pc));
+	ds_2 <= adv_dt ? (adv_ex  ? (dt_u.pc == ex_u.pc)  : (dt_u.pc == e2_u.pc))
+	                : (adv_ex  ? (dc2_u.pc == ex_u.pc) : (dc2_u.pc == e2_u.pc));
+	ds_w <= adv_dt ? (adv_e2  ? (dt_u.pc == e2_u.pc)  : (dt_u.pc == wb_u.pc))
+	                : (adv_e2  ? (dc2_u.pc == e2_u.pc) : (dc2_u.pc == wb_u.pc));
+end
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && $time > 0 && (ds_x !== (dc2_u.pc == ex_u.pc) || ds_2 !== (dc2_u.pc == e2_u.pc) ||
+	                            ds_w !== (dc2_u.pc == wb_u.pc))) begin
+		$display("FAIL: DC2's registered pc compares %b%b%b, the compares %b%b%b", ds_x, ds_2, ds_w,
+		         dc2_u.pc == ex_u.pc, dc2_u.pc == e2_u.pc, dc2_u.pc == wb_u.pc);
+		$finish;
+	end
+// synthesis translate_on
 wire   adv_a1  = a1_v  && !stall_ag;   // (AG1 moves on when AG2 does)
 // the DMU's copies of the advances and the kill, separate nodes (keep), so
 // each drives its own module's registers
