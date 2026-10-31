@@ -93,6 +93,8 @@ module ap68060_dmu
 	output logic        hold_dt_b, hold1_b, dc2_rdy_b, st_ok_b,   // the back end's copies of the four holds (preserved twins)
 	output logic        hold1_n, dc2r_n, st_ok_n, hold_dt_n,     // ... and their next values (dc2r_n conservative), for its registered stalls
 	output logic        hold1_nk, dc2r_n1, dc2r_n0, rdy_dt,       // hold1_n without the kill; dc2r_n with DT's late decision rdy_dt taken as 1 / 0 (the back end picks last)
+	output logic        hold1_nk0, hold1_nk1, st_ok_n0, st_ok_n1,  // hold1_nk and st_ok_n with WB's store valid (wb_st) taken as 0 / 1: the back end picks by its own register
+	output logic        wbst_r,         // wb_st's part from this module's registers (WB's record is a store): the back end's select, with its st_v
 	                                    // data read is stale
 	output logic        dc2_rdy,        // DC2's access is done: a register, conservative
 	output logic        dc2_rdy_c,      // ... as the stage's own state gives it (checks)
@@ -1039,6 +1041,7 @@ endfunction
 // WB fast store: a copyback store that hit, within one line
 //--------------------------------------------------------------------------
 wire wb_st   = m4.r.v && st_v && (m4.r.mem == M_ST || m4.r.mem == M_RMW);
+assign wbst_r = m4.r.v && (m4.r.mem == M_ST || m4.r.mem == M_RMW);
 // (whether WB's access can be a fast store at all: registered as it
 // enters WB, cleared with its hit)
 logic m4_fq;
@@ -1078,6 +1081,9 @@ logic        wfs_p1;
 wire wb_fs = wb_st && m4.split && m4.x.ok && !m4.x.flt && m4.x.hit && m4.x.cm == 2'b01 &&
              m4.x1.ok && !m4.x1.flt && m4.x1.hit && m4.x1.cm == 2'b01 && dc_en &&
              !m4.r.lock && (m4.r.msz != SZ_Q) && (e_st == E_IDLE) && !e_wst_done && !wfs_p1;
+wire wb_fs1 = m4.split && m4.x.ok && !m4.x.flt && m4.x.hit && m4.x.cm == 2'b01 &&
+             m4.x1.ok && !m4.x1.flt && m4.x1.hit && m4.x1.cm == 2'b01 && dc_en &&
+             !m4.r.lock && (m4.r.msz != SZ_Q) && (e_st == E_IDLE) && !e_wst_done && !wfs_p1;   // (wb_fs with wb_st taken as 1)
 wire   [2:0] wfs_n0  = 3'(5'd16 - {1'b0, m4.r.a[3:0]});
 wire  [31:0] wfs_acc = lalign(st_data, m4.r.msz);
 
@@ -3209,6 +3215,7 @@ always_ff @(posedge clk)
 always_comb begin
 	logic frz_n, nofrz, m1v_n, mtv_n, busy_n, stl_set, r_new, r_stay, ok_new, ok_stay;
 	logic m1s_n, mts_n, m2ss_s, c2_may, m1v_nk, mtv_nk, r_new1, r_new0;
+	logic wbslow1, busy0, busy1, wbfast1, wbfsb1, ok_stay0, ok_stay1;
 	logic [2:0] sbn_n;
 	logic hz1, hzt, dk1, dkt, h1, ht;
 	// DC1's and DT's stale flags as they will be (m1s_n, mts_n above)
@@ -3243,6 +3250,27 @@ always_comb begin
 	m1v_nk  = adv_ag ? dm_req : (!adv_dc1 && m1.v);
 	mtv_nk  = adv_dc1 ? m1.v : (!adv_dt && mt.v);
 	hold1_nk = nreset ? (frz_n || steal || stl_set || (m1v_nk && m1s_n) || (mtv_nk && mts_n) || busy_n) : hold1_q;
+	// (the same with WB's store valid taken as 0 and 1: wb_st is the back
+	// end's register, a long wire here and back; it picks by it there)
+	wbslow1 = !(m4_fq && dc_en && (e_st == E_IDLE) && !e_wst_done) && !wb_fs1 && !wfs_p1 && !e_wst_done &&
+	          !(m4_fsb && (e_st == E_IDLE) && !e_wst_done && !wfs_p1 && sb_room);
+	if (sn_frz) begin busy0 = e_busy; busy1 = e_busy; end
+	else begin
+		busy0 = (e_busy && e_st != E_S_DONE && e_st != E_I_DONE) ||
+		        (e_st == E_IDLE && !wfs_p1 &&
+		         ((mt_v && !mt_done) ||
+		          (dc2_slow || (e_job && m2.r.v && !e_dc2_done) ||
+		           (iw_req && !iw_done && iw_ok && sb_empty)))) ||
+		        (e_st == E_W_PART && (wd_push || wd_wtp || (!wd_cb && !wd_sb)));
+		busy1 = (e_busy && e_st != E_S_DONE && e_st != E_I_DONE) ||
+		        (e_st == E_IDLE && !wfs_p1 &&
+		         ((mt_v && !mt_done) ||
+		          (!wbslow1 && (dc2_slow || (e_job && m2.r.v && !e_dc2_done) ||
+		                        (iw_req && !iw_done && iw_ok && sb_empty))))) ||
+		        (e_st == E_W_PART && (wd_push || wd_wtp || (!wd_cb && !wd_sb)));
+	end
+	hold1_nk0 = nreset ? (frz_n || steal || stl_set || (m1v_nk && m1s_n) || (mtv_nk && mts_n) || busy0) : hold1_q;
+	hold1_nk1 = nreset ? (frz_n || steal || stl_set || (m1v_nk && m1s_n) || (mtv_nk && mts_n) || busy1) : hold1_q;
 	// DC2 (rdy_dt: the access entering is fast or a simple store -- DT's
 	// late decision; m2ss_s: DC2's own, dropped when a clear of its hit is
 	// possible)
@@ -3270,6 +3298,19 @@ always_comb begin
 	           !(m4.split && !e_part)) ||
 	          (nofrz && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
 	st_ok_n = nreset ? (adv_ex ? ok_new : ok_stay) : st_ok_q;
+	// (ok_stay with wb_st taken as 0 / 1: wb_fast and wb_fsb are its)
+	wbfast1 = m4_fq && dc_en && (e_st == E_IDLE) && !e_wst_done;
+	wbfsb1  = m4_fsb && (e_st == E_IDLE) && !e_wst_done && !wfs_p1 && sb_room;
+	ok_stay0 = (st_rdy_r && !st_fault_r) || (!sn_frz && (wfs_p1 && m4.x1.hit)) ||
+	           (!sn_frz && e_st == E_W_DONE && !(bo_err && m4.r.ack != 2'd3) &&
+	            !(m4.split && !e_part)) ||
+	           (nofrz && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
+	ok_stay1 = (st_rdy_r && !st_fault_r) || (!sn_frz && (wbfast1 || (wfs_p1 && m4.x1.hit))) || wbfsb1 ||
+	           (!sn_frz && e_st == E_W_DONE && !(bo_err && m4.r.ack != 2'd3) &&
+	            !(m4.split && !e_part)) ||
+	           (nofrz && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
+	st_ok_n0 = nreset ? (adv_ex ? ok_new : ok_stay0) : st_ok_q;
+	st_ok_n1 = nreset ? (adv_ex ? ok_new : ok_stay1) : st_ok_q;
 	// DT
 	hz1 = (dw && dw_set == m1.a[10:4]) || !e_quiet || sn_frz || st_at(mt, tk_split, m1.a[11:4]) ||
 	      st_at(m2.r, m2.split, m1.a[11:4]) || st_at(m3.r, m3.split, m1.a[11:4]) ||

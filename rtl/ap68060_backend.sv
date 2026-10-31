@@ -96,6 +96,8 @@ module ap68060_backend
 	input  logic        dm_hold1_b, dm_hold_dt_b, dm_dc2_rdy_b, dm_st_ok_b,   // the four holds' twins, for the stall chain alone
 	input  logic        dm_hold1_n, dm_dc2r_n, dm_st_ok_n, dm_hold_dt_n,   // ... and their next values (dc2r conservative), for the registered stalls
 	input  logic        dm_hold1_nk, dm_dc2r_n1, dm_dc2r_n0, dm_rdy_dt,   // hold1_n without the kill; dc2r_n for DT's late decision 1 / 0
+	input  logic        dm_hold1_nk0, dm_hold1_nk1, dm_st_ok_n0, dm_st_ok_n1,   // ... and with WB's store valid taken as 0 / 1 (picked here by wb_stv)
+	input  logic        dm_wbst_r,      // the DMU's part of its wb_st (WB's record is a store), from its registers
 	input  logic        dm_hold1_c,     // ... as its state gives it now (checks)
 	input  logic        dm_hold_dt,     // ... and DT (a register)
 	// WB maintenance (CINV/CPUSH/PFLUSH/PTEST) in the DMU
@@ -3160,17 +3162,21 @@ wire exho_n1  = exh_nk || (ex_v_n && ex_fpw_n);
 // registers' D at all: they are formed as if the access entering DC2 were
 // ready (dc2r_n1), and DC2's own registered "ready" corrects the stall
 // nets below, one LUT from flip-flops)
-function automatic logic [5:0] stalls6(input logic ok, input logic fph);
-	logic wbh, stv, dc2r, exho, swb, sex, sdc2, sdt, sdc1, sag;
+// (wbs: the DMU's terms with WB's store valid taken as wbs -- wb_stv is a
+// register here, so it is the first select, not a long wire there and back)
+function automatic logic [5:0] stalls6(input logic ok, input logic fph, input logic wbs);
+	logic wbh, stv, dc2r, exho, stok, h1k, swb, sex, sdc2, sdt, sdc1, sag;
 	wbh  = ok ? wbh_n1 : wbh_n0;
 	stv  = ok ? wb_stv_n1 : wb_stv_n0;
 	dc2r = dm_dc2r_n1;
 	exho = fph ? exho_n1 : exho_n0;
-	swb  = wb_v_n  && (wbh || (stv && !dm_st_ok_n));
+	stok = wbs ? dm_st_ok_n1 : dm_st_ok_n0;
+	h1k  = wbs ? dm_hold1_nk1 : dm_hold1_nk0;
+	swb  = wb_v_n  && (wbh || (stv && !stok));
 	sex  = ex_v_n  && (exho || swb);
 	sdc2 = dc2_v_n && ((dc2_mx_n && !dc2r) || sex);
 	sdt  = dt_v_n  && (sdc2 || dm_hold_dt_n);
-	sdc1 = dc1_v_n && (sdt  || dm_hold1_nk);
+	sdc1 = dc1_v_n && (sdt  || h1k);
 	sag  = ag_v_n  && sdc1;                 // (AG's interlock ORed in last, below)
 	stalls6 = {swb, sex, sdc2, sdt, sdc1, sag};
 endfunction
@@ -3182,10 +3188,12 @@ endfunction
 // (the four candidates -- EX's exception decision and the FPU interface's
 // hold taken as 0/1 -- not kept: synthesis shares and shapes them; the
 // FPU hold, the later of the two, picks last)
-wire [5:0] st_c00 = stalls6(1'b0, 1'b0);
-wire [5:0] st_c10 = stalls6(1'b1, 1'b0);
-wire [5:0] st_c01 = stalls6(1'b0, 1'b1);
-wire [5:0] st_c11 = stalls6(1'b1, 1'b1);
+// (the DMU's wb_st as it is: its record a store, and our store valid)
+wire wbs_sel = wb_v && wb_stv && dm_wbst_r;
+wire [5:0] st_c00 = stalls6(1'b0, 1'b0, wbs_sel);
+wire [5:0] st_c10 = stalls6(1'b1, 1'b0, wbs_sel);
+wire [5:0] st_c01 = stalls6(1'b0, 1'b1, wbs_sel);
+wire [5:0] st_c11 = stalls6(1'b1, 1'b1, wbs_sel);
 logic stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q, stall_dc1_q, stall_ag_q;
 always_ff @(posedge clk) begin
 	logic [5:0] st;
