@@ -972,14 +972,19 @@ logic        md_fin;          // ... and the unit has finished (done is a pulse:
                               // be stalled by WB in that cycle)
 logic        md_z;            // ... is a divide by zero (from its second cycle)
 wire         ex_is_md   = (ex_u.op == OP_MUL) || (ex_u.op == OP_DIV);
-// (the zero test on the operand register alone: a divide whose operand
-// is EX2's result this clock (the bypass) waits the clock in which the
-// register takes it -- the bypass's wide register stays off this test,
-// which the stall registers read through the hold next, exh_n)
-wire         ex_bxp     = xw_v && (mxe_a || mxe_b);
-wire         ex_div0    = ex_kx[1] && !ex_bxp &&
-                          ((ex_u.sz == SZ_W) ? (ex_av_r[15:0] == 16'd0) : (ex_av_r == 32'd0));
-assign ex_md_start = ex_v && ex_is_md && !md_go && !ex_div0 && !md_busy && !ex_fault && !ex_bxp;
+// (the zero test of the divisor as a flag registered in the divide's
+// first EX clock -- from the operand with EX2's bypass applied --, read
+// from its second: the divide waits that clock, and the 32-bit test and
+// the bypass's wide register stay off the stall registers, which read
+// this through EX's hold next, exh_n)
+logic        ex_az_q;              // the operand is zero at the size (registered every clock)
+logic        ex_dv2;               // the uop's second or later clock in EX
+always_ff @(posedge clk) begin
+	ex_az_q <= (ex_u.sz == SZ_W) ? (ex_av[15:0] == 16'd0) : (ex_av == 32'd0);
+	ex_dv2  <= ex_v && !adv_dc2 && !(flush || kill_now);
+end
+wire         ex_div0    = ex_kx[1] && ex_dv2 && ex_az_q;
+assign ex_md_start = ex_v && ex_is_md && !md_go && !ex_div0 && !md_busy && !ex_fault && ex_dv2;
 
 // word forms: DIVU.W/DIVS.W divide the 32-bit Dn by a 16-bit source;
 // MULU.W/MULS.W multiply the low words
@@ -1553,9 +1558,11 @@ logic [31:0] ex_szm;          // EX's size mask, registered as the uop enters
 logic ex_stkill;
 always_comb begin
 	ex_stkill = 1'b0;
+	// (the flat select exw_val, the same value as the case chain's ex_res:
+	// checked below for every store too)
 	case (ex_u.op)
 		OP_CAS:  ex_st = cas_eq ? ex_av : ex_bv;
-		default: ex_st = ex_res;
+		default: ex_st = exw_val;
 	endcase
 	// an FPU store whose result is not written (an enabled integer
 	// SNAN/OPERR, an unimplemented / unsupported store): its stores go
@@ -1801,7 +1808,7 @@ always_comb begin
 end
 // synthesis translate_off
 always_ff @(posedge clk)
-	if (nreset && ex_fin && ex_u.d_v &&
+	if (nreset && ex_fin && (ex_u.d_v || ex_u.mem == M_ST || ex_u.mem == M_RMW) &&
 	    exw_val != ((ex_u.op == OP_CAS) ? ((ex_bv & ex_szm) | (ex_latch & ~ex_szm)) : ex_res)) begin
 		$display("FAIL: EX's flat result %h, the case chain gives %h (op %0d, pc %h)", exw_val,
 		         (ex_u.op == OP_CAS) ? ((ex_bv & ex_szm) | (ex_latch & ~ex_szm)) : ex_res, ex_u.op, ex_u.pc);
@@ -3031,8 +3038,13 @@ always_ff @(posedge clk) begin
 				xx1 = xw_v && xw_reg == ain_u.idx;
 				a1_u      <= ain_u;
 				a1_u.disp <= ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp;
-				a1_fb     <= cb1 ? dc2_capv : bb1 ? fwd[1] : bb0 ? fwd[0] : xb1 ? e2_res_a : ain_fb;
-				a1_fx     <= cx1 ? dc2_capv : bx1 ? fwd[1] : bx0 ? fwd[0] : xx1 ? e2_res_a : ain_fx;
+				// (the file's word -- the MLAB read, the bank, front and skid
+				// selects -- is the last to arrive: the one select before the
+				// flip-flop, the other sources formed apart)
+				a1_fb     <= (!cb1 && !bb1 && !bb0 && !xb1) ? ain_fb :
+				             (cb1 ? dc2_capv : bb1 ? fwd[1] : bb0 ? fwd[0] : e2_res_a);
+				a1_fx     <= (!cx1 && !bx1 && !bx0 && !xx1) ? ain_fx :
+				             (cx1 ? dc2_capv : bx1 ? fwd[1] : bx0 ? fwd[0] : e2_res_a);
 				a1_lex    <= cb1;
 				a1_lexx   <= cx1;
 			end

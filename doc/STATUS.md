@@ -279,6 +279,7 @@ registered, younger accesses held behind serializing or excepting uops
 | f130_c (broadcast)  | 53cc21e | 99.1 MHz   | -2.40 ns | -1,601 ns | 3,786 |
 | f130_d (4 copies)   | 8a1ab96 | 102.5 MHz  | -2.07 ns | -1,478 ns | 3,562 |
 | f130_e (AG1)        | 1279cb6 | 96.2 MHz   | -2.71 ns | -1,957 ns | 4,233 |
+| f130_f (grouping, one-hot takes) | 315e5ef | 104.2 MHz | -1.91 ns | -1,350 ns | 3,085 |
 
 Not converging yet: every failing path is 4-6 cells and 2-4 wires of
 1-2.5 ns (registers with a fan-out of 50-120), and 90 % of the endpoints

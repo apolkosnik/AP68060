@@ -390,3 +390,16 @@ Done 2026-10-31: AG2's capture compares (its update registers and DC2's
 destination against AG1's base and index) as registers formed from the
 uops the stages hold next, the loads picking last; the capture's
 one-hot selects are then flip-flop ANDs.  Regression 392.
+
+Fit f130_f (315e5ef, the result grouping and the one-hot takes): Fmax
+104.19 MHz, slack -1.91, TNS -1,350, 3,085 endpoints, 25,510 ALMs -- the
+best on every count.  Leading: the EX bypass select into the store data
+(mxe_b -> e2_stdata -1.91 x32: ex_st read the case chain ex_res, now the
+flat select), the flags' size select into ccr_f (ex_u.sz -1.86), the
+snoop phase into the stall registers through the DMU's hold next
+(sn_ph -> stall_a1/ag -1.86), the bypass select into the stall registers
+through the divide's zero test (mxe_a -> stall_dc1 -1.65: the test is
+now a flag registered in the divide's first EX clock, read from its
+second), the skid's valid into AG1's file word (sk_v -> a1_fx -1.48 x31:
+the word is now the one select before the flip-flop), the tag RAM's
+write register into the snoop phase and the engine (-1.67).
