@@ -320,3 +320,24 @@ AG1 (operands) / AG2 (address):
 Cost: one more stage between the sequencer and the data cache; a
 mispredict or exception reaches the next uop one clock later still
 (+1 on the branch penalty), load-use for an address register +1.
+
+Fit f130_d (8a1ab96, the four copies): Fmax 102.45 MHz, slack -2.07,
+TNS -1,478 (the best so far: a -1,747, b -1,553, c -1,601), 3,562
+endpoints (3,351 of them within 1 ns), 25,600 ALMs.  Leading: AG's
+address compare for the DMU's landing write into the stall register
+(ag_u.scale -> stall_ag_q, -2.07: the adder's output compared, the OR
+last), the EX bypass select ahead of the ALU (e2_dwe -> ccr_f -1.94,
+e2_dwe -> e2_stdata x32), the kill into the walker (wb_ok -> tw_va
+-1.78 x20), the FPU interface's next state into the stall registers
+(oq.ns -> stall_* -1.8), DC2's load handed to AG (m2.x.way -> agb_q
+-1.92).
+
+Done 2026-10-31 (3.2, AG1): as designed, with the skid kept as AG1's
+input buffer (in_rdy stays a register).  Exposed on the way: a uop
+waiting in AG1 missed the loads and broadcasts that passed meanwhile
+(Dhrystone, t_stld, t_movem_restart, t_fpu); AG1 now applies the same
+capture rules while it waits, and the refusal of an older writer's
+broadcast after a captured load is tracked by the load's position (in
+EX: refuse xw; one clock longer for xw_q) rather than a fixed two-clock
+window, in AG2 too.  Regression 392/392, Dhrystone 1,107 (+0.5 %),
+Whetstone 790,634 (+0.1 %).

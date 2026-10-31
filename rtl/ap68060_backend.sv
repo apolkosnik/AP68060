@@ -279,13 +279,13 @@ logic [31:0] e2_doh;
 // consumers: e2_res the file's write port and WB, e2_res_c the stages'
 // captures (DC1, DT, DC2 and DC2's operands entering EX), e2_res_x EX's
 // own bypass ahead of the ALU, e2_res_q the clock-late copy for AG
-(* preserve *) logic [31:0] e2_res_c, e2_res_x, e2_res_q;
+(* preserve *) logic [31:0] e2_res_c, e2_res_x, e2_res_q, e2_res_a;   // (e2_res_a: AG1's entry)
 wire         xw_v   = e2_v && e2_dwe;
 wire   [4:0] xw_reg = e2_u.d_reg;
 wire  [31:0] xw_val = e2_res_c;
 // synthesis translate_off
 always_ff @(posedge clk)
-	if (nreset && e2_v && (e2_res_c !== e2_res || e2_res_x !== e2_res || e2_res_q !== e2_res)) begin
+	if (nreset && e2_v && (e2_res_c !== e2_res || e2_res_x !== e2_res || e2_res_q !== e2_res || e2_res_a !== e2_res)) begin
 		$display("FAIL: EX2's result copies differ: %h %h %h %h", e2_res, e2_res_c, e2_res_x, e2_res_q);
 		$finish;
 	end
@@ -404,7 +404,7 @@ assign dfc  = dfc_r;
 // stall / advance (bubbles collapse: a stage moves into an empty one)
 //--------------------------------------------------------------------------
 logic wb_hold, ex_hold, dc2_hold, ag_hold;
-logic stall_wb, stall_e2, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag;
+logic stall_wb, stall_e2, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag, stall_a1;
 // Every hold the chain reads is a register, formed a clock ahead (or from
 // registers in one level): WB's (wbh_q, and the DMU's store answer), EX's
 // (from flags registered as the uop enters), DC2's and DC1's (the DMU's),
@@ -461,6 +461,7 @@ wire c_dc2 = dc2_v && (dc2_hold || c_ex);
 wire c_dt  = dt_v  && (c_dc2 || dm_hold_dt_b);
 wire c_dc1 = dc1_v && (c_dt  || dm_hold1_b);
 wire c_ag  = ag_v  && (ag_hold  || c_dc1);
+wire c_a1  = a1_v  && c_ag;
 
 assign adv_wb  = wb_v  && !stall_wb;
 assign adv_e2  = e2_v  && !stall_e2;
@@ -469,6 +470,7 @@ assign adv_dc2 = dc2_v && !stall_dc2;
 assign adv_dt  = dt_v  && !stall_dt;
 assign adv_dc1 = dc1_v && !stall_dc1;
 assign adv_ag  = ag_v  && !stall_ag;
+wire   adv_a1  = a1_v  && !stall_ag;   // (AG1 moves on when AG2 does)
 // the DMU's copies of the advances and the kill, separate nodes (keep), so
 // each drives its own module's registers
 (* keep *) wire dma_ag  = ag_v  && !stall_ag;
@@ -495,8 +497,22 @@ wire         ain_v = sk_v || in_v;
 uop_t        ain_u;
 assign ain_u   = sk_v ? sk_u : in_u;
 // (without the skid the sequencer's pop waits for AG: the stall chain)
-assign in_rdy  = (SKID ? !sk_v : !stall_ag) && !flush && !stopped && !eredir_pend;
-wire         ag_take = !stall_ag && !stopped && !halted;   // AG loads ain_u
+assign in_rdy  = (SKID ? !sk_v : !stall_a1) && !flush && !stopped && !eredir_pend;
+wire         a1_take = !stall_a1 && !stopped && !halted;   // AG1 loads ain_u
+wire         ag_take = !stall_ag && !stopped && !halted;   // AG2 loads AG1's
+// AG1: the uop and the file's words for its base and index as read when
+// it was the sequencer's (or the skid's), the writes of that clock
+// bypassed in -- AG2's updates (fwe[0/1]), the load leaving DC2, EX2's
+// broadcast -- and, while it waits here, the same writes as they come.
+// a1_lex/a1_lexx: the load captured for the base/index is in EX (it is
+// not waited for; a broadcast meanwhile is an older writer's and is
+// refused, the writer in EX2 having left EX before the load: xw while
+// the load is in EX, xw_q one clock longer)
+logic        a1_v;
+(* preserve *) logic a1_vb;          // (its twin for AG2's capture select)
+uop_t        a1_u;
+logic [31:0] a1_fb, a1_fx;
+logic        a1_lex, a1_lexx;
 
 //--------------------------------------------------------------------------
 // AG
@@ -571,17 +587,17 @@ ap68060_rf #(.NR(7), .NW(2), .REGSEL(RSEL)) rfb (.clk(clk), .we(bwe), .wa(bwa), 
 // sequencer's uop when AG does not take it; the sequencer's head takes
 // D2c's uop when its queue is empty or pops its last word, the other
 // queued word when it pops with two queued (uq_pop = in_rdy && in_v)
-wire ag_ld = !flush && ag_take && ain_v;
-wire sk_ld = !flush && !sk_v && SKID && in_v && in_rdy && !ag_take;
+wire ag_ld = !flush && ag_take && a1_v;
+wire sk_ld = !flush && !sk_v && SKID && in_v && in_rdy && !a1_take;
 wire hd_nu = (uq_n == 2'd0) || (in_rdy && uq_n == 2'd1);
 wire hd_ue = in_rdy && (uq_n == 2'd2);
 assign rrsel1 = {sk_ld, sk_ld, ag_ld, ag_ld, ag_ld, hd_nu, hd_nu};
 assign rrsel2 = {2'b00, 3'b000, hd_ue, hd_ue};
 assign rran0[0] = in_u.base;        assign rran1[0] = nx_b0;            assign rran2[0] = nx_b1;
 assign rran0[1] = in_u.idx;         assign rran1[1] = nx_i0;            assign rran2[1] = nx_i1;
-assign rran0[2] = ag_u.upd2_reg;    assign rran1[2] = ain_u.upd2_reg;   assign rran2[2] = ag_u.upd2_reg;
-assign rran0[3] = ag_u.a_reg;       assign rran1[3] = ain_u.a_reg;      assign rran2[3] = ag_u.a_reg;
-assign rran0[4] = ag_u.b_reg;       assign rran1[4] = ain_u.b_reg;      assign rran2[4] = ag_u.b_reg;
+assign rran0[2] = ag_u.upd2_reg;    assign rran1[2] = a1_u.upd2_reg;    assign rran2[2] = ag_u.upd2_reg;
+assign rran0[3] = ag_u.a_reg;       assign rran1[3] = a1_u.a_reg;       assign rran2[3] = ag_u.a_reg;
+assign rran0[4] = ag_u.b_reg;       assign rran1[4] = a1_u.b_reg;       assign rran2[4] = ag_u.b_reg;
 assign rran0[5] = sk_u.base;        assign rran1[5] = in_u.base;        assign rran2[5] = sk_u.base;
 assign rran0[6] = sk_u.idx;         assign rran1[6] = in_u.idx;         assign rran2[6] = sk_u.idx;
 // the front-valid bits as they will be (fv's next value), and the ports'
@@ -1660,7 +1676,7 @@ always_ff @(posedge clk) begin
 	c2n   = adv_dt  ? dt_u  : dc2_u;
 	dtn   = adv_dc1 ? dc1_u : dt_u;
 	c1n   = adv_ag  ? ag_u  : dc1_u;
-	agn   = ag_ld   ? ain_u : ag_u;
+	agn   = ag_ld   ? a1_u  : ag_u;
 	mxe_a <= e2v_n && omatch(exn.a_src, exn.a_reg, e2n);
 	mxe_b <= e2v_n && omatch(exn.b_src, exn.b_reg, e2n);
 	mx_a  <= e2v_n && omatch(c2n.a_src, c2n.a_reg, e2n);
@@ -2276,6 +2292,7 @@ always_ff @(posedge clk) begin
 	dbg_retire <= 1'b0;
 
 	if (!nreset) begin
+		a1_v  <= 1'b0; a1_vb <= 1'b0;
 		ag_v  <= 1'b0; dc1_v <= 1'b0; dt_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; e2_v <= 1'b0; wb_v <= 1'b0;
 		sk_v  <= 1'b0;
 		sk_vr <= 1'b0; sk_va <= 1'b0;
@@ -2556,6 +2573,7 @@ always_ff @(posedge clk) begin
 			e2_res_c    <= exw_val;
 			e2_res_x    <= exw_val;
 			e2_res_q    <= exw_val;
+			e2_res_a    <= exw_val;
 			e2_dwe      <= ex_d_eff;
 			e2_upd      <= ex_upd;
 			e2_upd2     <= ex_upd2;
@@ -2952,27 +2970,70 @@ always_ff @(posedge clk) begin
 		// flush: kill every stage (the redirecting/excepting uop has left)
 		//------------------------------------------------------------------
 		if (flush) begin
+			a1_v <= 1'b0; a1_vb <= 1'b0;
 			ag_v <= 1'b0; dc1_v <= 1'b0; dt_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; e2_v <= 1'b0; wb_v <= 1'b0;
 			eredir_pend <= 1'b0;
 		end
 		else begin
-			// D2 (or the skid) -> AG
-			if (!stall_ag) ag_v <= ain_v && !stopped && !halted;
-			if (ag_take && ain_v) begin
-				ag_u      <= ain_u;
-				ag_u.disp <= ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp;
-				ag_bfh    <= (ain_u.mem != M_NONE) && (ain_u.op == OP_MOV) && (ain_u.cond == 4'hE);
-				ag_uoh    <= 32'd1 << ain_u.upd_reg;
-				ag_u2oh   <= 32'd1 << ain_u.upd2_reg;
-				ag_bft    <= (ain_u.mem != M_NONE) && (ain_u.op == OP_MOV) && (ain_u.cond == 4'hD);
-				ag_dm2    <= (ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp) - 32'd2;
+			// D2 (or the skid) -> AG1: the uop, and the file's words with
+			// this clock's writes bypassed (the load leaving DC2 first:
+			// younger than any writer in EX2; AG2's updates cannot
+			// coincide with it, their uop waits for such a load)
+			if (!stall_a1) a1_v <= ain_v && !stopped && !halted;
+			if (!stall_a1) a1_vb <= ain_v && !stopped && !halted;
+			if (a1_take && ain_v) begin
+				logic cb1, cx1, bb1, bb0, bx1, bx0, xb1, xx1;
+				cb1 = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.base;
+				cx1 = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.idx;
+				bb1 = fwe[1] && fwa[1] == ain_u.base;  bb0 = fwe[0] && fwa[0] == ain_u.base;
+				bx1 = fwe[1] && fwa[1] == ain_u.idx;   bx0 = fwe[0] && fwa[0] == ain_u.idx;
+				xb1 = xw_v && xw_reg == ain_u.base;
+				xx1 = xw_v && xw_reg == ain_u.idx;
+				a1_u      <= ain_u;
+				a1_u.disp <= ain_u.dmv ? ain_u.disp + {{24{ain_u.dma[7]}}, ain_u.dma} : ain_u.disp;
+				a1_fb     <= cb1 ? dc2_capv : bb1 ? fwd[1] : bb0 ? fwd[0] : xb1 ? e2_res_a : ain_fb;
+				a1_fx     <= cx1 ? dc2_capv : bx1 ? fwd[1] : bx0 ? fwd[0] : xx1 ? e2_res_a : ain_fx;
+				a1_lex    <= cb1;
+				a1_lexx   <= cx1;
 			end
-			// the skid: emptied when AG takes it; filled by a popped uop AG
+			else if (a1_v) begin
+				// waiting in AG1: the writes as they come, youngest first (AG2's
+				// updates, the load leaving DC2, EX2's broadcast unless an older
+				// writer's than a load captured)
+				logic cbo1, cxo1, bbo1, bbo0, bxo1, bxo0, xbo1, xxo1;
+				cbo1 = adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.base;
+				cxo1 = adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.idx;
+				bbo1 = fwe[1] && fwa[1] == a1_u.base;  bbo0 = fwe[0] && fwa[0] == a1_u.base;
+				bxo1 = fwe[1] && fwa[1] == a1_u.idx;   bxo0 = fwe[0] && fwa[0] == a1_u.idx;
+				xbo1 = xw_v && xw_reg == a1_u.base && !a1_lex;
+				xxo1 = xw_v && xw_reg == a1_u.idx  && !a1_lexx;
+				if (cbo1)      a1_fb <= dc2_capv;
+				else if (bbo1) a1_fb <= fwd[1];
+				else if (bbo0) a1_fb <= fwd[0];
+				else if (xbo1) a1_fb <= e2_res_a;
+				if (cxo1)      a1_fx <= dc2_capv;
+				else if (bxo1) a1_fx <= fwd[1];
+				else if (bxo0) a1_fx <= fwd[0];
+				else if (xxo1) a1_fx <= e2_res_a;
+				a1_lex  <= cbo1 || (a1_lex  && !adv_ex);
+				a1_lexx <= cxo1 || (a1_lexx && !adv_ex);
+			end
+			// AG1 -> AG2
+			if (!stall_ag) ag_v <= a1_v && !stopped && !halted;
+			if (ag_take && a1_v) begin
+				ag_u      <= a1_u;
+				ag_bfh    <= (a1_u.mem != M_NONE) && (a1_u.op == OP_MOV) && (a1_u.cond == 4'hE);
+				ag_uoh    <= 32'd1 << a1_u.upd_reg;
+				ag_u2oh   <= 32'd1 << a1_u.upd2_reg;
+				ag_bft    <= (a1_u.mem != M_NONE) && (a1_u.op == OP_MOV) && (a1_u.cond == 4'hD);
+				ag_dm2    <= a1_u.disp - 32'd2;
+			end
+			// the skid: emptied when AG1 takes it; filled by a popped uop AG1
 			// did not take
 			if (sk_v) begin
-				if (ag_take) begin sk_v <= 1'b0; sk_vr <= 1'b0; sk_va <= 1'b0; end
+				if (a1_take) begin sk_v <= 1'b0; sk_vr <= 1'b0; sk_va <= 1'b0; end
 			end
-			else if (SKID && in_v && in_rdy && !ag_take) begin
+			else if (SKID && in_v && in_rdy && !a1_take) begin
 				sk_v  <= 1'b1;
 				sk_vr <= 1'b1; sk_va <= 1'b1;
 				sk_u  <= in_u;
@@ -2982,13 +3043,14 @@ always_ff @(posedge clk) begin
 		end
 		if (flush || kill_now) begin sk_v <= 1'b0; sk_vr <= 1'b0; sk_va <= 1'b0; end
 		if (kill_now) begin
+			a1_v <= 1'b0; a1_vb <= 1'b0;
 			ag_v <= 1'b0; dc1_v <= 1'b0; dt_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; e2_v <= 1'b0; wb_v <= 1'b0;
 		end
 	end
 end
 
 assign dm_st_v    = wb_v && wb_stv;
-assign be_idle    = !(sk_v || ag_v || dc1_v || dt_v || dc2_v || ex_v || e2_v || wb_v);
+assign be_idle    = !(sk_v || a1_v || ag_v || dc1_v || dt_v || dc2_v || ex_v || e2_v || wb_v);
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && wb_v && (wb_stv != (wb_st && wb_exc == 8'd0) || wb_ok != (wb_exc == 8'd0))) begin
@@ -3108,34 +3170,30 @@ always_ff @(posedge clk) begin
 	logic [5:0] nb, nx, nu, nu2;
 	logic [31:0] b, x, bh, xh, b_oth, x_oth;
 	logic        b1, b0, x1, x0, tf_b, tf_x;
-	// (ain_v from the twins sk_va and in_eb: the select's own flip-flops)
-	ag_new = !flush && !stall_ag && (sk_va || !in_eb) && !stopped;
+	// (a1_v's twin a1_vb: the select's own flip-flop)
+	ag_new = !flush && !stall_ag && a1_vb && !stopped;
 	// a plain load leaving DC2 whose data a base or index takes
-	cb_n = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.base;
-	cx_n = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.idx;
+	cb_n = adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.base;
+	cx_n = adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.idx;
 	cb_o = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.base;
 	cx_o = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.idx;
-	// the value entering: the register file (front or back copy), AG's own
-	// updates of this cycle, the load leaving DC2 (younger than any writer
-	// still in EX: it wins), youngest first.  One-hot selects from register
-	// compares over all but the load, which picks last (adv_dc2 comes
-	// late); the index sign-extended on each source in parallel.  (EX's
-	// result of this cycle is written into the file at this edge: the flags
-	// wait for it, and xw_q brings it next clock.)
-	// (the compares for the skid's uop and the sequencer's apart, the
-	// skid's valid picking: one level less on the capture)
-	b1 = fwe_ag[1] && (sk_v ? (fwa[1] == sk_u.base) : (fwa[1] == in_u.base));
-	b0 = fwe_ag[0] && (sk_v ? (fwa[0] == sk_u.base) : (fwa[0] == in_u.base));
-	x1 = fwe_ag[1] && (sk_v ? (fwa[1] == sk_u.idx)  : (fwa[1] == in_u.idx));
-	x0 = fwe_ag[0] && (sk_v ? (fwa[0] == sk_u.idx)  : (fwa[0] == in_u.idx));
-	// (the file's word is the last to arrive -- the MLAB read, the bank and
-	// front selects --: everything else is formed apart, b_oth/x_oth, and
-	// the file's word is the one select before the flip-flops, below)
-	b = ({32{ain_u.base_v && b1}}                  & fwd[1])  |
-	    ({32{ain_u.base_v && !b1 && b0}}           & ag_updv);
-	x = ({32{x1}}                  & ixf(fwd[1], ain_u))  |
-	    ({32{!x1 && x0}}           & ixf(ag_updv, ain_u));
-	tf_b = ag_new && !(cb_n && ain_u.base_v) && ain_u.base_v && !b1 && !b0;
+	// the value entering: AG1's word (the file's, with its entry clock's
+	// writes), AG2's own updates of this cycle, the load leaving DC2
+	// (younger than any writer still in EX: it wins), youngest first.
+	// One-hot selects from register compares over all but the load, which
+	// picks last (adv_dc2 comes late); the index sign-extended on each
+	// source in parallel.  (EX2's broadcast of this cycle is written into
+	// the file at this edge: the flags wait for it, and xw_q brings it next
+	// clock.)
+	b1 = fwe_ag[1] && (fwa[1] == a1_u.base);
+	b0 = fwe_ag[0] && (fwa[0] == a1_u.base);
+	x1 = fwe_ag[1] && (fwa[1] == a1_u.idx);
+	x0 = fwe_ag[0] && (fwa[0] == a1_u.idx);
+	b = ({32{a1_u.base_v && b1}}                  & fwd[1])  |
+	    ({32{a1_u.base_v && !b1 && b0}}           & ag_updv);
+	x = ({32{x1}}                  & ixf(fwd[1], a1_u))  |
+	    ({32{!x1 && x0}}           & ixf(ag_updv, a1_u));
+	tf_b = ag_new && !(cb_n && a1_u.base_v) && a1_u.base_v && !b1 && !b0;
 	tf_x = ag_new && !cx_n && !x1 && !x0;
 	// the value staying: EX2's result of last clock (xw_q), else its own
 	qb_o = xw_qv && xw_qreg == ag_u.base && !cbl && !cbl2;
@@ -3143,27 +3201,31 @@ always_ff @(posedge clk) begin
 	bh = (ag_v && ag_u.base_v && qb_o) ? xw_q : agb_q;
 	xh = (ag_v && ag_u.idx_v && qx_o) ? ixf(xw_q, ag_u) : agx_q;
 	// the load's capture, then the advance, select last
-	b_oth = ag_new ? ((cb_n && ain_u.base_v) ? dc2_capv : b)
+	b_oth = ag_new ? ((cb_n && a1_u.base_v) ? dc2_capv : b)
 	               : ((cb_o && ag_v && ag_u.base_v) ? dc2_capv : bh);
-	x_oth = ag_new ? (cx_n ? ixf(dc2_capv, ain_u) : x)
+	x_oth = ag_new ? (cx_n ? ixf(dc2_capv, a1_u) : x)
 	               : ((cx_o && ag_v && ag_u.idx_v) ? ixf(dc2_capv, ag_u) : xh);
-	agb_q <= tf_b ? ain_fb : b_oth;
-	agx_q <= tf_x ? ixf(ain_fx, ain_u) : x_oth;
+	agb_q <= tf_b ? a1_fb : b_oth;
+	agx_q <= tf_x ? ixf(a1_fx, a1_u) : x_oth;
 	if (ag_new) begin
-		cbl   <= cb_n;
-		cxl   <= cx_n;
-		cbl2  <= 1'b0;        // (the captures are the uop's own: a new one has none)
-		cxl2  <= 1'b0;
-		nb  = ain_u.base_v ? wf_next(wm(ain_u.base), wmatch(ag_v, ag_u, ain_u.base), cb_n) : 6'd0;
-		nx  = ain_u.idx_v  ? wf_next(wm(ain_u.idx),  wmatch(ag_v, ag_u, ain_u.idx),  cx_n) : 6'd0;
-		nu  = ain_u.upd_v  ? wf_next(wm(ain_u.upd_reg),  wmatch(ag_v, ag_u, ain_u.upd_reg),  1'b0) : 6'd0;
-		nu2 = ain_u.upd2_v ? wf_next(wm(ain_u.upd2_reg), wmatch(ag_v, ag_u, ain_u.upd2_reg), 1'b0) : 6'd0;
+		// (the captures are the uop's own: a load AG1 captured is in EX
+		// (a1_lex) -- not waited for: wm's bit 3 masked -- and the refusals
+		// come along; cbl/cxl: the captured load is in EX, cbl2/cxl2 one
+		// clock longer, for xw_q)
+		cbl   <= cb_n || (a1_lex  && !adv_ex);
+		cxl   <= cx_n || (a1_lexx && !adv_ex);
+		cbl2  <= a1_lex;
+		cxl2  <= a1_lexx;
+		nb  = a1_u.base_v ? wf_next(wm(a1_u.base) & ~{1'b0, a1_lex,  3'b000}, wmatch(ag_v, ag_u, a1_u.base), cb_n) : 6'd0;
+		nx  = a1_u.idx_v  ? wf_next(wm(a1_u.idx)  & ~{1'b0, a1_lexx, 3'b000}, wmatch(ag_v, ag_u, a1_u.idx),  cx_n) : 6'd0;
+		nu  = a1_u.upd_v  ? wf_next(wm(a1_u.upd_reg),  wmatch(ag_v, ag_u, a1_u.upd_reg),  1'b0) : 6'd0;
+		nu2 = a1_u.upd2_v ? wf_next(wm(a1_u.upd2_reg), wmatch(ag_v, ag_u, a1_u.upd2_reg), 1'b0) : 6'd0;
 	end
 	else begin
 		// AG holds (or is empty): the flags follow their stages, nothing
 		// enters DC1 from AG
-		cbl  <= cb_o;
-		cxl  <= cx_o;
+		cbl  <= cb_o || (cbl && !adv_ex);    // (the captured load is in EX)
+		cxl  <= cx_o || (cxl && !adv_ex);
 		cbl2 <= cbl;
 		cxl2 <= cxl;
 		nb  = wf_next(wf_b[4:0],  1'b0, cb_o);
@@ -3177,7 +3239,7 @@ always_ff @(posedge clk) begin
 	wf_b <= nb; wf_x <= nx; wf_u <= nu; wf_u2 <= nu2;
 	// the interlock as it will be: AG's next uop (ag_v as it is loaded) and
 	// its flags
-	agv_n = !(flush || kill_now || !nreset) && (stall_ag ? ag_v : (ain_v && !stopped && !halted));
+	agv_n = !(flush || kill_now || !nreset) && (stall_ag ? ag_v : (a1_v && !stopped && !halted));
 	ilk_q <= agv_n && ((nb | nx | nu | nu2) != 6'd0);
 end
 // synthesis translate_off
@@ -3209,16 +3271,16 @@ always_ff @(posedge clk)
 always_comb begin
 	logic agn, cbn, cxn, cbo, cxo, agvn;
 	logic [5:0] nb, nx, nu, nu2;
-	agn = !flush && !stall_ag && (sk_va || !in_eb) && !stopped;
-	cbn = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.base;
-	cxn = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.idx;
+	agn = !flush && !stall_ag && a1_vb && !stopped;
+	cbn = adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.base;
+	cxn = adv_dc2 && dc2_capd && dc2_u.d_reg == a1_u.idx;
 	cbo = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.base;
 	cxo = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.idx;
 	if (agn) begin
-		nb  = ain_u.base_v ? wf_next(wm(ain_u.base), wmatch(ag_v, ag_u, ain_u.base), cbn) : 6'd0;
-		nx  = ain_u.idx_v  ? wf_next(wm(ain_u.idx),  wmatch(ag_v, ag_u, ain_u.idx),  cxn) : 6'd0;
-		nu  = ain_u.upd_v  ? wf_next(wm(ain_u.upd_reg),  wmatch(ag_v, ag_u, ain_u.upd_reg),  1'b0) : 6'd0;
-		nu2 = ain_u.upd2_v ? wf_next(wm(ain_u.upd2_reg), wmatch(ag_v, ag_u, ain_u.upd2_reg), 1'b0) : 6'd0;
+		nb  = a1_u.base_v ? wf_next(wm(a1_u.base) & ~{1'b0, a1_lex,  3'b000}, wmatch(ag_v, ag_u, a1_u.base), cbn) : 6'd0;
+		nx  = a1_u.idx_v  ? wf_next(wm(a1_u.idx)  & ~{1'b0, a1_lexx, 3'b000}, wmatch(ag_v, ag_u, a1_u.idx),  cxn) : 6'd0;
+		nu  = a1_u.upd_v  ? wf_next(wm(a1_u.upd_reg),  wmatch(ag_v, ag_u, a1_u.upd_reg),  1'b0) : 6'd0;
+		nu2 = a1_u.upd2_v ? wf_next(wm(a1_u.upd2_reg), wmatch(ag_v, ag_u, a1_u.upd2_reg), 1'b0) : 6'd0;
 	end
 	else begin
 		nb  = wf_next(wf_b[4:0],  1'b0, cbo);
@@ -3229,24 +3291,23 @@ always_comb begin
 	if (flush || kill_now || !nreset) begin
 		nb = 6'd0; nx = 6'd0; nu = 6'd0; nu2 = 6'd0;
 	end
-	agvn  = !(flush || kill_now || !nreset) && (stall_ag ? ag_v : (ain_v && !stopped && !halted));
+	agvn  = !(flush || kill_now || !nreset) && (stall_ag ? ag_v : (a1_v && !stopped && !halted));
 	ilk_n = agvn && ((nb | nx | nu | nu2) != 6'd0);
 end
-// (the same with the kill taken as 0, as a function of the incoming uop:
-// formed for the skid's uop and the sequencer's apart, kept, the skid's
-// valid picking last -- the uop's register numbers against the stages'
-// are five levels on their own)
-function automatic logic ilk_of(input uop_t u);
+// (the same with the kill taken as 0, as a function of the incoming uop
+// -- AG1's, a register --, kept: the uop's register numbers against the
+// stages' are five levels on their own)
+function automatic logic ilk_of(input uop_t u, input logic ucb, input logic ucx);
 	logic agn, cbn, cxn, cbo, cxo, agvn;
 	logic [5:0] nb, nx, nu, nu2;
-	agn = !flush && !stall_ag && (sk_va || !in_eb) && !stopped;
+	agn = !flush && !stall_ag && a1_vb && !stopped;
 	cbn = adv_dc2 && dc2_capd && dc2_u.d_reg == u.base;
 	cxn = adv_dc2 && dc2_capd && dc2_u.d_reg == u.idx;
 	cbo = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.base;
 	cxo = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.idx;
 	if (agn) begin
-		nb  = u.base_v ? wf_next(wm(u.base), wmatch(ag_v, ag_u, u.base), cbn) : 6'd0;
-		nx  = u.idx_v  ? wf_next(wm(u.idx),  wmatch(ag_v, ag_u, u.idx),  cxn) : 6'd0;
+		nb  = u.base_v ? wf_next(wm(u.base) & ~{1'b0, ucb, 3'b000}, wmatch(ag_v, ag_u, u.base), cbn) : 6'd0;
+		nx  = u.idx_v  ? wf_next(wm(u.idx)  & ~{1'b0, ucx, 3'b000}, wmatch(ag_v, ag_u, u.idx),  cxn) : 6'd0;
 		nu  = u.upd_v  ? wf_next(wm(u.upd_reg),  wmatch(ag_v, ag_u, u.upd_reg),  1'b0) : 6'd0;
 		nu2 = u.upd2_v ? wf_next(wm(u.upd2_reg), wmatch(ag_v, ag_u, u.upd2_reg), 1'b0) : 6'd0;
 	end
@@ -3259,12 +3320,11 @@ function automatic logic ilk_of(input uop_t u);
 	if (flush || !nreset) begin
 		nb = 6'd0; nx = 6'd0; nu = 6'd0; nu2 = 6'd0;
 	end
-	agvn   = !(flush || !nreset) && (stall_ag ? ag_v : (ain_v && !stopped && !halted));
+	agvn   = !(flush || !nreset) && (stall_ag ? ag_v : (a1_v && !stopped && !halted));
 	ilk_of = agvn && ((nb | nx | nu | nu2) != 6'd0);
 endfunction
-(* keep *) wire ilk_sk = ilk_of(sk_u);
-(* keep *) wire ilk_in = ilk_of(in_u);
-always_comb ilk_nk = sk_v ? ilk_sk : ilk_in;
+(* keep *) wire ilk_a = ilk_of(a1_u, a1_lex, a1_lexx);
+always_comb ilk_nk = ilk_a;
 // (the next values without the kill -- kill_now is late and zeroes every
 // valid, so it is the last AND -- and with DT's late decision rdy_dt
 // (the DMU's dc2r_n1/n0) picked last; both picks one LUT before the flop)
@@ -3275,7 +3335,8 @@ wire ex_v_n   = !kf && (stall_ex  ? ex_v  : adv_dc2);
 wire dc2_v_n  = !kf && (stall_dc2 ? dc2_v : adv_dt);
 wire dt_v_n   = !kf && (stall_dt  ? dt_v  : adv_dc1);
 wire dc1_v_n  = !kf && (stall_dc1 ? dc1_v : adv_ag);
-wire ag_v_n   = !kf && (stall_ag  ? ag_v  : (ain_v && !stopped && !halted));
+wire ag_v_n   = !kf && (stall_ag  ? ag_v  : (a1_v && !stopped && !halted));
+wire a1_v_n   = !kf && (stall_a1  ? a1_v  : (ain_v && !stopped && !halted));
 // WB's store valid as it will be: loaded as the uop enters (with EX's
 // exception decision taken as 0 / 1), cleared by a store's or a PLPA's
 // fault (the clears last, as in the block)
@@ -3325,8 +3386,7 @@ endfunction
 // (AG's interlock next, formed from the incoming uop's register numbers
 // against the stages' -- five levels on its own -- is the last OR of
 // stall_ag, beside the picks)
-(* keep *) wire sag_sk = ag_v_n && ilk_sk;
-(* keep *) wire sag_in = ag_v_n && ilk_in;
+(* keep *) wire sag_a = ag_v_n && ilk_a;
 // (the four candidates -- EX's exception decision and the FPU interface's
 // hold taken as 0/1 -- not kept: synthesis shares and shapes them; the
 // FPU hold, the later of the two, picks last)
@@ -3342,7 +3402,7 @@ wire [6:0] st_c00 = ex_irqn ? st_c001 : st_c000;
 wire [6:0] st_c10 = ex_irqn ? st_c101 : st_c100;
 wire [6:0] st_c01 = ex_irqn ? st_c011 : st_c010;
 wire [6:0] st_c11 = ex_irqn ? st_c111 : st_c110;
-logic stall_wb_q, stall_e2_q, stall_ex_q, stall_dc2_q, stall_dt_q, stall_dc1_q, stall_ag_q;
+logic stall_wb_q, stall_e2_q, stall_ex_q, stall_dc2_q, stall_dt_q, stall_dc1_q, stall_ag_q, stall_a1_q;
 // (DC1's hold for a lookup made stale by a write landing in its set: AG's
 // address -- its adder's, late -- compared with the write's set, the last
 // OR of DC1's and AG's stall registers)
@@ -3351,14 +3411,16 @@ wire dwm_h = dm_req && dm_dwm_v && (dm_dwm_set == ag_maddr[10:4]);
 // flip-flop: DC1's and AG's other terms are ORed into both its candidates)
 always_ff @(posedge clk) begin
 	logic [6:0] st0, st1;
-	logic dc1_o, ag_o;
+	logic dc1_o, ag_o, sag_n;
 	st0   = ex_okn ? st_c10 : st_c00;
 	st1   = ex_okn ? st_c11 : st_c01;
 	dc1_o = dc1_v_n && dwm_h;
-	ag_o  = (sk_v ? sag_sk : sag_in) || (ag_v_n && dc1_v_n && dwm_h);
+	ag_o  = sag_a || (ag_v_n && dc1_v_n && dwm_h);
 	{stall_wb_q, stall_e2_q, stall_ex_q, stall_dc2_q, stall_dt_q} <= {5{!kill_now}} & (fph_n ? st1[6:2] : st0[6:2]);
 	stall_dc1_q <= fph_n ? (!kill_now && (st1[1] || dc1_o)) : (!kill_now && (st0[1] || dc1_o));
-	stall_ag_q  <= fph_n ? (!kill_now && (st1[0] || ag_o))  : (!kill_now && (st0[0] || ag_o));
+	sag_n = fph_n ? (!kill_now && (st1[0] || ag_o))  : (!kill_now && (st0[0] || ag_o));
+	stall_ag_q  <= sag_n;
+	stall_a1_q  <= a1_v_n && sag_n;      // (AG1 holds when AG2 does)
 end
 // the stall nets: the registers, and DC2's hold for an access that entered
 // not ready (its registered "ready" from the DMU), one LUT from flip-flops
@@ -3370,6 +3432,7 @@ assign stall_dc2 = stall_dc2_q || dc2h_c;
 assign stall_dt  = stall_dt_q  || (dt_v && dc2h_c);
 assign stall_dc1 = stall_dc1_q || (dc1_v && dt_v && dc2h_c);
 assign stall_ag  = stall_ag_q  || (ag_v && dc1_v && dt_v && dc2h_c);
+assign stall_a1  = stall_a1_q  || (a1_v && ag_v && dc1_v && dt_v && dc2h_c);
 // synthesis translate_off
 // the registered stalls against the chain: equal, but for a DMU "not
 // ready" a clock longer than the block's (dc2r_n conservative), which
@@ -3385,8 +3448,8 @@ always_ff @(posedge clk) begin
 		$finish;
 	end
 	if (nreset && (stall_wb !== c_wb || stall_e2 !== c_e2 || stall_ex !== c_ex ||
-	               (c_dc2 && !stall_dc2) || (c_dt && !stall_dt) || (c_dc1 && !stall_dc1) || (c_ag && !stall_ag) ||
-	               (!cons && (stall_dc2 !== c_dc2 || stall_dt !== c_dt || stall_dc1 !== c_dc1 || stall_ag !== c_ag)))) begin
+	               (c_dc2 && !stall_dc2) || (c_dt && !stall_dt) || (c_dc1 && !stall_dc1) || (c_ag && !stall_ag) || (c_a1 && !stall_a1) ||
+	               (!cons && (stall_dc2 !== c_dc2 || stall_dt !== c_dt || stall_dc1 !== c_dc1 || stall_ag !== c_ag || stall_a1 !== c_a1)))) begin
 		$display("FAIL: the registered stalls %b%b%b%b%b%b%b (wb e2 ex dc2 dt dc1 ag), the chain %b%b%b%b%b%b%b, conservative %b",
 		         stall_wb, stall_e2, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag, c_wb, c_e2, c_ex, c_dc2, c_dt, c_dc1, c_ag, cons);
 		$finish;
