@@ -522,7 +522,13 @@ logic  [6:0] fsel_q;
 logic  [2:0] fq_e;
 logic  [4:0] fq_wa [3];
 logic [31:0] fq_oh [3];
+// (the drop too is applied a clock late, from its register fvc_q: fv's
+// own enables then come from flip-flops alone; a select formed in the
+// clock between sees the pending drop below, and a write in that clock
+// -- after the drop -- survives it as a pending write)
+logic fvc_q;
 always_ff @(posedge clk) begin
+	fvc_q <= fv_clr[0];
 	for (int w = 0; w < 3; w++) begin
 		fq_e[w]  <= fwe[w] && !fv_clr[0];
 		fq_wa[w] <= fwa[w];
@@ -530,9 +536,8 @@ always_ff @(posedge clk) begin
 	end
 end
 always_comb begin
-	fv_n = fv;
+	fv_n = fvc_q ? 32'd0 : fv;
 	for (int i = 0; i < 3; i++) if (fq_e[i]) fv_n = fv_n | fq_oh[i];
-	for (int b = 0; b < 4; b++) if (fv_clr[b]) fv_n[8*b +: 8] = 8'd0;
 end
 // synthesis translate_off
 // fv as written at once (the model the selects are checked against)
@@ -549,8 +554,8 @@ end
 // enables late -- and the drop applied after it, not through fv_n's 32:1)
 function automatic logic fvn_at(input logic [4:0] a);
 	logic v;
-	v = fv[a];
-	for (int w = 0; w < 3; w++) if (fq_e[w] && fq_wa[w] == a) v = 1'b1;   // pending
+	v = fv[a] && !fvc_q;                                                   // (the pending drop)
+	for (int w = 0; w < 3; w++) if (fq_e[w] && fq_wa[w] == a) v = 1'b1;   // pending writes
 	for (int w = 0; w < 3; w++) if (fwe[w] && fwa[w] == a) v = 1'b1;     // this clock's
 	fvn_at = v && !fv_clr[0];
 endfunction
@@ -863,7 +868,9 @@ ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 // clock ahead, exh_q; the FPU's from fpif, its uop's flag ex_fpw registered
 // as it enters)
 logic exh_q;
-assign ex_hold = exh_q || (ex_v && ex_fpw && fp_hold);
+// (ex_fpw's preserved twin here: the hold is the stall chain's root)
+(* preserve *) logic ex_fpw_h;
+assign ex_hold = exh_q || (ex_v && ex_fpw_h && fp_hold);
 
 // multiply/divide result and flags
 logic [31:0] md_res, md_q_res;
@@ -2352,6 +2359,8 @@ always_ff @(posedge clk) begin
 			ex_mdw   <= (dc2_u.op == OP_MUL || dc2_u.op == OP_DIV) &&
 			            !((dc2_u.mem != M_NONE) && dm_fault);
 			ex_fpw   <= (dc2_u.op == OP_FPU) && !((dc2_u.mem != M_NONE) && dm_fault) &&
+			            (dc2_u.exc == 8'd0);
+			ex_fpw_h <= (dc2_u.op == OP_FPU) && !((dc2_u.mem != M_NONE) && dm_fault) &&
 			            (dc2_u.exc == 8'd0);
 			ex_fvec  <= dm_fvec;
 			ex_faddr <= dm_faddr;
