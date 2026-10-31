@@ -3160,8 +3160,12 @@ always_ff @(posedge clk) begin
 			// finishing it, or its own decisions while the engine does not
 			// own it)
 			r_new  = !mt.v || (!e_job && e_st != E_S_START && rdy_dt);   // (rdy_dt = tk_fast || m2ss_n as it enters: flat)
+			// (DC2's simple store counted on unless a clear of its hit is
+			// possible -- c2_may, from registers -- rather than m2ss_n with
+			// the clear applied, which is the snooper's compare; dc2r_q may
+			// be conservative)
 			r_stay = !m2.r.v || e_dc2_done || (e_st == E_S_DONE && !sn_frz && !e_kill) ||
-			         (!e_job && !(e_st == E_S_START && !sn_frz) && (m2.fast || m2ss_n));
+			         (!e_job && !(e_st == E_S_START && !sn_frz) && (m2.fast || (m2_ss && !c2_may)));
 			dc2r_q <= adv_dt ? r_new : (adv_dc2 || r_stay);
 			dc2r_b2 <= adv_dt ? r_new : (adv_dc2 || r_stay);
 			// WB: a store entering (the fast store: the engine idle, or
@@ -3209,6 +3213,12 @@ wire       rd_se   = (mt.mem == M_ST) && x_tk.ok && !x_tk.flt && !tk_split && (m
 wire       rd_ce   = dc_en && (x_tk.cm == 2'b01) && !mt.noalloc && !mt.lock && !dc_nad;
 wire       rd_hit  = rd_hitq && (|tk_mj);
 assign rdy_dt = (rd_fe && rd_hit && !(|(tk_mj & rd_wtm))) || (rd_se && (!rd_ce || rd_hit));
+// a clear of DC2's record's hit is possible this clock (a snoop's
+// invalidation, or the engine in a state that invalidates): DC2's simple
+// store is then not counted on for its ready -- the clear itself is the
+// snooper's compare and the state machine's decision, late
+wire c2_may = m2.x.hit && ((sn_ph == SN_H && sn_inv && sn_src == 2'd0) || sn_ph == SN_F ||
+                           e_st == E_S_ACT || e_st == E_M_CLR || e_st == E_M_SCAN2 || e_st == E_PUSHV_W);
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && mt.v && rdy_dt !== (tk_fast || st_simp(mt, x_tk, tk_split))) begin
@@ -3218,7 +3228,7 @@ always_ff @(posedge clk)
 // synthesis translate_on
 always_comb begin
 	logic frz_n, nofrz, m1v_n, mtv_n, busy_n, stl_set, r_new, r_stay, ok_new, ok_stay;
-	logic m1s_n, mts_n, m2ss_s, c2_may, m1v_nk, mtv_nk, r_new1, r_new0;
+	logic m1s_n, mts_n, m2ss_s, m1v_nk, mtv_nk, r_new1, r_new0;
 	logic wbslow1, busy0, busy1, wbfast1, wbfsb1, ok_stay0, ok_stay1;
 	logic [2:0] sbn_n;
 	logic hz1, hzt, dk1, dkt, h1, ht;
@@ -3281,8 +3291,6 @@ always_comb begin
 	// DC2 (rdy_dt: the access entering is fast or a simple store -- DT's
 	// late decision; m2ss_s: DC2's own, dropped when a clear of its hit is
 	// possible)
-	c2_may = m2.x.hit && ((sn_ph == SN_H && sn_inv && sn_src == 2'd0) || sn_ph == SN_F ||
-	                      e_st == E_S_ACT || e_st == E_M_CLR || e_st == E_M_SCAN2 || e_st == E_PUSHV_W);
 	m2ss_s = m2_ss && !c2_may;
 	r_new1 = !mt.v || (!e_job && e_st != E_S_START);
 	r_new0 = !mt.v;
