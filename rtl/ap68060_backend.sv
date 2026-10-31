@@ -597,7 +597,7 @@ function automatic logic fvn_at(input logic [4:0] a);
 	v = fv[a] && !fvc_q;                                                   // (the pending drop)
 	for (int w = 0; w < 3; w++) if (fq_e[w] && fq_wa[w] == a) v = 1'b1;   // pending writes
 	for (int w = 0; w < 2; w++) if (fwe[w] && fwa[w] == a) v = 1'b1;     // this clock's, ports 0/1
-	fvn_at = v && !fv_clr[0];
+	fvn_at = v;                                                            // (the drop: the last AND, below)
 endfunction
 function automatic logic fvm2(input logic [4:0] a);
 	fvm2 = (fwa[2] == a);
@@ -610,11 +610,13 @@ always_comb
 		fs1[r] = fvn_at(rran1[r]);  fm1[r] = fvm2(rran1[r]);
 		fs2[r] = fvn_at(rran2[r]);  fm2[r] = fvm2(rran2[r]);
 	end
+// (the drop -- the exception decision inside it, late -- the last AND)
 always_ff @(posedge clk)
 	for (int r = 0; r < 7; r++)
-		fsel_q[r] <= ((rrsel2[r] & fs2[r]) | (rrsel1[r] & !rrsel2[r] & fs1[r]) |
-		              (!rrsel1[r] & !rrsel2[r] & fs0[r])) ||
-		             (fwe[2] && !fv_clr[0] && (rrsel2[r] ? fm2[r] : rrsel1[r] ? fm1[r] : fm0[r]));
+		fsel_q[r] <= !fv_clr[0] &&
+		             (((rrsel2[r] & fs2[r]) | (rrsel1[r] & !rrsel2[r] & fs1[r]) |
+		               (!rrsel1[r] & !rrsel2[r] & fs0[r])) ||
+		              (fwe[2] && (rrsel2[r] ? fm2[r] : rrsel1[r] ? fm1[r] : fm0[r])));
 // synthesis translate_off
 always_ff @(posedge clk)
 	for (int r = 0; r < 7; r++)
