@@ -317,6 +317,14 @@ logic          c_we;
 logic  [6:0]   c_waddr;
 logic  [1:0]   c_wway;
 logic [20:0]   c_wtag;
+logic          cw_q;              // ... a clock later: the tag read in that clock is stale
+logic  [6:0]   cw_set_q;
+logic  [1:0]   cw_way_q;
+always_ff @(posedge clk) begin
+	cw_q     <= c_we;
+	cw_set_q <= c_waddr;
+	cw_way_q <= c_wway;
+end
 logic [127:0]  cd [4];
 logic [23:0]   ct [4];
 
@@ -443,8 +451,13 @@ always_comb begin
 	tg     = {f1_e.pa[19:1], tc_p ? f1_pc[12] : f1_e.pa[0], f1_pc[11]};
 	x_hit  = 1'b0;
 	x_way  = 2'd0;
+	// (a way whose tag the fill wrote in the clock F0 read this set: the
+	// tag RAM gave the old tag while the valid bit is already the new one
+	// -- an old tag of zero matches any address below $800 --; that way is
+	// no hit here: the line just filled is the line buffer's, x_lb)
 	for (int i = 3; i >= 0; i--) begin
-		x_mj[i] = ivf_q[i] && (use_t ? (ct[i][20:0] == tg) : (ct[i][20:0] == f1_pc[31:11]));
+		x_mj[i] = ivf_q[i] && !(cw_q && cw_set_q == f1_pc[10:4] && cw_way_q == 2'(i)) &&
+		          (use_t ? (ct[i][20:0] == tg) : (ct[i][20:0] == f1_pc[31:11]));
 		if (x_mj[i]) begin x_hit = 1'b1; x_way = 2'(i); end
 	end
 	x_hit  = x_hit && x_cach;
