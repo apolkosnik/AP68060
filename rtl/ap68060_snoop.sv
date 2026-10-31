@@ -206,7 +206,7 @@ end
 // (entries now: the queue's, and the registered hit; the head is the
 // queue's first, else the registered hit's set and way)
 assign sf_req  = (fn != 0) || sp_new || sp_ask;
-assign sf_may  = (fn != 0) || sp_new || sp_v;      // (sp_ask needs sp_v)
+assign sf_may  = (fn != 0) || sb_v || sp_v;        // (sp_new needs sb_v, sp_ask sp_v: registers alone)
 assign sf_set  = (fn != 0) ? fq[0][8:2] : sb_l[6:0];
 assign sf_way  = (fn != 0) ? fq[0][1:0] : sb_way;
 assign sf_more = (fn > 1) || (fn == 1 && sp_new) || ((fn != 0 || sp_new) && sp_ask);
