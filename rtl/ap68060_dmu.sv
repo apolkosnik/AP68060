@@ -361,6 +361,7 @@ endfunction
 (* ramstyle = "MLAB, no_rw_check" *) logic [7:0] lsw [128];   // the write's set
 logic  [6:0] lv_ra;                // the engine copy's read: see below
 wire   [3:0] lve_q;                // the engine's (or the snoop's) set
+logic  [3:0] lve_sp;               // ... registered in the stolen read's wait state for the decision after it
 logic  [6:0] clr_i;                // the clear sweep's set
 logic        clr_rst;              // ... after reset (else CINVA: then E_M_IC)
 // synthesis translate_off
@@ -383,6 +384,12 @@ logic  [6:0] ld_ra;
 logic        vq_v, vq_lwe, vq_lv, vq_dwe, vq_dv;
 logic  [6:0] vq_set;
 logic  [3:0] vq_wm;
+// the engine's registered valid bits (lve_sp, read in the stolen lookup's
+// wait state) with the port's pending write laid over them -- a write
+// requested in that clock, which the live read merges -- from registers
+function automatic logic [3:0] lve_fix(input logic [6:0] set);
+	lve_fix = (vq_v && vq_lwe && vq_set == set) ? ((lve_sp & ~vq_wm) | (vq_wm & {4{vq_lv}})) : lve_sp;
+endfunction
 function automatic logic [7:0] vmerge(input logic [7:0] wo);
 	vmerge[7:4] = vq_dwe ? ((wo[7:4] & ~vq_wm) | (vq_wm & {4{vq_dv}})) : wo[7:4];
 	vmerge[3:0] = vq_lwe ? ((wo[3:0] & ~vq_wm) | (vq_wm & {4{vq_lv}})) : wo[3:0];
@@ -1642,6 +1649,7 @@ always_ff @(posedge clk) begin
 				e_st   <= m2.x.ok ? E_S_ACT : E_S_XL;
 		end
 		E_SP_W: begin                   // the RAMs register the stolen address
+			lve_sp <= lve_q;            // (the set's valid bits, for E_SP_2's decision)
 			lk_hit <= atc_hit; lk_e <= atc_e; lk_hv <= atc_hv;
 			lk_tt0 <= ttr_hit(dtt0, {m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode);
 			lk_tt1 <= ttr_hit(dtt1, {m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode);
@@ -1688,7 +1696,7 @@ always_ff @(posedge clk) begin
 			xres_t x;
 			x  = xlate_t({m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode, (m2.r.mem != M_LD),
 			           fc_tt(m2.r.fc) == TT_ALT, lk_tt0, lk_tt1, lk_hit, lk_e,
-			           tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_q);
+			           tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_fix(st_set));
 			// the second part's translation and lookup, registered (the
 			// decision and the data next cycle; the RAM keeps reading the
 			// stolen set)
@@ -1706,6 +1714,7 @@ always_ff @(posedge clk) begin
 			e_st   <= E_S_XLW;
 		end
 		E_S_XLW: begin                 // the RAMs register the stolen address
+			lve_sp <= lve_q;            // (the set's valid bits, for E_S_XL2's decision)
 			lk_hit <= atc_hit; lk_e <= atc_e; lk_hv <= atc_hv;
 			lk_tt0 <= ttr_hit(dtt0, e_va, m2.r.smode);
 			lk_tt1 <= ttr_hit(dtt1, e_va, m2.r.smode);
@@ -1717,7 +1726,7 @@ always_ff @(posedge clk) begin
 			// leaves no entry, nor does one in the no-allocate mode)
 			x = xlate_t(e_va, m2.r.smode, (m2.r.mem != M_LD), fc_tt(m2.r.fc) == TT_ALT,
 			          lk_tt0, lk_tt1, lk_hit || tw_use,
-			          tw_use ? tw_e : lk_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_q);
+			          tw_use ? tw_e : lk_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_fix(e_va[10:4]));
 			if (tw_use && tw_fail) begin
 				x.ok  = 1'b1;
 				x.flt = 1'b1;
@@ -3353,10 +3362,17 @@ assign pq1_l  = bo_pa[31:4];
 // split's next line, the slow path's, the scan's, else the fill/push set), or the snooped set while the engine is frozen
 wire  [7:0] lse_q = lsm_q;              // (with the pending write's bypass)
 assign lve_q = lse_q[3:0];
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && ((e_st == E_SP_2 && lve_fix(st_set) !== lve_q) || (e_st == E_S_XL2 && lve_fix(e_va[10:4]) !== lve_q))) begin
+		$display("FAIL: dmu: the engine's registered valid bits %b/%b, the set's %b (state %0d)", lve_sp, lve_fix(e_st == E_SP_2 ? st_set : e_va[10:4]), lve_q, e_st);
+		$finish;
+	end
+// synthesis translate_on
 always_comb
 	lv_ra = (sn_ph == SN_B)                            ? sn_pa[10:4] :
-	        (e_st == E_SP_2)                           ? st_set :     // (the next set)
-	        (e_st == E_S_XL2 || e_st == E_S_ACT ||
+	        (e_st == E_SP_W || e_st == E_SP_2)         ? st_set :     // (the next set; read in the wait state, registered: lve_sp)
+	        (e_st == E_S_XLW || e_st == E_S_XL2 || e_st == E_S_ACT ||
 	         e_st == E_W_DEC)                          ? e_va[10:4] :
 	        (e_st == E_M_SCANW || e_st == E_M_SCANW2 ||
 	         e_st == E_M_SCAN2)                        ? sc_set : f_set;
