@@ -208,7 +208,9 @@ results as one AND-OR; preserved twins placed by their consumers.
 | f120_ab (best)          | 5755964 | 102.65 MHz | -1.41 ns  | -194 ns  | 826               | 25,394 |
 | f120_ac .. f120_ag      | ..629723a | 96.5-100.6 MHz | -1.6..-2.0 ns | -364..-699 ns | 1,160-1,943 | ~25,800 |
 | f120_ah (stalls registered) | dbecc65 | 96.9 MHz | -1.99 ns | -226 ns | 711 | 25,302 |
-| f120_az (best)          | 5fcb013 | 103.25 MHz | -1.35 ns  | -141 ns  | 539               | 26,032 |
+| f120_az (best TNS)      | 5fcb013 | 103.25 MHz | -1.35 ns  | -141 ns  | 539               | 26,032 |
+| f120_bf (best Fmax)     | 1d69a51 | 103.65 MHz | -1.32 ns  | -164 ns  | 665               | 26,189 |
+| f120_bg, f120_bh        | 962a588, 9d0d136 | 101.4, 102.1 MHz | -1.53, -1.46 ns | -345, -327 ns | 995, 994 | ~26,000 |
 
 The last six fits are near-identical netlists: their spread (TNS -194 to
 -699, the top clusters moving between modules) is placement, not logic --
@@ -242,6 +244,19 @@ operand capture (the file read into the capture's AND-OR), the slow
 ALU's flags, DC2's ready from DT's tag compare (-0.84), the engine's
 stolen lookup (-0.82) -- each within ~1 ns of wire plus 3-4 LUTs.
 Benchmarks unchanged (Dhrystone 1,071, Whetstone 754,922).
+
+Since az: AG's captures take the file's word as their last select; DT's
+tag compare is made as 3-bit chunk matches in DC1 and ANDed in DT; the
+interrupt pending next and WB's store valid are picks of the stall
+registers; the slow ALU's shift flags come from the operand by registered
+indexes; the DMU keeps its own copy of TC.  The fits now sit at
+101-104 MHz, worst slack -1.3 to -1.5 ns, TNS -135 to -345 (the spread is
+the DMU's placement: the engine's lookups, the walker's registers under
+the kill, the split access's second translation).  What is left fails by
+~1.3-1.5 ns in a few different places each fit -- the interlock's compares
+into AG's stall register, the engine's state decisions reading the
+valid/dirty RAM, the kill's fan-out into the walker, DC2's ready from DT's
+compare -- each a 4-5 LUT path with ~1 ns of wire.
 
 ## Next
 
