@@ -33,5 +33,9 @@ FILLG--*.X--*    exception\sframe:\sexpected\s000000[0-9a-f]{2}\sgot        unim
 # pass in full.
 ODD_EXC--*       missing\strace                                        traced-sequence
 ODD_IRQ--*       missing\strace                                        traced-sequence
-# MOVEC2: rounds writing TCR/BUSCR across traced sequences (DWO, SL/SLE)
+# MOVEC2: rounds writing TCR/BUSCR across traced sequences (DWO, SL/SLE):
+# a traced MOVEC Dn,BUSCR with L and LE set reads back SL and SLE after
+# the trace exception (7.4: L/LE copied to SL/SLE and cleared); the
+# generator's trace-free sequence reads L and LE
 *--MOVEC2--*     execution\stimeout                                    traced-sequence
+*--MOVEC2--*     D\d:\sexpected\sa0000000\sgot\s50000000                 traced-sequence
