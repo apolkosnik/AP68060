@@ -265,6 +265,8 @@ logic ex2_same;               // ex_u.pc == e2_u.pc, the same way
 logic        e2_v;
 uop_t        e2_u;
 logic [31:0] e2_npc, e2_res, e2_upd, e2_upd2, e2_stdata, e2_next, e2_otgt, e2_oddpc;
+logic [31:0] e2_stdc;         // CAS: Dc, the store data when the compare says equal (e2_stcas)
+logic        e2_stcas;
 logic [31:0] e2_faddr, e2_fslw, e2_fpxaddr;
 logic        e2_dwe, e2_st, e2_ok, e2_xok, e2_fault, e2_xnz, e2_odd, e2_snw, e2_isfp, e2_fpx;
 logic        e2_fpxnext, e2_fpxcommit, e2_mispred, e2_sr_we, e2_smcr, e2_early, e2_cof, e2_xnew;
@@ -1619,7 +1621,10 @@ always_comb begin
 	// (the flat select exw_val, the same value as the case chain's ex_res:
 	// checked below for every store too)
 	case (ex_u.op)
-		OP_CAS:  ex_st = cas_eq ? ex_av : ex_bv;
+		// (CAS: ex_bv here; its pick of ex_av when the compare is equal --
+		// cas_eq, a 32-bit compare on the bypassed operand -- is made in
+		// EX2: e2_stcas/e2_stdc)
+		OP_CAS:  ex_st = ex_bv;
 		default: ex_st = exw_val;
 	endcase
 	// an FPU store whose result is not written (an enabled integer
@@ -1768,6 +1773,14 @@ logic       mx_a, mx_b, mxt_a, mxt_b, mxc_a, mxc_b, mxg_a, mxg_b;
 function automatic logic omatch(input logic [1:0] src, input logic [4:0] r, input uop_t x);
 	omatch = (src == OS_REG) && x.d_v && (x.d_reg == r);
 endfunction
+// EX's bypass select next from the compares of {DC2's, EX's} operand
+// against {EX's, EX2's} destination
+function automatic logic mxd_f(input logic dx, input logic xx, input logic de, input logic xe);
+	logic mv, st;
+	mv = (adv_dc2 ? dx : xx) && ex_d_eff;                    // EX's uop moves to EX2
+	st = stall_e2 && e2_v && e2_dwe && (adv_dc2 ? de : xe);  // EX2 holds its own
+	mxd_f = !(flush || kill_now || !nreset) && (adv_ex ? mv : st);
+endfunction
 always_ff @(posedge clk) begin
 	logic e2v_n;
 	uop_t e2n, exn, c2n, dtn, c1n, agn;
@@ -1780,10 +1793,13 @@ always_ff @(posedge clk) begin
 	agn   = ag_ld   ? a1_u  : ag_u;
 	mxe_a <= e2v_n && omatch(exn.a_src, exn.a_reg, e2n);
 	mxe_b <= e2v_n && omatch(exn.b_src, exn.b_reg, e2n);
-	// (EX2's write enable next: EX's as it moves on, else its own; the
-	// advance picks last)
-	mxd_a <= {2{e2v_n && omatch(exn.a_src, exn.a_reg, e2n) && (adv_ex ? ex_d_eff : e2_dwe)}};
-	mxd_b <= {2{e2v_n && omatch(exn.b_src, exn.b_reg, e2n) && (adv_ex ? ex_d_eff : e2_dwe)}};
+	// (EX2's write enable next: EX's as it moves on, else its own.  Flat:
+	// the four uop pairs' compares, the advances, then the late terms --
+	// EX's write kill and the kill -- last; EX moving on implies EX2 does)
+	mxd_a <= {2{mxd_f(omatch(dc2_u.a_src, dc2_u.a_reg, ex_u), omatch(ex_u.a_src, ex_u.a_reg, ex_u),
+	                  omatch(dc2_u.a_src, dc2_u.a_reg, e2_u), omatch(ex_u.a_src, ex_u.a_reg, e2_u))}};
+	mxd_b <= {2{mxd_f(omatch(dc2_u.b_src, dc2_u.b_reg, ex_u), omatch(ex_u.b_src, ex_u.b_reg, ex_u),
+	                  omatch(dc2_u.b_src, dc2_u.b_reg, e2_u), omatch(ex_u.b_src, ex_u.b_reg, e2_u))}};
 	mx_a  <= e2v_n && omatch(c2n.a_src, c2n.a_reg, e2n);
 	mx_b  <= e2v_n && omatch(c2n.b_src, c2n.b_reg, e2n);
 	mxt_a <= e2v_n && omatch(dtn.a_src, dtn.a_reg, e2n);
@@ -2695,6 +2711,8 @@ always_ff @(posedge clk) begin
 			e2_upd2     <= ex_upd2;
 			e2_st       <= (ex_u.mem == M_ST || ex_u.mem == M_RMW) && !ex_stkill;
 			e2_stdata   <= ex_st;
+			e2_stdc     <= ex_av;
+			e2_stcas    <= (ex_u.op == OP_CAS) && cas_eq;
 			e2_xok      <= ex_xok;
 			e2_fault    <= ex_fault;
 			e2_xnz      <= ex_xnz;
@@ -2781,7 +2799,7 @@ always_ff @(posedge clk) begin
 			// flip-flop -- wb_exc's compare sat on the stall chain)
 			wb_stv      <= e2_st && e2_ok;
 			wb_ok       <= e2_ok;
-			wb_st_data  <= e2_stdata;
+			wb_st_data  <= e2_stcas ? e2_stdc : e2_stdata;
 			wb_redir    <= e2_mispred || e2_u.ser || e2_sr_we || e2_smcr;
 			wb_eredir   <= e2_early;
 			wb_redir_pc <= e2_next;
