@@ -251,6 +251,7 @@ logic [31:0] fv;
 // stays off the FPU's hold, and so the stall chain)
 logic ew_same;
 logic wb_ok;                  // WB's uop has no exception (wb_exc == 0), registered
+logic [4:0] ccr_nx;           // the condition codes next, but for the exception entry's (see the block)
 // the holds' next values (for the registered stalls, at the end of this
 // module), and the same with the kill taken as 0; declared here, ahead of
 // the blocks that form them
@@ -1827,6 +1828,17 @@ wire wb_post_trap_c = (wb_exc >= 8'd32 && wb_exc < 8'd48) ||
                     wb_exc == 8'd5 || wb_exc == 8'd6 || wb_exc == 8'd7;
 wire wb_post_trap   = wb_xf[XF_POST];
 assign wb_refetch = adv_wb && wb_rf1;
+// the condition codes next, but for the exception entry's: a refetch's
+// restart, else a redirecting commit's (the SR written, or EX's), else
+// EX's flags as its uop moves on, else held -- the block's priorities
+always_comb begin
+	logic [4:0] nf;
+	nf = ex_fs ? alu_sumfl : (ex_u.op == OP_CAS) ? cas_flags : ex_flags;
+	if (wb_refetch)                       ccr_nx = ccr_b;
+	else if (wb_commit && wb_redir)       ccr_nx = wb_sr_we ? wb_sr_new[4:0] : wb_ccr;
+	else if (adv_ex && ex_xok && !ex_fault) ccr_nx = (nf & ex_u.ccr_we) | (ccr_f & ~ex_u.ccr_we);
+	else                                  ccr_nx = ccr_f;
+end
 logic        rt_armed;
 logic [31:0] rt_pc;
 // a double bus fault (MC68060UM 7.9.3, 8.2.1): an access or
@@ -2603,7 +2615,6 @@ always_ff @(posedge clk) begin
 				logic [4:0] nf;
 				// (the adder's flags, the late ones, picked last)
 				nf = ex_fs ? alu_sumfl : (ex_u.op == OP_CAS) ? cas_flags : ex_flags;
-				ccr_f  <= (nf & ex_u.ccr_we) | (ccr_f & ~ex_u.ccr_we);
 				wb_ccr <= (nf & ex_u.ccr_we) | (ccr_f & ~ex_u.ccr_we);
 			end
 			else wb_ccr <= ccr_f;
@@ -2699,7 +2710,7 @@ always_ff @(posedge clk) begin
 					{ras_rtp, ras_rn} <= ras_after(wb_u.ras);
 				end
 				// the front file restarts from the back one (fv cleared below)
-				ccr_f <= wb_sr_we ? wb_sr_new[4:0] : wb_ccr;
+				// (ccr_f: ccr_nx below)
 			end
 			if (wb_bound) rt_armed <= 1'b0;
 		end
@@ -2710,10 +2721,14 @@ always_ff @(posedge clk) begin
 			redir_pc <= wb_u.pc;
 			ras_rv   <= wb_u.ras.v;
 			{ras_rtp, ras_rn} <= {wb_u.ras.tp, wb_u.ras.n};
-			ccr_f    <= ccr_b;
 			rt_armed <= 1'b1;
 			rt_pc    <= wb_u.pc;
 		end
+		// the condition codes: EX's flags, a redirect's or a refetch's
+		// restart (ccr_nx, formed apart), and the exception entry's (x_osr,
+		// assigned below, last: x_go -- the exception decision, late -- is
+		// then the one select before the flip-flops)
+		ccr_f <= ccr_nx;
 
 		//------------------------------------------------------------------
 		// exception entry: a faulting/trapping uop (its effects discarded,
