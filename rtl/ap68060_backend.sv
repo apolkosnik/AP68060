@@ -3155,9 +3155,13 @@ function automatic logic [5:0] stalls6(input logic ok, input logic rdy);
 	sdc2 = dc2_v_n && ((dc2_mx_n && !dc2r) || sex);
 	sdt  = dt_v_n  && (sdc2 || dm_hold_dt_n);
 	sdc1 = dc1_v_n && (sdt  || dm_hold1_nk);
-	sag  = ag_v_n  && (ilk_nk || sdc1);
+	sag  = ag_v_n  && sdc1;                 // (AG's interlock ORed in last, below)
 	stalls6 = {swb, sex, sdc2, sdt, sdc1, sag};
 endfunction
+// (AG's interlock next, formed from the incoming uop's register numbers
+// against the stages' -- five levels on its own -- is the last OR of
+// stall_ag, beside the picks)
+(* keep *) wire sag_ilk = ag_v_n && ilk_nk;
 (* keep *) wire [5:0] st_c00 = stalls6(1'b0, 1'b0);
 (* keep *) wire [5:0] st_c01 = stalls6(1'b0, 1'b1);
 (* keep *) wire [5:0] st_c10 = stalls6(1'b1, 1'b0);
@@ -3165,7 +3169,8 @@ endfunction
 always_ff @(posedge clk) begin
 	logic [5:0] st;
 	st = ex_okn ? (dm_rdy_dt ? st_c11 : st_c10) : (dm_rdy_dt ? st_c01 : st_c00);
-	{stall_wb, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag} <= {6{!kill_now}} & st;
+	{stall_wb, stall_ex, stall_dc2, stall_dt, stall_dc1} <= {5{!kill_now}} & st[5:1];
+	stall_ag <= !kill_now && (st[0] || sag_ilk);
 end
 // synthesis translate_off
 // the registered stalls against the chain: equal, but for a DMU "not
