@@ -223,12 +223,12 @@ function automatic uhd_t uhd(input uop_t u);
 endfunction
 uhd_t        hd;
 uop_t        ueo;              // the queue's other word
-always_comb  ueo = uq_rp ? ue[0] : ue[1];
-assign nx_b0 = nu.base;
-assign nx_i0 = nu.idx;
-assign nx_b1 = ueo.base;
-assign nx_i1 = ueo.idx;
 always_comb begin
+	ueo   = uq_rp ? ue[0] : ue[1];
+	nx_b0 = nu.base;
+	nx_i0 = nu.idx;
+	nx_b1 = ueo.base;
+	nx_i1 = ueo.idx;
 	uq0          = uq_rp ? ue[1] : ue[0];
 	uq0.a_reg    = hd.a_reg;
 	uq0.b_reg    = hd.b_reg;
