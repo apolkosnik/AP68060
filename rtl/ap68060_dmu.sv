@@ -659,6 +659,7 @@ logic       m1_tp;
 //--------------------------------------------------------------------------
 logic  [3:0] mt_hv;
 logic [19:0] mt_wpa [4];
+logic [20:0] mt_ptag [4];           // each ATC way's page tag for DT's compare (registered with mt_wpa)
 atce_t       mt_ent [4];
 logic [20:0] mt_tq [4];
 logic        mt_tp;
@@ -698,8 +699,11 @@ always_comb begin
 	for (int j = 0; j < 4; j++) begin
 		logic ma;
 		ma = 1'b0;
+		// (against each ATC way's page tag as registered with the lookup,
+		// mt_ptag: the page-size bit's select and TC.P -- a far register --
+		// are off the compare)
 		for (int i = 0; i < 4; i++)
-			if (mt_hv[i] && mt_tq[j] == {mt_wpa[i][19:1], tc_p ? mt.a[12] : mt_wpa[i][0], mt.a[11]})
+			if (mt_hv[i] && mt_tq[j] == mt_ptag[i])
 				ma = 1'b1;
 		tk_mj[j] = lvd_q[j] && (mt_tp ? (mt_tq[j] == mt.a[31:11]) : ma);
 	end
@@ -1439,6 +1443,7 @@ always_ff @(posedge clk) begin
 				mt      <= m1;
 				mt_hv   <= atc_hvd;
 				mt_wpa  <= atc_wpad;
+				for (int i = 0; i < 4; i++) mt_ptag[i] <= {atc_wpad[i][19:1], tc_p ? m1.a[12] : atc_wpad[i][0], m1.a[11]};
 				mt_ent  <= atc_entd;
 				mt_tq   <= tq_a;
 				// (formed again, from the pins and registers as they will be
@@ -1468,6 +1473,7 @@ always_ff @(posedge clk) begin
 				else if (tk_rdok) begin
 					mt_hv  <= atc_hvd;
 					mt_wpa <= atc_wpad;
+					for (int i = 0; i < 4; i++) mt_ptag[i] <= {atc_wpad[i][19:1], tc_p ? mt.a[12] : atc_wpad[i][0], mt.a[11]};
 					mt_ent <= atc_entd;
 					mt_tq  <= tq_a;
 					stl    = 1'b0;
@@ -3257,6 +3263,15 @@ always_ff @(posedge clk) begin
 end
 // synthesis translate_on
 
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && mt.v)
+		for (int i = 0; i < 4; i++)
+			if (mt_ptag[i] !== {mt_wpa[i][19:1], tc_p ? mt.a[12] : mt_wpa[i][0], mt.a[11]}) begin
+				$display("FAIL: DMU: DT's registered page tag %h of ATC way %0d, the composed %h", mt_ptag[i], i, {mt_wpa[i][19:1], tc_p ? mt.a[12] : mt_wpa[i][0], mt.a[11]});
+				$finish;
+			end
+// synthesis translate_on
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset) begin
