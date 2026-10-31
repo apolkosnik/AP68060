@@ -92,6 +92,7 @@ module ap68060_dmu
 	output logic        hold_dt,        // DT must hold (a register): its lookup or
 	output logic        hold_dt_b, hold1_b, dc2_rdy_b, st_ok_b,   // the back end's copies of the four holds (preserved twins)
 	output logic        hold1_n, dc2r_n, st_ok_n, hold_dt_n,     // ... and their next values (dc2r_n conservative), for its registered stalls
+	output logic        hold1_nk, dc2r_n1, dc2r_n0, rdy_dt,       // hold1_n without the kill; dc2r_n with DT's late decision rdy_dt taken as 1 / 0 (the back end picks last)
 	                                    // data read is stale
 	output logic        dc2_rdy,        // DC2's access is done: a register, conservative
 	output logic        dc2_rdy_c,      // ... as the stage's own state gives it (checks)
@@ -3131,9 +3132,10 @@ end
 // (a snoop's, or the engine in a state that invalidates).  Checked below:
 // the exact three equal, dc2r_n implies the block's.
 //--------------------------------------------------------------------------
+assign rdy_dt = tk_fast || st_simp(mt, x_tk, tk_split);
 always_comb begin
 	logic frz_n, nofrz, m1v_n, mtv_n, busy_n, stl_set, r_new, r_stay, ok_new, ok_stay;
-	logic m1s_n, mts_n, m2ss_a, m2ss_s, c2_may;
+	logic m1s_n, mts_n, m2ss_s, c2_may, m1v_nk, mtv_nk, r_new1, r_new0;
 	logic [2:0] sbn_n;
 	logic hz1, hzt, dk1, dkt, h1, ht;
 	// DC1's and DT's stale flags as they will be (m1s_n, mts_n above)
@@ -3163,16 +3165,25 @@ always_comb begin
 		                         (iw_req && !iw_done && iw_ok && sb_empty))))) ||
 		         (e_st == E_W_PART && (wd_push || wd_wtp || (!wd_cb && !wd_sb)));
 	hold1_n = nreset ? (frz_n || steal || stl_set || (m1v_n && m1s_n) || (mtv_n && mts_n) || busy_n) : hold1_q;
-	// DC2 (m2ss_a: the simple-store decision of the access entering;
-	// m2ss_s: DC2's own, dropped when a clear of its hit is possible)
-	m2ss_a = st_simp(mt, x_tk, tk_split);
+	// (the same without the kill, for the stalls: a kill clears every
+	// stage's valid, so the stall is zero whatever the hold)
+	m1v_nk  = adv_ag ? dm_req : (!adv_dc1 && m1.v);
+	mtv_nk  = adv_dc1 ? m1.v : (!adv_dt && mt.v);
+	hold1_nk = nreset ? (frz_n || steal || stl_set || (m1v_nk && m1s_n) || (mtv_nk && mts_n) || busy_n) : hold1_q;
+	// DC2 (rdy_dt: the access entering is fast or a simple store -- DT's
+	// late decision; m2ss_s: DC2's own, dropped when a clear of its hit is
+	// possible)
 	c2_may = m2.x.hit && ((sn_ph == SN_H && sn_inv && sn_src == 2'd0) || sn_ph == SN_F ||
 	                      e_st == E_S_ACT || e_st == E_M_CLR || e_st == E_M_SCAN2 || e_st == E_PUSHV_W);
 	m2ss_s = m2_ss && !c2_may;
-	r_new  = !mt.v || (!e_job && e_st != E_S_START && (tk_fast || m2ss_a));
+	r_new1 = !mt.v || (!e_job && e_st != E_S_START);
+	r_new0 = !mt.v;
+	r_new  = rdy_dt ? r_new1 : r_new0;
 	r_stay = !m2.r.v || e_dc2_done || (e_st == E_S_DONE && !sn_frz && !e_kill) ||
 	         (!e_job && !(e_st == E_S_START && !sn_frz) && (m2.fast || m2ss_s));
-	dc2r_n = nreset ? (adv_dt ? r_new : (adv_dc2 || r_stay)) : dc2r_q;
+	dc2r_n  = nreset ? (adv_dt ? r_new  : (adv_dc2 || r_stay)) : dc2r_q;
+	dc2r_n1 = nreset ? (adv_dt ? r_new1 : (adv_dc2 || r_stay)) : dc2r_q;
+	dc2r_n0 = nreset ? (adv_dt ? r_new0 : (adv_dc2 || r_stay)) : dc2r_q;
 	// WB
 	sbn_n   = sb_n - 3'(sb_pop) + 3'(sb_push || wb_fsb);
 	ok_new  = (!m3.split && m3.x.ok && !m3.x.flt && m3.x.hit && m3.x.cm == 2'b01 &&

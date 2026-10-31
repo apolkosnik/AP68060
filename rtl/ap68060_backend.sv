@@ -95,6 +95,7 @@ module ap68060_backend
 	input  logic        dm_hold1,       // the DMU holds DC1 (a register)
 	input  logic        dm_hold1_b, dm_hold_dt_b, dm_dc2_rdy_b, dm_st_ok_b,   // the four holds' twins, for the stall chain alone
 	input  logic        dm_hold1_n, dm_dc2r_n, dm_st_ok_n, dm_hold_dt_n,   // ... and their next values (dc2r conservative), for the registered stalls
+	input  logic        dm_hold1_nk, dm_dc2r_n1, dm_dc2r_n0, dm_rdy_dt,   // hold1_n without the kill; dc2r_n for DT's late decision 1 / 0
 	input  logic        dm_hold1_c,     // ... as its state gives it now (checks)
 	input  logic        dm_hold_dt,     // ... and DT (a register)
 	// WB maintenance (CINV/CPUSH/PFLUSH/PTEST) in the DMU
@@ -248,6 +249,11 @@ logic [31:0] fv;
 // stays off the FPU's hold, and so the stall chain)
 logic ew_same;
 logic wb_ok;                  // WB's uop has no exception (wb_exc == 0), registered
+// the holds' next values (for the registered stalls, at the end of this
+// module), and the same with the kill taken as 0; declared here, ahead of
+// the blocks that form them
+logic wbh_n, exh_n, safe_n, ilk_n;
+logic exh_nk, safe_nk, ilk_nk;
 logic  [2:0] ex_kx;           // EX's uop is FPU, DIV, TRAPcc (registered as it enters)
 wire wb_fpchk = wb_v && !wb_u.last && wb_ok &&
                 (wb_u.mem == M_NONE || wb_u.mem == M_LD) &&
@@ -276,6 +282,20 @@ always_comb begin
 		nv = !ex_u.last && ex_okc && memok(ex_u) && adv_dc2 && dc2_fpu && (dc2_u.pc == ex_u.pc);
 	else nv = 1'b1;
 	safe_n = nv;
+end
+// (the same with the kill taken as 0: a kill clears every stage's valid,
+// so the stalls are zero whatever this is; its logic stays off their D)
+always_comb begin
+	logic nv;
+	if (flush || 1'b0 || !nreset) nv = 1'b1;
+	else if (stall_wb)
+		nv = !wb_v || (!wb_u.last && wb_ok && memok(wb_u) &&
+		               (ex_v ? (ex_kx[2] && ew_same)
+		                     : (adv_dc2 && dc2_fpu && (dc2_u.pc == wb_u.pc))));
+	else if (adv_ex)
+		nv = !ex_u.last && ex_okc && memok(ex_u) && adv_dc2 && dc2_fpu && (dc2_u.pc == ex_u.pc);
+	else nv = 1'b1;
+	safe_nk = nv;
 end
 always_ff @(posedge clk) safe_q <= safe_n;
 // synthesis translate_off
@@ -394,7 +414,6 @@ wire c_dc2 = dc2_v && (dc2_hold || c_ex);
 wire c_dt  = dt_v  && (c_dc2 || dm_hold_dt_b);
 wire c_dc1 = dc1_v && (c_dt  || dm_hold1_b);
 wire c_ag  = ag_v  && (ag_hold  || c_dc1);
-logic wbh_n, exh_n, safe_n, ilk_n;     // the holds' next values (below)
 
 assign adv_wb  = wb_v  && !stall_wb;
 assign adv_ex  = ex_v  && !stall_ex;
@@ -1974,6 +1993,22 @@ always_comb begin
 	         (ex_v && ex_slow && ex_sp != ex_np) ? ex_sp + 2'd1 : ex_sp;
 	exh_n = v_n && ((mdw_n && !z_n && !fin_n) || (slow_n && sp_n != np_n));
 end
+// (the same with the kill taken as 0: a kill clears every stage's valid,
+// so the stalls are zero whatever this is; its logic stays off their D)
+always_comb begin
+	logic       v_n, mdw_n, z_n, fin_n, slow_n;
+	logic [1:0] np_n, sp_n;
+	v_n    = !(flush || 1'b0 || !nreset) && (stall_ex ? ex_v : adv_dc2);
+	mdw_n  = adv_dc2 ? ((dc2_u.op == OP_MUL || dc2_u.op == OP_DIV) &&
+	                    !((dc2_u.mem != M_NONE) && dm_fault)) : ex_mdw;
+	z_n    = (adv_dc2 ? 1'b0 : md_z) || (ex_v && ex_div0);
+	fin_n  = adv_dc2 ? 1'b0 : (md_fin || (md_done && md_go));
+	slow_n = adv_dc2 ? (nphase(dc2_u.op) != 2'd0) : ex_slow;
+	np_n   = adv_dc2 ? nphase(dc2_u.op) : ex_np;
+	sp_n   = (adv_ex || 1'b0 || !nreset) ? 2'd0 :
+	         (ex_v && ex_slow && ex_sp != ex_np) ? ex_sp + 2'd1 : ex_sp;
+	exh_nk = v_n && ((mdw_n && !z_n && !fin_n) || (slow_n && sp_n != np_n));
+end
 always_ff @(posedge clk) exh_q <= exh_n;
 // synthesis translate_off
 always_ff @(posedge clk)
@@ -3039,7 +3074,36 @@ always_comb begin
 	agvn  = !(flush || kill_now || !nreset) && (stall_ag ? ag_v : (ain_v && !stopped && !halted));
 	ilk_n = agvn && ((nb | nx | nu | nu2) != 5'd0);
 end
-wire kf       = flush || kill_now || !nreset;
+always_comb begin
+	logic agn, cbn, cxn, cbo, cxo, agvn;
+	logic [4:0] nb, nx, nu, nu2;
+	agn = !flush && !stall_ag && (sk_va || !in_eb) && !stopped;
+	cbn = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.base;
+	cxn = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.idx;
+	cbo = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.base;
+	cxo = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.idx;
+	if (agn) begin
+		nb  = ain_u.base_v ? wf_next(wm(ain_u.base), wmatch(ag_v, ag_u, ain_u.base), cbn) : 4'd0;
+		nx  = ain_u.idx_v  ? wf_next(wm(ain_u.idx),  wmatch(ag_v, ag_u, ain_u.idx),  cxn) : 4'd0;
+		nu  = ain_u.upd_v  ? wf_next(wm(ain_u.upd_reg),  wmatch(ag_v, ag_u, ain_u.upd_reg),  1'b0) : 4'd0;
+		nu2 = ain_u.upd2_v ? wf_next(wm(ain_u.upd2_reg), wmatch(ag_v, ag_u, ain_u.upd2_reg), 1'b0) : 4'd0;
+	end
+	else begin
+		nb  = wf_next(wf_b[3:0],  1'b0, cbo);
+		nx  = wf_next(wf_x[3:0],  1'b0, cxo);
+		nu  = wf_next(wf_u[3:0],  1'b0, 1'b0);
+		nu2 = wf_next(wf_u2[3:0], 1'b0, 1'b0);
+	end
+	if (flush || !nreset) begin
+		nb = 5'd0; nx = 5'd0; nu = 5'd0; nu2 = 5'd0;
+	end
+	agvn   = !(flush || !nreset) && (stall_ag ? ag_v : (ain_v && !stopped && !halted));
+	ilk_nk = agvn && ((nb | nx | nu | nu2) != 5'd0);
+end
+// (the next values without the kill -- kill_now is late and zeroes every
+// valid, so it is the last AND -- and with DT's late decision rdy_dt
+// (the DMU's dc2r_n1/n0) picked last; both picks one LUT before the flop)
+wire kf       = flush || !nreset;
 wire wb_v_n   = !kf && (stall_wb  ? wb_v  : adv_ex);
 wire ex_v_n   = !kf && (stall_ex  ? ex_v  : adv_dc2);
 wire dc2_v_n  = !kf && (stall_dc2 ? dc2_v : adv_dt);
@@ -3058,22 +3122,27 @@ wire ex_fpw_n = adv_dc2 ? ((dc2_u.op == OP_FPU) && !((dc2_u.mem != M_NONE) && dm
                         : ex_fpw;
 wire hs_n     = (ex_v && !adv_ex) ? fp_hs0 : fp_hs1;
 wire ns_n     = (ex_v && !adv_ex) ? fp_ns0 : fp_ns1;
-wire fph_n    = ex_v_n && (hs_n || (!safe_n && !ns_n));
-wire exho_n   = exh_n || (ex_v_n && ex_fpw_n && fph_n);
-wire dc2h_n   = dc2_v_n && dc2_mx_n && !dm_dc2r_n;
+wire fph_n    = ex_v_n && (hs_n || (!safe_nk && !ns_n));
+wire exho_n   = exh_nk || (ex_v_n && ex_fpw_n && fph_n);
+wire dc2h_n1  = dc2_v_n && dc2_mx_n && !dm_dc2r_n1;
+wire dc2h_n0  = dc2_v_n && dc2_mx_n && !dm_dc2r_n0;
 wire swb_n    = wb_v_n  && (wbh_n || (wb_stv_n && !dm_st_ok_n));
 wire sex_n    = ex_v_n  && (exho_n || swb_n);
-wire sdc2_n   = dc2_v_n && (dc2h_n || sex_n);
-wire sdt_n    = dt_v_n  && (sdc2_n || dm_hold_dt_n);
-wire sdc1_n   = dc1_v_n && (sdt_n  || dm_hold1_n);
-wire sag_n    = ag_v_n  && (ilk_n  || sdc1_n);
+wire sdc2_n1  = dc2_v_n && (dc2h_n1 || sex_n);
+wire sdc2_n0  = dc2_v_n && (dc2h_n0 || sex_n);
+wire sdt_n1   = dt_v_n  && (sdc2_n1 || dm_hold_dt_n);
+wire sdt_n0   = dt_v_n  && (sdc2_n0 || dm_hold_dt_n);
+wire sdc1_n1  = dc1_v_n && (sdt_n1  || dm_hold1_nk);
+wire sdc1_n0  = dc1_v_n && (sdt_n0  || dm_hold1_nk);
+wire sag_n1   = ag_v_n  && (ilk_nk  || sdc1_n1);
+wire sag_n0   = ag_v_n  && (ilk_nk  || sdc1_n0);
 always_ff @(posedge clk) begin
-	stall_wb  <= swb_n;
-	stall_ex  <= sex_n;
-	stall_dc2 <= sdc2_n;
-	stall_dt  <= sdt_n;
-	stall_dc1 <= sdc1_n;
-	stall_ag  <= sag_n;
+	stall_wb  <= !kill_now && swb_n;
+	stall_ex  <= !kill_now && sex_n;
+	stall_dc2 <= !kill_now && (dm_rdy_dt ? sdc2_n1 : sdc2_n0);
+	stall_dt  <= !kill_now && (dm_rdy_dt ? sdt_n1  : sdt_n0);
+	stall_dc1 <= !kill_now && (dm_rdy_dt ? sdc1_n1 : sdc1_n0);
+	stall_ag  <= !kill_now && (dm_rdy_dt ? sag_n1  : sag_n0);
 end
 // synthesis translate_off
 // the registered stalls against the chain: equal, but for a DMU "not
