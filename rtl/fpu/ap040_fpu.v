@@ -934,11 +934,22 @@ wire [66:0] nsh_out = n_v << n_sh;
 
 // the rounding increments of the shifted value (sh_v[66:3]): FINT's and
 // the integer store's at bit 0, a denormal single's or double's store
-// (F_PACKS) at its last kept bit -- each its own adder
+// (F_PACKS) at its last kept bit -- one adder, the increment by the state
+// (F_PACKS is neither F_INTR nor the F_PACKI that pk_mg is read after)
 wire [64:0] shk   = {1'b0, sh_v[66:3]};
-wire [64:0] shk_i = shk + 65'd1;
-wire [24:0] shk_s = {1'b0, sh_v[66:43]} + 25'd1;   // (shk + 2^40)[64:40]
-wire [53:0] shk_d = {1'b0, sh_v[66:14]} + 54'd1;   // (shk + 2^11)[64:11]
+wire [64:0] shk_x = shk + (!fst1h[F_PACKS] ? 65'd1 : (r_fmt == 3'd1) ? (65'd1 << 40) : (65'd1 << 11));
+wire [64:0] shk_i = shk_x;
+wire [24:0] shk_s = shk_x[64:40];   // (shk + 2^40)[64:40]
+wire [53:0] shk_d = shk_x[64:11];   // (shk + 2^11)[64:11]
+// synthesis translate_off
+always @(posedge clk)
+	if (nreset && ((fst1h[F_PACKS] && r_fmt == 3'd1 && shk_s !== {1'b0, sh_v[66:43]} + 25'd1) ||
+	               (fst1h[F_PACKS] && r_fmt != 3'd1 && shk_d !== {1'b0, sh_v[66:14]} + 54'd1) ||
+	               (!fst1h[F_PACKS] && shk_i !== shk + 65'd1))) begin
+		$display("FAIL: FPU shared rounding increment (state %0d fmt %0d)", fst, r_fmt);
+		$finish;
+	end
+// synthesis translate_on
 
 // one 64x64 multiplier for both: the state machine multiplies only in
 // F_MULT, which it reaches with the pipeline empty (its operands are
