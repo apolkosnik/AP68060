@@ -1416,13 +1416,17 @@ wire  [2:0]  sp_n0    = 3'(5'd16 - {1'b0, m2.r.a[3:0]});
 wire         etk_sp   = (e_st == E_SP_3);
 wire  [3:0]  etk_o    = etk_sp ? 4'd0 : e_va[3:0];
 wire  [2:0]  etk_n    = etk_sp ? 3'(nbytes(m2.r.msz) - sp_n0) : e_n;
-wire [31:0]  etk_b    = take(bo_line, e_va[3:0], e_n);
 // (the way's line from the RAM's output, registered with the offset and
 // count before the bytes are taken and merged: E_S_RD3, E_SP_4)
 logic [127:0] etk_l;
 logic   [3:0] etk_oq;
 logic   [2:0] etk_nq;
-wire   [31:0] etk_q    = take(etk_l, etk_oq, etk_nq);
+// (one extractor for both: etk_b is read in E_S_ACT alone, etk_q in E_SP_4
+// and E_S_RD3, so E_S_ACT picks the fill's line, every other state the
+// registered way line)
+wire          etk_fl   = (e_st == E_S_ACT);
+wire   [31:0] etk_q    = take(etk_fl ? bo_line : etk_l, etk_fl ? e_va[3:0] : etk_oq, etk_fl ? e_n : etk_nq);
+wire   [31:0] etk_b    = etk_q;
 // (registered every clock, no enable off the states' decisions: the merge
 // reads it the clock after the RAM's read)
 always_ff @(posedge clk) begin
