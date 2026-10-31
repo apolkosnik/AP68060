@@ -91,6 +91,7 @@ module ap68060_dmu
 	output logic        dm_hold1_c,     // ... as the stage's own state gives it (checks)
 	output logic        hold_dt,        // DT must hold (a register): its lookup or
 	output logic        hold_dt_b, hold1_b, dc2_rdy_b, st_ok_b,   // the back end's copies of the four holds (preserved twins)
+	output logic        hold1_n, dc2r_n, st_ok_n, hold_dt_n,     // ... and their next values (dc2r_n conservative), for its registered stalls
 	                                    // data read is stale
 	output logic        dc2_rdy,        // DC2's access is done: a register, conservative
 	output logic        dc2_rdy_c,      // ... as the stage's own state gives it (checks)
@@ -3130,7 +3131,6 @@ end
 // (a snoop's, or the engine in a state that invalidates).  Checked below:
 // the exact three equal, dc2r_n implies the block's.
 //--------------------------------------------------------------------------
-logic hold1_n, dc2r_n, st_ok_n, hold_dt_n;
 always_comb begin
 	logic frz_n, nofrz, m1v_n, mtv_n, busy_n, stl_set, r_new, r_stay, ok_new, ok_stay;
 	logic m1s_n, mts_n, m2ss_a, m2ss_s, c2_may;

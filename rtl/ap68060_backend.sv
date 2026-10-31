@@ -94,6 +94,7 @@ module ap68060_backend
 	output logic  [1:0] dm_ack,         // acknowledge cycle: 1 IACK, 2 BKPT, 3 LPSTOP
 	input  logic        dm_hold1,       // the DMU holds DC1 (a register)
 	input  logic        dm_hold1_b, dm_hold_dt_b, dm_dc2_rdy_b, dm_st_ok_b,   // the four holds' twins, for the stall chain alone
+	input  logic        dm_hold1_n, dm_dc2r_n, dm_st_ok_n, dm_hold_dt_n,   // ... and their next values (dc2r conservative), for the registered stalls
 	input  logic        dm_hold1_c,     // ... as its state gives it now (checks)
 	input  logic        dm_hold_dt,     // ... and DT (a register)
 	// WB maintenance (CINV/CPUSH/PFLUSH/PTEST) in the DMU
@@ -264,7 +265,7 @@ function automatic logic memok(input uop_t u);
 endfunction
 wire ex_okc   = (ex_u.exc == 8'd0) && !ex_snw && !ex_fault && (ex_kx == 3'd0) && !ex_br;
 wire dc2_fpu  = (dc2_u.op == OP_FPU);
-always_ff @(posedge clk) begin
+always_comb begin
 	logic nv;
 	if (flush || kill_now || !nreset) nv = 1'b1;
 	else if (stall_wb)
@@ -274,8 +275,9 @@ always_ff @(posedge clk) begin
 	else if (adv_ex)
 		nv = !ex_u.last && ex_okc && memok(ex_u) && adv_dc2 && dc2_fpu && (dc2_u.pc == ex_u.pc);
 	else nv = 1'b1;
-	safe_q <= nv;
+	safe_n = nv;
 end
+always_ff @(posedge clk) safe_q <= safe_n;
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && safe_q && !(!wb_v || wb_fpchk)) begin
@@ -285,6 +287,7 @@ always_ff @(posedge clk)
 // synthesis translate_on
 // FPU interface outputs (ap68060_fpif)
 logic        fp_hold, fp_dkill, fp_taken, fp_xnext, fp_xcommit, fp_stkill;
+logic        fp_hs0, fp_ns0, fp_hs1, fp_ns1;   // fpif's next-state candidates' hold flags
 logic [31:0] fp_res, fp_xaddr;
 logic  [7:0] fp_xvec;
 logic  [3:0] fp_xfmt;
@@ -379,12 +382,19 @@ logic md_busy;                // multiply/divide running (register)
 logic ex_md_start;
 // DC2 holds until the data memory unit has its result
 assign dc2_hold  = dc2_v && dc2_mx && !dm_dc2_rdy_b;
-assign stall_wb  = wb_hold_r;
-assign stall_ex  = ex_v  && (ex_hold  || stall_wb);
-assign stall_dc2 = dc2_v && (dc2_hold || stall_ex);
-assign stall_dt  = dt_v  && (stall_dc2 || dm_hold_dt_b);
-assign stall_dc1 = dc1_v && (stall_dt  || dm_hold1_b);
-assign stall_ag  = ag_v  && (ag_hold  || stall_dc1);
+// Every stage's stall is a REGISTER, formed a clock ahead from the next
+// values of the terms the chain below reads (at the end of this module:
+// the holds' next values, hoisted from their prediction blocks, and the
+// valids' next values).  The chain itself, c_*, remains for the check: the
+// registers equal it, except that a DMU "not ready" may be a clock longer
+// (dc2r_n is conservative) -- never shorter.
+wire c_wb  = wb_hold_r;
+wire c_ex  = ex_v  && (ex_hold  || c_wb);
+wire c_dc2 = dc2_v && (dc2_hold || c_ex);
+wire c_dt  = dt_v  && (c_dc2 || dm_hold_dt_b);
+wire c_dc1 = dc1_v && (c_dt  || dm_hold1_b);
+wire c_ag  = ag_v  && (ag_hold  || c_dc1);
+logic wbh_n, exh_n, safe_n, ilk_n;     // the holds' next values (below)
 
 assign adv_wb  = wb_v  && !stall_wb;
 assign adv_ex  = ex_v  && !stall_ex;
@@ -853,7 +863,7 @@ ap68060_fpif #(.FPU_PIPE(FPU_PIPE)) fpif (
 	.safe(safe_q), .adv(adv_ex), .kill(kill_now),
 	.n_sub(dc2_u.cond), .n_fuse(dc2_u.sz == SZ_W), .n_eal(dc2_u.sz == SZ_B),
 	.n_imm(dc2_u.imm[7:0]), .n_ea(dc2_ea), .n_pc(dc2_u.pc), .n_target(dc2_u.target),
-	.hold(fp_hold), .res(fp_res), .dkill(fp_dkill), .taken(fp_taken),
+	.hold(fp_hold), .hs0(fp_hs0), .ns0(fp_ns0), .hs1(fp_hs1), .ns1(fp_ns1), .res(fp_res), .dkill(fp_dkill), .taken(fp_taken),
 	.xvec(fp_xvec), .xfmt(fp_xfmt), .xnext(fp_xnext), .xaddr(fp_xaddr),
 	.xcommit(fp_xcommit), .st_kill(fp_stkill), .dfp(pcr_dfp),
 	.mv_slots(fp_mvslots), .cr_slots(fp_crslots)
@@ -1902,7 +1912,7 @@ assign wb_hold = wb_v && (halted || (!wb_is_exc &&
 // DMU forms), for the uop entering WB and for the one staying; what is not
 // known early -- the interrupt level, the store buffer draining, RSTO --
 // taken at its worst (a clock longer at most)
-always_ff @(posedge clk) begin
+always_comb begin
 	logic       irq_n, tr_n, hlt_n, ok_new, x_new, h_new, ok_stay, x_stay, h_stay;
 	// an interrupt pending next cycle
 	irq_n  = irq_pend_n;
@@ -1922,8 +1932,9 @@ always_ff @(posedge clk) begin
 	x_stay  = (wb_reset && (!rst_issued || rsto_busy)) || (wb_mt && !(mt_seen || mt_done));
 	h_stay  = hlt_n || (ok_stay && x_stay) ||
 	          (sb_ne_n && (!ok_stay || wb_u.ser || (wb_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
-	wbh_q <= nreset && (adv_ex ? h_new : h_stay);
+	wbh_n = nreset && (adv_ex ? h_new : h_stay);
 end
+always_ff @(posedge clk) wbh_q <= wbh_n;
 // irq_pend's registers as they will be (the main block's ipl_q, nmi_edge,
 // ipend_r, ipend_lvl and irq_mask assignments, in their order)
 always_comb begin
@@ -1949,7 +1960,7 @@ end
 always_ff @(posedge clk) irq_pend_q <= nreset && irq_pend_n;
 // EX's own hold as it will be: the values ex_v, the unit's flags and the
 // phase counter take (their assignments below, in order)
-always_ff @(posedge clk) begin
+always_comb begin
 	logic       v_n, mdw_n, z_n, fin_n, slow_n;
 	logic [1:0] np_n, sp_n;
 	v_n    = !(flush || kill_now || !nreset) && (stall_ex ? ex_v : adv_dc2);
@@ -1961,8 +1972,9 @@ always_ff @(posedge clk) begin
 	np_n   = adv_dc2 ? nphase(dc2_u.op) : ex_np;
 	sp_n   = (adv_ex || kill_now || !nreset) ? 2'd0 :
 	         (ex_v && ex_slow && ex_sp != ex_np) ? ex_sp + 2'd1 : ex_sp;
-	exh_q <= v_n && ((mdw_n && !z_n && !fin_n) || (slow_n && sp_n != np_n));
+	exh_n = v_n && ((mdw_n && !z_n && !fin_n) || (slow_n && sp_n != np_n));
 end
+always_ff @(posedge clk) exh_q <= exh_n;
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset) begin
@@ -2991,6 +3003,100 @@ always_ff @(posedge clk)
 			$finish;
 		end
 	end
+// synthesis translate_on
+
+
+//--------------------------------------------------------------------------
+// The registered stalls (see the chain c_* above).  AG's interlock next
+// (ilk_n) is the capture block's arithmetic formed again from the same
+// registers; the valids' next values are their updates' shapes; the other
+// holds' next values come hoisted from their prediction blocks (wbh_n,
+// exh_n, safe_n) and from the DMU (dm_*_n).
+//--------------------------------------------------------------------------
+always_comb begin
+	logic agn, cbn, cxn, cbo, cxo, agvn;
+	logic [4:0] nb, nx, nu, nu2;
+	agn = !flush && !stall_ag && (sk_va || !in_eb) && !stopped;
+	cbn = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.base;
+	cxn = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.idx;
+	cbo = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.base;
+	cxo = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.idx;
+	if (agn) begin
+		nb  = ain_u.base_v ? wf_next(wm(ain_u.base), wmatch(ag_v, ag_u, ain_u.base), cbn) : 4'd0;
+		nx  = ain_u.idx_v  ? wf_next(wm(ain_u.idx),  wmatch(ag_v, ag_u, ain_u.idx),  cxn) : 4'd0;
+		nu  = ain_u.upd_v  ? wf_next(wm(ain_u.upd_reg),  wmatch(ag_v, ag_u, ain_u.upd_reg),  1'b0) : 4'd0;
+		nu2 = ain_u.upd2_v ? wf_next(wm(ain_u.upd2_reg), wmatch(ag_v, ag_u, ain_u.upd2_reg), 1'b0) : 4'd0;
+	end
+	else begin
+		nb  = wf_next(wf_b[3:0],  1'b0, cbo);
+		nx  = wf_next(wf_x[3:0],  1'b0, cxo);
+		nu  = wf_next(wf_u[3:0],  1'b0, 1'b0);
+		nu2 = wf_next(wf_u2[3:0], 1'b0, 1'b0);
+	end
+	if (flush || kill_now || !nreset) begin
+		nb = 5'd0; nx = 5'd0; nu = 5'd0; nu2 = 5'd0;
+	end
+	agvn  = !(flush || kill_now || !nreset) && (stall_ag ? ag_v : (ain_v && !stopped && !halted));
+	ilk_n = agvn && ((nb | nx | nu | nu2) != 5'd0);
+end
+wire kf       = flush || kill_now || !nreset;
+wire wb_v_n   = !kf && (stall_wb  ? wb_v  : adv_ex);
+wire ex_v_n   = !kf && (stall_ex  ? ex_v  : adv_dc2);
+wire dc2_v_n  = !kf && (stall_dc2 ? dc2_v : adv_dt);
+wire dt_v_n   = !kf && (stall_dt  ? dt_v  : adv_dc1);
+wire dc1_v_n  = !kf && (stall_dc1 ? dc1_v : adv_ag);
+wire ag_v_n   = !kf && (stall_ag  ? ag_v  : (ain_v && !stopped && !halted));
+// WB's store valid as it will be: loaded as the uop enters, cleared by a
+// store's or a PLPA's fault (the clears last, as in the block)
+wire wb_stv_n = (adv_ex ? ((ex_u.mem == M_ST || ex_u.mem == M_RMW) && !ex_stkill &&
+                           ex_xok && !ex_fault && !ex_xnz && !ex_odd)
+                        : wb_stv) &&
+                !(wb_v && wb_st && dm_st_rdy && dm_st_fault && wb_exc == 8'd0) &&
+                !(wb_v && wb_mt && mt_done && wb_u.cond == 4'd5 && mt_fault && wb_exc == 8'd0);
+wire dc2_mx_n = adv_dt ? ((dt_u.mem != M_NONE) && (dt_u.exc == 8'd0)) : dc2_mx;
+wire ex_fpw_n = adv_dc2 ? ((dc2_u.op == OP_FPU) && !((dc2_u.mem != M_NONE) && dm_fault) && (dc2_u.exc == 8'd0))
+                        : ex_fpw;
+wire hs_n     = (ex_v && !adv_ex) ? fp_hs0 : fp_hs1;
+wire ns_n     = (ex_v && !adv_ex) ? fp_ns0 : fp_ns1;
+wire fph_n    = ex_v_n && (hs_n || (!safe_n && !ns_n));
+wire exho_n   = exh_n || (ex_v_n && ex_fpw_n && fph_n);
+wire dc2h_n   = dc2_v_n && dc2_mx_n && !dm_dc2r_n;
+wire swb_n    = wb_v_n  && (wbh_n || (wb_stv_n && !dm_st_ok_n));
+wire sex_n    = ex_v_n  && (exho_n || swb_n);
+wire sdc2_n   = dc2_v_n && (dc2h_n || sex_n);
+wire sdt_n    = dt_v_n  && (sdc2_n || dm_hold_dt_n);
+wire sdc1_n   = dc1_v_n && (sdt_n  || dm_hold1_n);
+wire sag_n    = ag_v_n  && (ilk_n  || sdc1_n);
+always_ff @(posedge clk) begin
+	stall_wb  <= swb_n;
+	stall_ex  <= sex_n;
+	stall_dc2 <= sdc2_n;
+	stall_dt  <= sdt_n;
+	stall_dc1 <= sdc1_n;
+	stall_ag  <= sag_n;
+end
+// synthesis translate_off
+// the registered stalls against the chain: equal, but for a DMU "not
+// ready" a clock longer than the block's (dc2r_n conservative), which
+// holds DC2 and the stages before it
+logic ilk_nq, dc2r_nq;
+always_ff @(posedge clk) begin
+	logic cons;
+	ilk_nq  <= ilk_n;
+	dc2r_nq <= dm_dc2r_n;
+	cons = dc2_v && dc2_mx && dm_dc2_rdy_b && !dc2r_nq;
+	if (nreset && ilk_nq !== ilk_q) begin
+		$display("FAIL: AG's interlock next value %b, the register %b", ilk_nq, ilk_q);
+		$finish;
+	end
+	if (nreset && (stall_wb !== c_wb || stall_ex !== c_ex ||
+	               (c_dc2 && !stall_dc2) || (c_dt && !stall_dt) || (c_dc1 && !stall_dc1) || (c_ag && !stall_ag) ||
+	               (!cons && (stall_dc2 !== c_dc2 || stall_dt !== c_dt || stall_dc1 !== c_dc1 || stall_ag !== c_ag)))) begin
+		$display("FAIL: the registered stalls %b%b%b%b%b%b (wb ex dc2 dt dc1 ag), the chain %b%b%b%b%b%b, conservative %b",
+		         stall_wb, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag, c_wb, c_ex, c_dc2, c_dt, c_dc1, c_ag, cons);
+		$finish;
+	end
+end
 // synthesis translate_on
 
 endmodule

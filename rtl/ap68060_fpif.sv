@@ -99,6 +99,7 @@ module ap68060_fpif
 	input  logic [31:0] n_target,
 
 	output logic        hold,
+	output logic        hs0, ns0, hs1, ns1,   // the next-state candidates' hold flags (the uop staying / entering), for the back end's registered stalls
 	output logic [31:0] res,
 	output logic        dkill,          // no register write
 	output logic        taken,          // FBcc / FDBcc
@@ -1593,6 +1594,8 @@ always_comb begin
 	v1.dout = f_dout; v1.xop = f_xop; v1.crrd = f_crrd; v1.cc = f_cc; v1.bsun_en = f_bsun_en;
 	o0 = out_f(v0);
 	o1 = out_f(v1);
+	hs0 = o0.hs; ns0 = o0.ns;
+	hs1 = o1.hs; ns1 = o1.ns;
 end
 // (an FPU uop in EX that does not advance stays; otherwise the uop EX takes
 // next is DC2's -- when EX is empty or holds another kind of uop, the
