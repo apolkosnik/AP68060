@@ -403,3 +403,10 @@ now a flag registered in the divide's first EX clock, read from its
 second), the skid's valid into AG1's file word (sk_v -> a1_fx -1.48 x31:
 the word is now the one select before the flip-flop), the tag RAM's
 write register into the snoop phase and the engine (-1.67).
+
+Fit f130_g (90bc12a): Fmax 101.42 MHz, slack -2.17, TNS -1,525, 3,809
+endpoints, 25,991 ALMs -- worse than f130_f (-1,350 / 3,085) by more
+than the leading paths it fixed: within the ~300 ns fit-to-fit spread,
+and the AG1 entry capture of DC2's load (m2.x.way / dc2_v -> a1_fb/a1_fx,
+-1.6..-1.9 x ~80) is now a family of its own beside AG2's.  Leading:
+ex_v -> stall_ag/a1 (-2.17), e2_dwe -> ccr_f (-1.87), dc2_v -> rff.sel_q.
