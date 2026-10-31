@@ -279,6 +279,12 @@ logic       unlock_pend;
 logic       end_tenure;        // relinquish once the transfer in progress ends
 
 always_ff @(posedge clk) begin
+	// (the data driven next: a long word of the current transfer's line,
+	// its index chosen by the state -- one select, after the cases -- or
+	// the picked client's first word)
+	logic [1:0] dlw;
+	logic       dld, dpk;
+	dlw = 2'd0; dld = 1'b0; dpk = 1'b0;
 	gnt    <= '0;
 	done   <= '0;
 	err    <= '0;
@@ -517,7 +523,7 @@ always_ff @(posedge clk) begin
 				a_o   <= {cur.addr[31:4], a32, cur.addr[1:0]};
 				siz   <= SIZ_L;
 				bs_n  <= 4'h0;
-				d_o   <= line_word(cur_wd, a32);
+				dlw = a32; dld = 1'b1;
 				ts_n  <= 1'b0;
 				tip_n <= 1'b0;
 				ign   <= icount(cur.rd, 1'b0);   // a long-word cycle: the primary count
@@ -534,7 +540,7 @@ always_ff @(posedge clk) begin
 				end
 				else if (inhibited) st <= S_GAP;
 				else begin
-					d_o   <= line_word(cur_wd, cur.addr[3:2] + beat);
+					dlw = cur.addr[3:2] + beat; dld = 1'b1;
 					ign   <= icount(1'b0, 1'b1);
 					sas_n <= (icount(1'b0, 1'b1) != 4'd0);
 					st    <= S_DATA;
@@ -585,7 +591,7 @@ always_ff @(posedge clk) begin
 					else begin
 						a32   <= cur.addr[3:2];
 						a_o   <= cur.addr;
-						d_o   <= (cur.siz == SIZ_LINE) ? line_word(cur_wd, cur.addr[3:2]) : cur_wd[31:0];
+						dlw = (cur.siz == SIZ_LINE) ? cur.addr[3:2] : 2'd3; dld = 1'b1;
 						ts_n  <= 1'b0;
 						ign   <= icount(cur.rd, 1'b0);
 						st    <= S_C1;
@@ -636,7 +642,7 @@ always_ff @(posedge clk) begin
 						end
 						else begin
 							// burst: the next long word, after its ignore states
-							d_o   <= line_word(cur_wd, lw + 2'd1);
+							dlw = lw + 2'd1; dld = 1'b1;
 							ign   <= icount(cur.rd, 1'b1);
 							sas_n <= (icount(cur.rd, 1'b1) != 4'd0);
 						end
@@ -663,12 +669,11 @@ always_ff @(posedge clk) begin
 				// drive the transfer (S_IDLE: the request picked; S_RETRY: cur)
 				busreq_t r;
 				logic [127:0] w;
-				logic [31:0] dw;
 				r = (st == S_RETRY) ? cur : breq[pick_c];
 				w = (st == S_RETRY) ? cur_wd : wdata[pick_c];
 				// (each client's first data word formed before the pick)
-				dw = (st == S_RETRY) ? ((cur.siz == SIZ_LINE) ? line_word(cur_wd, cur.addr[3:2]) : cur_wd[31:0])
-				                     : dpick;
+				if (st == S_RETRY) begin dlw = (cur.siz == SIZ_LINE) ? cur.addr[3:2] : 2'd3; dld = 1'b1; end
+				else dpk = 1'b1;
 				ab        <= B_EXP;
 				bb_n_o    <= 1'b0;
 				bb_oe     <= 1'b1;
@@ -689,7 +694,6 @@ always_ff @(posedge clk) begin
 				ciout_n   <= !r.ci || (r.tt == 2'd3);
 				lock_n    <= !(r.lock || lk_now);
 				locke_n   <= !(r.lock && r.locke);
-				d_o       <= dw;
 				d_oe      <= !r.rd;
 				ts_n      <= 1'b0;
 				tip_n     <= 1'b0;
@@ -716,6 +720,10 @@ always_ff @(posedge clk) begin
 				br_n <= halt || !((|pend) || (st == S_RETRY && !start && !drop[cur_c]));
 			end
 		end
+	end
+	if (nreset) begin
+		if (dld)      d_o <= line_word(cur_wd, dlw);
+		else if (dpk) d_o <= dpick;
 	end
 end
 
