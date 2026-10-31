@@ -396,6 +396,7 @@ logic  [6:0] ld_ra;
 logic        vq_v, vq_lwe, vq_lv, vq_dwe, vq_dv;
 logic  [6:0] vq_set;
 logic  [3:0] vq_wm;
+logic        vq_mt;               // vq_set == mt.a[10:4], registered
 // the engine's registered valid bits (lve_sp, read in the stolen lookup's
 // wait state) with the port's pending write laid over them -- a write
 // requested in that clock, which the live read merges -- from registers
@@ -767,7 +768,15 @@ logic        tk_dok;              // the data RAM's output this clock is DT's se
 assign tk_relook = mt.v && mt_stale;
 // the valid and dirty bits of DT's set, read every clock (always current)
 wire  [7:0] lsd_r = lsd[mt.a[10:4]];
-wire  [7:0] lsd_q = (vq_v && vq_set == mt.a[10:4]) ? vmerge(lsd_r) : lsd_r;
+wire  [7:0] lsd_q = (vq_v && vq_mt) ? vmerge(lsd_r) : lsd_r;
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && vq_v && vq_mt != (vq_set == mt.a[10:4])) begin
+		$display("FAIL: DMU: the pending valid/dirty write's registered set compare %b, the compare's %b",
+		         vq_mt, vq_set == mt.a[10:4]);
+		$finish;
+	end
+// synthesis translate_on
 wire  [3:0] lvd_q = lsd_q[3:0];
 wire  [3:0] ldd_q = lsd_q[7:4];
 wire        tk_wr = (mt.mem == M_ST) || (mt.mem == M_RMW);
@@ -3235,6 +3244,9 @@ always_ff @(posedge clk) begin
 		begin
 			vq_v   <= (vp_dwe || vp_lwe) && vp_wm != 4'd0;
 			vq_set <= vp_set;
+			// (the pending write's set against DT's as it will be -- the
+			// lookup entering, or its own held -- for the bits DT reads)
+			vq_mt  <= (vp_set == (!nreset ? 7'd0 : adv_dc1 ? m1.a[10:4] : mt.a[10:4]));
 			vq_wm  <= vp_wm;
 			vq_lwe <= vp_lwe; vq_lv <= vp_lv;
 			vq_dwe <= vp_dwe; vq_dv <= vp_dv;

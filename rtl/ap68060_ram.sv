@@ -190,19 +190,16 @@ module ap68060_rf #(
 	// a registered port's select: the table's entry for next clock's
 	// address, as this clock's writes leave it (the later port wins, as in
 	// the table) -- the table's 32:1 read is off the read path, and the
-	// late enables are the last term
-	// (port 2's write enable -- EX's result, its kill decided late -- is
-	// applied after the pick: nsel has ports 0/1's writes, nsel2 says
-	// whether port 2 would write the register)
+	// late enables are the last terms
+	// (every port's write enable -- AG's advance, EX's result with its kill
+	// decided late -- is applied after the pick: the candidates are the
+	// table's entry with the pending write (nsel) and, per write port,
+	// whether it would write the register (nselw))
 	function automatic logic [1:0] nsel(input logic [4:0] a);
-		logic [1:0] v;
-		v = lvt_eff(a);
-		for (int w = 0; w < NW && w < 2; w++)
-			if (we[w] && wa[w] == a) v = 2'(w);
-		nsel = v;
+		nsel = lvt_eff(a);
 	endfunction
-	function automatic logic nsel2(input logic [4:0] a);
-		nsel2 = (NW > 2) && (wa[2] == a);
+	function automatic logic nselw(input int w, input logic [4:0] a);
+		nselw = (w < NW) && (wa[w] == a);
 	endfunction
 	// synthesis translate_off
 	// the table as written at once (the model the selects are checked against)
@@ -217,22 +214,29 @@ module ap68060_rf #(
 	// (the candidates kept as nodes: the late selects are the one level
 	// before the flip-flop)
 	(* keep *) logic [1:0] ns0 [NR], ns1 [NR], ns2 [NR];
-	(* keep *) logic [NR-1:0] m20, m21, m22;
+	(* keep *) logic [2:0] mw0 [NR], mw1 [NR], mw2 [NR];
 	always_comb
 		for (int r = 0; r < NR; r++) begin
-			ns0[r] = nsel(ran0[r]);  m20[r] = nsel2(ran0[r]);
-			ns1[r] = nsel(ran1[r]);  m21[r] = nsel2(ran1[r]);
-			ns2[r] = nsel(ran2[r]);  m22[r] = nsel2(ran2[r]);
+			ns0[r] = nsel(ran0[r]);
+			ns1[r] = nsel(ran1[r]);
+			ns2[r] = nsel(ran2[r]);
+			for (int w = 0; w < 3; w++) begin
+				mw0[r][w] = nselw(w, ran0[r]);
+				mw1[r][w] = nselw(w, ran1[r]);
+				mw2[r][w] = nselw(w, ran2[r]);
+			end
 		end
 	always_ff @(posedge clk)
 		for (int r = 0; r < NR; r++) begin
 			logic [1:0] v;
-			logic       m2;
-			v  = ({2{rsel2[r]}} & ns2[r]) |
-			     ({2{rsel1[r] && !rsel2[r]}} & ns1[r]) |
-			     ({2{!rsel1[r] && !rsel2[r]}} & ns0[r]);
-			m2 = rsel2[r] ? m22[r] : rsel1[r] ? m21[r] : m20[r];
-			sel_q[r] <= (we[2] && m2) ? 2'd2 : v;
+			logic [2:0] m, h;
+			v = ({2{rsel2[r]}} & ns2[r]) |
+			    ({2{rsel1[r] && !rsel2[r]}} & ns1[r]) |
+			    ({2{!rsel1[r] && !rsel2[r]}} & ns0[r]);
+			m = rsel2[r] ? mw2[r] : rsel1[r] ? mw1[r] : mw0[r];
+			h = m & we;
+			// (the later port wins)
+			sel_q[r] <= h[2] ? 2'd2 : h[1] ? 2'd1 : h[0] ? 2'd0 : v;
 		end
 	// synthesis translate_off
 	always_ff @(posedge clk)
