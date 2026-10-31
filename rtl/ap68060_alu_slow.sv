@@ -177,6 +177,7 @@ logic  [5:0] q_nbits, q_n;
 logic  [4:0] q_f;
 logic [65:0] q_rv;
 logic  [6:0] q_ra;
+logic  [7:0] q_i1, q_im;          // nbits + ra, nbits - 1 + ra (8 bits: a count past the operand is the fill)
 logic        q_asr, q_vl, q_bnz;
 logic  [7:0] q_abcd, q_sbcd, q_pack;
 logic        q_abcd_c, q_sbcd_c;
@@ -192,6 +193,11 @@ always_ff @(posedge clk) begin
 	q_f     <= flags_in;
 	q_rv    <= rv;
 	q_ra    <= ra;
+	// (the shifted-out bits' indexes into the operand, registered: the
+	// flags then come from the operand by a registered select, beside the
+	// shifter, not from its result)
+	q_i1    <= 8'(nbits) + 8'(ra);
+	q_im    <= 8'(nbits - 6'd1) + 8'(ra);
 	q_asr   <= (op == OP_ASR);
 	q_vl    <= vl;
 	q_bnz   <= (bm != 32'd0);
@@ -209,6 +215,23 @@ end
 logic [65:0] ro;
 logic [31:0] sh_r;
 logic        sh_c, sh_x, sh_v;
+// a bit of the shifted operand, ro[k] = q_rv[k + ra] (the fill beyond),
+// from the operand by the registered index
+function automatic logic robit(input logic [7:0] i);
+	robit = (i < 8'd66) ? q_rv[i[6:0]] : (q_asr ? q_rv[65] : 1'b0);
+endfunction
+wire ro_nb = robit(q_i1);          // ro[q_nbits]
+wire ro_0  = robit(8'(q_ra));      // ro[0]
+wire ro_nm = robit(q_im);          // ro[q_nbits - 1]
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (q_n != 6'd0 && (q_op == OP_ROXL || q_op == OP_ROXR || q_op == OP_ASL || q_op == OP_LSL ||
+	                    q_op == OP_LSR || q_op == OP_ASR || q_op == OP_ROL || q_op == OP_ROR) &&
+	    (ro_nb !== ro[q_nbits] || ro_0 !== ro[0] || ro_nm !== ro[q_nbits - 6'd1])) begin
+		$display("FAIL: slow ALU: the shifted-out bits by index %b%b%b, the shifter's %b%b%b", ro_nb, ro_0, ro_nm, ro[q_nbits], ro[0], ro[q_nbits - 6'd1]);
+		$finish;
+	end
+// synthesis translate_on
 always_comb begin
 	logic [5:0] n;
 	n  = q_n;
@@ -220,7 +243,7 @@ always_comb begin
 	if (q_op == OP_ROXL || q_op == OP_ROXR) begin
 		// (a count of 0 leaves the operand: C = X, X unchanged)
 		if (n != 6'd0) begin
-			sh_x = ro[q_nbits];
+			sh_x = ro_nb;
 			sh_r = ro[31:0] & q_szm;
 		end
 		sh_c = sh_x;
@@ -229,19 +252,19 @@ always_comb begin
 		case (q_op)
 			OP_ASL, OP_LSL: begin
 				sh_r = ro[31:0] & q_szm;
-				sh_c = (q_n <= q_nbits) && (q_n[5] ? q_bm[0] : ro[q_nbits]);
+				sh_c = (q_n <= q_nbits) && (q_n[5] ? q_bm[0] : ro_nb);
 				sh_x = sh_c;
 				if (q_op == OP_ASL)
 					sh_v = (q_n >= q_nbits) ? q_bnz : q_vl;
 			end
 			OP_LSR, OP_ASR: begin
 				sh_r = ro[32:1] & q_szm;
-				sh_c = ro[0];
+				sh_c = ro_0;
 				sh_x = sh_c;
 			end
 			default: begin   // ROL, ROR
 				sh_r = ro[31:0] & q_szm;
-				sh_c = (q_op == OP_ROL) ? sh_r[0] : sh_r[q_nbits - 6'd1];
+				sh_c = (q_op == OP_ROL) ? sh_r[0] : (ro_nm && q_szm[q_nbits - 6'd1]);
 			end
 		endcase
 	end
