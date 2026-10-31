@@ -476,11 +476,11 @@ logic [20:0] twd_b;
 
 // data: write port for stores and fills, read port for DT / engine
 logic [127:0] dq_rn [4];           // unregistered output
-logic  [31:0] dqa [4];             // DC2: every way's operand bytes (taken as
-                                   // the access left DT)
-// synthesis translate_off
-logic  [63:0] dq2w [4];            // (simulation: the two long words, the check's)
-// synthesis translate_on
+logic  [63:0] dq2w [4];            // DC2: every way's two long words at the address
+                                   // (taken as the access left DT)
+logic  [31:0] dql [4];             // ... and its aligned long (an even word in the low half)
+logic   [2:0] dpi [4];             // the operand's byte p: its index in the two long words
+logic   [3:0] dpv;                 // ... and that the operand has that byte
 logic         dw;
 logic  [6:0]  dw_set;
 logic  [1:0]  dw_way;
@@ -527,16 +527,17 @@ generate
 	end
 endgenerate
 
-// DC2's copy: every way's operand at its address, as the access leaves DT
-// (DT held until that read was fresh): byte p of the two long words at the
-// address by its index tk_bsel[p] (none: zero); the way is picked in DC2
+// DC2's copy: every way's two long words at the address, as the access
+// leaves DT (DT held until that read was fresh); DC2 picks the way, then
+// the operand's bytes once (fast_data).  AG's capture of an aligned long
+// or even word reads dql, the first long word with an even word at offset
+// 0 moved into its low half: the way select alone in DC2, as before.
 always_ff @(posedge clk)
 	if (adv_dt) for (int j = 0; j < 4; j++) begin
-		for (int p = 0; p < 4; p++)
-			dqa[j][8*p +: 8] <= mt_bv[p] ? dq_rn[j][127 - 8*mt_bidx[p] -: 8] : 8'd0;
-		// synthesis translate_off
+		logic [31:0] lw;
+		lw = dq_rn[j][127 - 32 * mt.a[3:2] -: 32];
 		dq2w[j] <= pair(dq_rn[j], mt.a[3:2]);
-		// synthesis translate_on
+		dql[j]  <= {lw[31:16], (mt.msz == SZ_W && !mt.a[1]) ? lw[31:16] : lw[15:0]};
 	end
 // synthesis translate_off
 always_ff @(posedge clk)
@@ -867,6 +868,12 @@ logic [2:0] tk_bsel [4];
 logic [2:0] mt_bsel [4];        // (registered as the access enters DT, from DC1's)
 logic [3:0] mt_bidx [4];        // ... the byte's index in the line
 logic       mt_bv [4];          // ... and that the operand has that byte
+// (DC2's byte selects: the index in the two long words DT registers, dq2w)
+always_ff @(posedge clk)
+	if (adv_dt) for (int p = 0; p < 4; p++) begin
+		dpi[p] <= mt_bidx[p][2:0] - {mt.a[2], 2'b00};
+		dpv[p] <= mt_bv[p];
+	end
 always_comb
 	for (int p = 0; p < 4; p++)
 		tk_bsel[p] = (3'(p) < nbytes(mt.msz)) ? 3'({1'b0, mt.a[1:0]} + nbytes(mt.msz) - 3'd1 - 3'(p)) : 3'd7;
@@ -906,15 +913,22 @@ wire fast_now = m2.r.v && m2.fast;
 // the hit way's operand (the way registered: a 4-input multiplexer per bit;
 // a split load's bytes past the line are masked by its user)
 logic [31:0] fast_data;
-assign fast_data = dqa[m2.x.way];
-// synthesis translate_off
 logic [63:0] dq2;
 assign dq2 = dq2w[m2.x.way];
+// (byte p of the operand: the way's pair byte dpi[p], registered in DT)
+always_comb
+	for (int p = 0; p < 4; p++)
+		fast_data[8*p +: 8] = dpv[p] ? dq2[63 - 8*dpi[p] -: 8] : 8'd0;
+wire  [31:0] fast_al = dql[m2.x.way];
+// synthesis translate_off
+// the aligned copy against the operand, wherever AG may capture it
 always_ff @(posedge clk)
 	if (nreset && m2.r.v && m2.fast &&
-	    fast_data != take({dq2, 64'd0}, {2'd0, m2.r.a[1:0]}, nbytes(m2.r.msz))) begin
-		$display("FAIL: DMU: DC2's byte selects give %h, the operand is %h", fast_data,
-		         take({dq2, 64'd0}, {2'd0, m2.r.a[1:0]}, nbytes(m2.r.msz)));
+	    (fast_data != take({dq2, 64'd0}, {2'd0, m2.r.a[1:0]}, nbytes(m2.r.msz)) ||
+	     (m2.r.msz == SZ_L && m2.r.a[1:0] == 2'd0 && fast_al != fast_data) ||
+	     (m2.r.msz == SZ_W && !m2.r.a[0] && fast_al[15:0] != fast_data[15:0]))) begin
+		$display("FAIL: DMU: DC2's aligned copy %h, the operand %h (a %h sz %0d)", fast_al, fast_data,
+		         m2.r.a, m2.r.msz);
 		$finish;
 	end
 // synthesis translate_on
@@ -3597,7 +3611,7 @@ assign dc2_rdy_c = !m2.r.v || e_dc2_done || (!e_job && (fast_now || st_simple));
 assign ldata   = e_dc2_done ? e_ldata : fast_data;
 // for AG's capture of a load into a base or index: the operand, offered for
 // an aligned long or an even word
-assign ldata_al  = ldata;
+assign ldata_al  = e_dc2_done ? e_ldata : fast_al;
 // (a register formed a clock ahead: DT's record if it moves in, else DC2's
 // own with the engine's done as it will be; checked against the terms)
 function automatic logic al_ok(input logic [1:0] msz, input logic [1:0] a);
