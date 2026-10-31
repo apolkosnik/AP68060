@@ -457,6 +457,8 @@ wire        dr_m1    = adv_dc1 && !sn_rset && !steal;
 
 // tags: port A for lookups (DC1 or stolen), port B for engine reads/writes
 logic [20:0] tq_a [4];
+logic [20:0] tq_raw [4], tq_bd [4];   // ... the RAM's word and the write laid over it, apart (tq_bv: the write is the word): the snoop compares both
+logic        tq_bv [4];
 logic [20:0] tq_b [4];
 logic        tw_b;
 logic  [6:0] tset_b;
@@ -505,7 +507,7 @@ generate
 		ap68060_tdp #(.AW(7), .DW(21)) tag (
 			.clk(clk),
 			.addr_a(la_set_n), .we_a(1'b0), .wd_a(21'd0), .q_a(tq_a[gw]),
-			.qa_raw(), .qa_bv(), .qa_bd(),
+			.qa_raw(tq_raw[gw]), .qa_bv(tq_bv[gw]), .qa_bd(tq_bd[gw]),
 			.addr_b(tset_b), .we_b(tw_b && tway_b == 2'(gw)), .wd_b(twd_b), .q_b(tq_b[gw])
 		);
 		ap68060_sdp_be #(.AW(7), .NB(16), .OREG(0)) dat (
@@ -2864,8 +2866,18 @@ always_ff @(posedge clk) begin
 			logic h; logic [1:0] w;
 			s = sn_pa[10:4];
 			h = 1'b0; w = 2'd0;
+			// (the tag RAM's word and the write laid over it compared in
+			// parallel, the bypass's own compare picking: not the bypassed
+			// word's three levels ahead of the compare)
 			for (int i = 0; i < 4; i++)
-				if (lve_q[i] && tq_a[i] == sn_pa[31:11]) begin h = 1'b1; w = 2'(i); end
+				if (lve_q[i] && (tq_bv[i] ? (tq_bd[i] == sn_pa[31:11]) : (tq_raw[i] == sn_pa[31:11]))) begin h = 1'b1; w = 2'(i); end
+			// synthesis translate_off
+			for (int i = 0; i < 4; i++)
+				if ((tq_bv[i] ? tq_bd[i] : tq_raw[i]) !== tq_a[i]) begin
+					$display("FAIL: DMU: the tag RAM's parallel bypass %h/%b/%h differs from its word %h (way %0d)", tq_raw[i], tq_bv[i], tq_bd[i], tq_a[i], i);
+					$finish;
+				end
+			// synthesis translate_on
 			sn_way <= w;
 			sn_look <= 1'b1;
 			// (CACR.DPI keeps a pushed line valid: a way and a push can
