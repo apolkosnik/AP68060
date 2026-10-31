@@ -20,8 +20,17 @@ FILLG--*.X--*    exception\sframe:\sexpected\s000000[0-9a-f]{2}\sgot        unim
 *--DIVL.L*       got\s0000003d                                         unimp-integer
 *--MULL.L*       got\s0000003d                                         unimp-integer
 *--MVP*          got\s0000003d                                         unimp-integer
-# odd trace vector rounds: the generator runs the traced sequence without
-# the trace exceptions in between
+# ODD_EXC/ODD_IRQ: every vector from 4 up holds the odd address $123
+# (feature_exception_vectors), so any exception ends in an address error
+# (vector 3, stacked PC = the vector's offset).  In rounds with a trace bit
+# set the generator does not take the trace after the instruction under
+# test: it stores the trace SR/PC (the "standalone trace" record) and runs
+# on to the terminating ILLEGAL, whose vector 4 faults (stacked PC $10).
+# A 68060 takes the trace first, and its vector 9 faults (stacked PC $24,
+# WinUAE's own model of the fault: regs.pc = vector * 4), so no round of
+# this kind can replay against the record (the native tester's 68020+
+# handlers have no resume for it either).  Rounds without a trace bit
+# pass in full.
 ODD_EXC--*       missing\strace                                        traced-sequence
 ODD_IRQ--*       missing\strace                                        traced-sequence
 # MOVEC2: rounds writing TCR/BUSCR across traced sequences (DWO, SL/SLE)
