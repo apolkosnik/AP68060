@@ -2947,14 +2947,32 @@ always_ff @(posedge clk) begin
 		// engine's, else the WB store's (the engine is frozen while the
 		// snoop port holds the cache; the WB store writes with the engine
 		// idle and no snoop)
-		if (vs_lwe || vs_dwe) begin
-			vp_set = vs_set; vp_wm = vs_wm; vp_lwe = vs_lwe; vp_lv = vs_lv; vp_dwe = vs_dwe; vp_dv = vs_dv;
-		end
-		else if (ve_lwe || ve_dwe) begin
-			vp_set = ve_set; vp_wm = ve_wm; vp_lwe = ve_lwe; vp_lv = ve_lv; vp_dwe = ve_dwe; vp_dv = ve_dv;
-		end
-		else begin
-			vp_set = vf_set; vp_wm = vf_wm; vp_lwe = vf_lwe; vp_lv = vf_lv; vp_dwe = vf_dwe; vp_dv = vf_dv;
+		// (the engine's set and ways as an AND-OR over its one-hot sites,
+		// each site's set and way from its own registers -- not the state
+		// machine's select of ve_set; checked equal)
+		begin
+			logic [6:0] ves;
+			logic [3:0] vew;
+			ves = ({7{ve_site[0] || ve_site[1]}} & e_va[10:4]) | ({7{ve_site[2]}} & clr_i) |
+			      ({7{ve_site[3]}} & ms_i[8:2]) | ({7{ve_site[4] || ve_site[5] || ve_site[6] || ve_site[7]}} & f_set);
+			vew = ({4{ve_site[0] || ve_site[1]}} & (4'b0001 << e_x.way)) | ({4{ve_site[2]}} & 4'hF) |
+			      ({4{ve_site[3]}} & (4'b0001 << ms_i[1:0])) |
+			      ({4{ve_site[4] || ve_site[5] || ve_site[6] || ve_site[7]}} & (4'b0001 << f_way));
+			// synthesis translate_off
+			if ((ve_lwe || ve_dwe) && (ves != ve_set || vew != ve_wm)) begin
+				$display("FAIL: DMU: the engine's write set/ways by site %0d/%b, the select's %0d/%b (sites %b)", ves, vew, ve_set, ve_wm, ve_site);
+				$finish;
+			end
+			// synthesis translate_on
+			if (vs_lwe || vs_dwe) begin
+				vp_set = vs_set; vp_wm = vs_wm; vp_lwe = vs_lwe; vp_lv = vs_lv; vp_dwe = vs_dwe; vp_dv = vs_dv;
+			end
+			else if (ve_lwe || ve_dwe) begin
+				vp_set = ves; vp_wm = vew; vp_lwe = ve_lwe; vp_lv = ve_lv; vp_dwe = ve_dwe; vp_dv = ve_dv;
+			end
+			else begin
+				vp_set = vf_set; vp_wm = vf_wm; vp_lwe = vf_lwe; vp_lv = vf_lv; vp_dwe = vf_dwe; vp_dv = vf_dv;
+			end
 		end
 		// synthesis translate_off
 		if (32'(vs_lwe || vs_dwe) + 32'(ve_lwe || ve_dwe) + 32'(vf_lwe || vf_dwe) > 1) begin
@@ -3131,7 +3149,7 @@ always_ff @(posedge clk) begin
 			// unless the engine may own DC2); one staying (the engine
 			// finishing it, or its own decisions while the engine does not
 			// own it)
-			r_new  = !mt.v || (!e_job && e_st != E_S_START && (tk_fast || m2ss_n));
+			r_new  = !mt.v || (!e_job && e_st != E_S_START && rdy_dt);   // (rdy_dt = tk_fast || m2ss_n as it enters: flat)
 			r_stay = !m2.r.v || e_dc2_done || (e_st == E_S_DONE && !sn_frz && !e_kill) ||
 			         (!e_job && !(e_st == E_S_START && !sn_frz) && (m2.fast || m2ss_n));
 			dc2r_q <= adv_dt ? r_new : (adv_dc2 || r_stay);
@@ -3169,7 +3187,25 @@ end
 // (a snoop's, or the engine in a state that invalidates).  Checked below:
 // the exact three equal, dc2r_n implies the block's.
 //--------------------------------------------------------------------------
-assign rdy_dt = tk_fast || st_simp(mt, x_tk, tk_split);
+// DT's decision as one flat function of the tag match: the terms that do
+// not read tk_mj formed apart (early), the match's four bits entering
+// once -- two levels after the compare, not the chain tk_wtd -> tk_fast
+// -> st_simp
+wire [3:0] rd_wtm  = ldd_q & {4{x_tk.cm == 2'b00}};            // ways a write-through access must not hit (dirty)
+wire       rd_hitq = (mt.ack == 2'd0) && x_tkr.ok && !x_tkr.flt;  // a hit counts (x_tk.hit without tk_hit)
+wire       rd_fe   = (mt.mem == M_LD || mt.mem == M_RMW) && !mt.lock && x_tk.ok && !x_tk.flt &&
+                     !x_tk.cm[1] && dc_en && (mt.ack == 2'd0) && (mt.msz != SZ_Q) && !tk_split;
+wire       rd_se   = (mt.mem == M_ST) && x_tk.ok && !x_tk.flt && !tk_split && (mt.msz != SZ_Q);
+wire       rd_ce   = dc_en && (x_tk.cm == 2'b01) && !mt.noalloc && !mt.lock && !dc_nad;
+wire       rd_hit  = rd_hitq && (|tk_mj);
+assign rdy_dt = (rd_fe && rd_hit && !(|(tk_mj & rd_wtm))) || (rd_se && (!rd_ce || rd_hit));
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && mt.v && rdy_dt !== (tk_fast || st_simp(mt, x_tk, tk_split))) begin
+		$display("FAIL: DMU: DT's flat decision %b, the chain's %b/%b", rdy_dt, tk_fast, st_simp(mt, x_tk, tk_split));
+		$finish;
+	end
+// synthesis translate_on
 always_comb begin
 	logic frz_n, nofrz, m1v_n, mtv_n, busy_n, stl_set, r_new, r_stay, ok_new, ok_stay;
 	logic m1s_n, mts_n, m2ss_s, c2_may, m1v_nk, mtv_nk, r_new1, r_new0;
