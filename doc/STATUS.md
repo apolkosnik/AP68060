@@ -258,6 +258,38 @@ into AG's stall register, the engine's state decisions reading the
 valid/dirty RAM, the kill's fan-out into the walker, DC2's ready from DT's
 compare -- each a 4-5 LUT path with ~1 ns of wire.
 
+### Toward 130 MHz (2026-10-31)
+
+The plan and its log are doc/PLAN-130MHZ.md: whole stages are split so
+that no path crossing a module is more than ~3 LUT levels.  Done so far,
+each a commit passing the regression (392) and the corpus smoke: an EX2
+stage holding the uop's outcome in registers (WB's registers formed
+from it, the DMU with a record m3b), the result broadcast from EX2's
+register (in preserved copies per consumer group, EX bypassing its own
+operands for a back-to-back dependence), an AG1 stage holding the uop
+and its file words ahead of the adder, the fetch queue's takes as
+registered one-hots, EX's result sources grouped, AG2's capture compares
+registered, younger accesses held behind serializing or excepting uops
+(dm_quiet).
+
+| fit (PERIOD 7.692)  | commit  | Fmax       | slack    | TNS       | failing endpoints |
+|---------------------|---------|------------|----------|-----------|-------------------|
+| f130_a (before)     | dff41b3 | 95.5 MHz   | -2.78 ns | -1,747 ns | 3,793 |
+| f130_b (EX2)        | b4235d6 | 103.8 MHz  | -1.94 ns | -1,553 ns | 3,094 |
+| f130_c (broadcast)  | 53cc21e | 99.1 MHz   | -2.40 ns | -1,601 ns | 3,786 |
+| f130_d (4 copies)   | 8a1ab96 | 102.5 MHz  | -2.07 ns | -1,478 ns | 3,562 |
+| f130_e (AG1)        | 1279cb6 | 96.2 MHz   | -2.71 ns | -1,957 ns | 4,233 |
+
+Not converging yet: every failing path is 4-6 cells and 2-4 wires of
+1-2.5 ns (registers with a fan-out of 50-120), and 90 % of the endpoints
+fail by under 1 ns.  Cycle cost so far: Dhrystone 1,071 -> 1,112
+cycles/iteration (+3.8 %), Whetstone 754,922 -> 791,894 (+4.9 %).  Found
+on the way and fixed (main too): the instruction cache's stale tag read
+in a fill's write clock (6ad7c16 on main).  Remaining plan items: DT's
+decision a clock later, the DMU engine two-process, WB's decisions as
+registers, the sequencer's head candidates, the FPU interface's next
+state, the store buffer and BIU data paths.
+
 ## Next
 
 1. Area: about 2,500 ALMs still to go.  With the options off, by ALUTs:
