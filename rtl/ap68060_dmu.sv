@@ -3347,7 +3347,9 @@ assign rdy_dt = (rd_fe && rd_hit && !(|(tk_mj & rd_wtm))) || (rd_se && (!rd_ce |
 // invalidation, or the engine in a state that invalidates): DC2's simple
 // store is then not counted on for its ready -- the clear itself is the
 // snooper's compare and the state machine's decision, late
-wire c2_may = m2.x.hit && ((sn_ph == SN_H && sn_inv && sn_src == 2'd0) || sn_ph == SN_F ||
+// (the snoop port's part from its phase alone -- in H the invalidation
+// pulse and the source are late --: conservative, as dc2r may be)
+wire c2_may = m2.x.hit && (sn_ph == SN_H || sn_ph == SN_F ||
                            e_st == E_S_ACT || e_st == E_M_CLR || e_st == E_M_SCAN2 || e_st == E_PUSHV_W);
 // synthesis translate_off
 always_ff @(posedge clk)
