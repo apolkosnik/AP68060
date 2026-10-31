@@ -222,15 +222,20 @@ function automatic uhd_t uhd(input uop_t u);
 	uhd = {u.a_reg, u.b_reg, u.base_v, u.idx_v, u.base, u.idx, u.upd_v, u.upd2_v, u.upd_reg, u.upd2_reg};
 endfunction
 uhd_t        hd;
-uhd_t        hdo;              // the queue's other word's head fields
-// (through uhd(): Quartus resolves no member of a variable copied from
-// the queue's array, which it infers as a memory)
+// (the queue's other word's base and index through functions: Quartus
+// resolves no member of the queue's array's element, nor of a copy of
+// it -- it infers the array as a memory -- but a function's argument)
+function automatic logic [4:0] ubase(input uop_t u);
+	ubase = u.base;
+endfunction
+function automatic logic [4:0] uidx(input uop_t u);
+	uidx = u.idx;
+endfunction
 always_comb begin
-	hdo   = uhd(uq_rp ? ue[0] : ue[1]);
 	nx_b0 = nu.base;
 	nx_i0 = nu.idx;
-	nx_b1 = hdo.base;
-	nx_i1 = hdo.idx;
+	nx_b1 = ubase(uq_rp ? ue[0] : ue[1]);
+	nx_i1 = uidx(uq_rp ? ue[0] : ue[1]);
 	uq0          = uq_rp ? ue[1] : ue[0];
 	uq0.a_reg    = hd.a_reg;
 	uq0.b_reg    = hd.b_reg;
