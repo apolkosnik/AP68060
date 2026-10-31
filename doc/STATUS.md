@@ -180,6 +180,58 @@ tb/asm bench programs:
 A BALANCED-mode fit (instead of HIGH PERFORMANCE EFFORT) is no smaller
 (24,658 ALMs).
 
+### The 060-120mhz branch (2026-10-30)
+
+Branched from main at 3bd8b4e to reach 120 MHz; area may grow here (the
+20,000 ALM limit stays on main), the FPU is re-pipelined, no multicycle
+or false-path exception anywhere.  ~110 commits, each a structural
+change judged by an out-of-context fit at PERIOD=8.333 (`syn/fitcore.sh`,
+`PERIOD=8.333`), the regression (393 PASS) and the sim's checks that every
+registered hold, select and flag equals (or, where allowed, is no shorter
+than) the value it replaces.
+
+What was done, in order of effect: every pipeline hold a register formed
+a clock ahead (the DMU's four, WB's, EX's, the FPU interface's `safe`,
+AG's interlock); the register files' bank and front selects registered
+from next clock's address for all seven ports, their tables written a
+clock late from registered writes; operand-match flags for every stage's
+capture of EX's result; the DMU's records' hit clears and the scan's copy
+compared per invalidation source; the engine's line registered before the
+byte take; fetch's next addresses as one AND-OR each; the ALU's other
+results as one AND-OR; preserved twins placed by their consumers.
+
+| fit (PERIOD 8.333)      | commit  | Fmax       | slack     | TNS      | failing endpoints | ALMs   |
+|-------------------------|---------|------------|-----------|----------|-------------------|--------|
+| main baseline           | 3bd8b4e | 60.7 MHz   | -8.1 ns   |          | 16,594            |        |
+| f120_n                  | 9318c9f | 96.4 MHz   | -2.04 ns  | -717 ns  | 1,599             | 24,524 |
+| f120_r                  | 1cadb07 | 101.6 MHz  | -1.51 ns  | -431 ns  | 1,066             | 24,906 |
+| f120_ab (best)          | 5755964 | 102.65 MHz | -1.41 ns  | -194 ns  | 826               | 25,394 |
+| f120_ac .. f120_ag      | ..629723a | 96.5-100.6 MHz | -1.6..-2.0 ns | -364..-699 ns | 1,160-1,943 | ~25,800 |
+
+The last six fits are near-identical netlists: their spread (TNS -194 to
+-699, the top clusters moving between modules) is placement, not logic --
+what fails is 3-4 LUTs with 6-8 ns of wire (the stall chain's fan-out,
+the DMU-backend boundary, the file reads).  The fitter's AGGRESSIVE
+PERFORMANCE mode was worse (100.4 MHz, -499 ns) than HIGH PERFORMANCE
+EFFORT on the same RTL.
+
+**Certified: 100 MHz.**  At PERIOD=10 the design closes with no
+violations: HEAD 629723a 101.07 MHz (slack +0.106 ns, 25,472 ALMs), the
+f120_ab netlist 102.98 MHz (+0.289 ns, 25,094 ALMs).
+
+Benchmarks at HEAD (tb/run_bench.sh): Dhrystone 2.1 1,071 cycles per
+iteration (main: the same), Whetstone 754,922 cycles per loop (main
+747,389: +1.0 %, from the one conservative case of the registered FPU
+`safe` -- a uop leaving EX as the FPU's enters).
+
+To 120 MHz: the remaining paths all start at the stall chain or the
+AG operand entry.  The structural fix is the stall of every stage as a
+register formed a clock ahead (doc/NOTES-regstall.md): its backend half is
+mechanical, but the DMU's four hold next-values are formed inside its one
+clocked block from block-local decisions, so it needs that block in
+two-process form first -- a multi-day refactor -- or an AG operand stage
+(an extra pipeline stage, with an IPC cost to measure).
+
 ## Next
 
 1. Area: about 2,500 ALMs still to go.  With the options off, by ALUTs:
@@ -188,5 +240,7 @@ A BALANCED-mode fit (instead of HIGH PERFORMANCE EFFORT) is no smaller
    670 each), decode 3,300 (five ~400-bit decoded records).  Planned:
    narrow the uop per stage, remove the 040-only FPU paths the 060 traps
    (checked against the corpus), then smaller queues.
-2. 60 MHz closure, structurally (no seed sweeps).
+2. 60 MHz closure on main, structurally (no seed sweeps); on this branch,
+   120 MHz by the registered per-stage stalls (the DMU in two-process
+   form first) and/or an AG operand stage.
 3. Performance: superscalar dispatch (the 060's sOEP) within the budget.
