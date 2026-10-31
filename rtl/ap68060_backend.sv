@@ -1541,8 +1541,8 @@ always_ff @(posedge clk) begin
 	exn   = adv_dc2 ? dc2_u : ex_u;
 	c1n   = adv_ag ? ag_u : dc1_u;
 	agn   = ag_ld ? ain_u : ag_u;
-	// (a dynamic FPU uop's A becomes OS_ZERO as it enters DC1: ag_dyncan)
-	mxc_a <= exv_n && !(adv_ag && ag_dyncan) && omatch(c1n.a_src, c1n.a_reg, exn);
+	// (a cancelled access's A becomes OS_ZERO as it enters DC1: ag_cancel)
+	mxc_a <= exv_n && !(adv_ag && ag_cancel) && omatch(c1n.a_src, c1n.a_reg, exn);
 	mxc_b <= exv_n && omatch(c1n.b_src, c1n.b_reg, exn);
 	mxg_a <= exv_n && omatch(agn.a_src, agn.a_reg, exn);
 	mxg_b <= exv_n && omatch(agn.b_src, agn.b_reg, exn);
