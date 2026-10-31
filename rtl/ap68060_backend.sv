@@ -3156,11 +3156,15 @@ wire exho_n1  = exh_nk || (ex_v_n && ex_fpw_n);
 // exception decision (ok) and DT's fast/simple-store decision (rdy) taken
 // as 0/1: four candidates, kept as nets, the two late picks and the kill
 // the LUT before the flip-flops
-function automatic logic [5:0] stalls6(input logic ok, input logic rdy, input logic fph);
+// (DT's decision -- its tag compare, most of the clock -- is not in the
+// registers' D at all: they are formed as if the access entering DC2 were
+// ready (dc2r_n1), and DC2's own registered "ready" corrects the stall
+// nets below, one LUT from flip-flops)
+function automatic logic [5:0] stalls6(input logic ok, input logic fph);
 	logic wbh, stv, dc2r, exho, swb, sex, sdc2, sdt, sdc1, sag;
 	wbh  = ok ? wbh_n1 : wbh_n0;
 	stv  = ok ? wb_stv_n1 : wb_stv_n0;
-	dc2r = rdy ? dm_dc2r_n1 : dm_dc2r_n0;
+	dc2r = dm_dc2r_n1;
 	exho = fph ? exho_n1 : exho_n0;
 	swb  = wb_v_n  && (wbh || (stv && !dm_st_ok_n));
 	sex  = ex_v_n  && (exho || swb);
@@ -3175,22 +3179,29 @@ endfunction
 // stall_ag, beside the picks)
 (* keep *) wire sag_sk = ag_v_n && ilk_sk;
 (* keep *) wire sag_in = ag_v_n && ilk_in;
-(* keep *) wire [5:0] st_c000 = stalls6(1'b0, 1'b0, 1'b0);
-(* keep *) wire [5:0] st_c010 = stalls6(1'b0, 1'b1, 1'b0);
-(* keep *) wire [5:0] st_c100 = stalls6(1'b1, 1'b0, 1'b0);
-(* keep *) wire [5:0] st_c110 = stalls6(1'b1, 1'b1, 1'b0);
-(* keep *) wire [5:0] st_c001 = stalls6(1'b0, 1'b0, 1'b1);
-(* keep *) wire [5:0] st_c011 = stalls6(1'b0, 1'b1, 1'b1);
-(* keep *) wire [5:0] st_c101 = stalls6(1'b1, 1'b0, 1'b1);
-(* keep *) wire [5:0] st_c111 = stalls6(1'b1, 1'b1, 1'b1);
+// (the four candidates -- EX's exception decision and the FPU interface's
+// hold taken as 0/1 -- not kept: synthesis shares and shapes them; the
+// FPU hold, the later of the two, picks last)
+wire [5:0] st_c00 = stalls6(1'b0, 1'b0);
+wire [5:0] st_c10 = stalls6(1'b1, 1'b0);
+wire [5:0] st_c01 = stalls6(1'b0, 1'b1);
+wire [5:0] st_c11 = stalls6(1'b1, 1'b1);
+logic stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q, stall_dc1_q, stall_ag_q;
 always_ff @(posedge clk) begin
-	logic [5:0] st, st0, st1;
-	st0 = ex_okn ? (dm_rdy_dt ? st_c110 : st_c100) : (dm_rdy_dt ? st_c010 : st_c000);
-	st1 = ex_okn ? (dm_rdy_dt ? st_c111 : st_c101) : (dm_rdy_dt ? st_c011 : st_c001);
-	st  = fph_n ? st1 : st0;
-	{stall_wb, stall_ex, stall_dc2, stall_dt, stall_dc1} <= {5{!kill_now}} & st[5:1];
-	stall_ag <= !kill_now && (st[0] || (sk_v ? sag_sk : sag_in));
+	logic [5:0] st;
+	st = fph_n ? (ex_okn ? st_c11 : st_c01) : (ex_okn ? st_c10 : st_c00);
+	{stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q, stall_dc1_q} <= {5{!kill_now}} & st[5:1];
+	stall_ag_q <= !kill_now && (st[0] || (sk_v ? sag_sk : sag_in));
 end
+// the stall nets: the registers, and DC2's hold for an access that entered
+// not ready (its registered "ready" from the DMU), one LUT from flip-flops
+wire dc2h_c = dc2_v && dc2_mx && !dm_dc2_rdy_b;
+assign stall_wb  = stall_wb_q;
+assign stall_ex  = stall_ex_q;
+assign stall_dc2 = stall_dc2_q || dc2h_c;
+assign stall_dt  = stall_dt_q  || (dt_v && dc2h_c);
+assign stall_dc1 = stall_dc1_q || (dc1_v && dt_v && dc2h_c);
+assign stall_ag  = stall_ag_q  || (ag_v && dc1_v && dt_v && dc2h_c);
 // synthesis translate_off
 // the registered stalls against the chain: equal, but for a DMU "not
 // ready" a clock longer than the block's (dc2r_n conservative), which
@@ -3199,7 +3210,7 @@ logic ilk_nq, dc2r_nq;
 always_ff @(posedge clk) begin
 	logic cons;
 	ilk_nq  <= ilk_n;
-	dc2r_nq <= dm_dc2r_n;
+	dc2r_nq <= dm_dc2r_n1;   // (what the registers used: ready assumed for the access entering)
 	cons = dc2_v && dc2_mx && dm_dc2_rdy_b && !dc2r_nq;
 	if (nreset && ilk_nq !== ilk_q) begin
 		$display("FAIL: AG's interlock next value %b, the register %b", ilk_nq, ilk_q);
