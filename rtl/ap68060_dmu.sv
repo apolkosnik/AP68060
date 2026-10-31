@@ -3120,6 +3120,101 @@ always_ff @(posedge clk) begin
 	end
 end
 
+//--------------------------------------------------------------------------
+// The four holds' next values from registers and wires alone, for the back
+// end's registered stalls (which read them a clock ahead of the holds).
+// hold1_n, st_ok_n and hold_dt_n are the block's expressions above, formed
+// again here; dc2r_n may say "not ready" where the block says "ready": a
+// record's hit cleared this clock makes a simple store slow again, and that
+// clear is taken as possible whenever an invalidation can happen this clock
+// (a snoop's, or the engine in a state that invalidates).  Checked below:
+// the exact three equal, dc2r_n implies the block's.
+//--------------------------------------------------------------------------
+logic hold1_n, dc2r_n, st_ok_n, hold_dt_n;
+always_comb begin
+	logic frz_n, nofrz, m1v_n, mtv_n, busy_n, stl_set, r_new, r_stay, ok_new, ok_stay;
+	logic m1s_n, mts_n, m2ss_a, m2ss_s, c2_may;
+	logic [2:0] sbn_n;
+	logic hz1, hzt, dk1, dkt, h1, ht;
+	// DC1's and DT's stale flags as they will be (m1s_n, mts_n above)
+	if (adv_ag) m1s_n = (dw && dw_src != 2'd0 && dw_set == dm_va[10:4]) || !e_quiet || tk_relook;
+	else if ((dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet || tk_relook) m1s_n = 1'b1;
+	else if (!steal && !sn_rset) m1s_n = 1'b0;
+	else m1s_n = m1_stale;
+	if (adv_dc1) mts_n = (dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet;
+	else if ((dw && dw_src != 2'd0 && dw_set == mt.a[10:4]) || !e_quiet) mts_n = 1'b1;
+	else if (tk_rdok) mts_n = 1'b0;
+	else mts_n = mt_stale;
+	// DC1
+	frz_n = sn_frz || sn_req || sf_req;
+	nofrz = !frz_n;
+	m1v_n   = !kill_now && (adv_ag ? dm_req : (!adv_dc1 && m1.v));
+	mtv_n   = !kill_now && (adv_dc1 ? m1.v : (!adv_dt && mt.v));
+	stl_set = !sn_frz && (e_st == E_S_START || e_st == E_S_XL || e_st == E_S_RD ||
+	                      e_st == E_M_START || e_st == E_M_SCAN || e_st == E_FILL ||
+	                      e_st == E_PUSHV || e_st == E_TW_DESC);
+	if (sn_frz)
+		busy_n = e_busy;
+	else
+		busy_n = (e_busy && e_st != E_S_DONE && e_st != E_I_DONE) ||
+		         (e_st == E_IDLE && !wfs_p1 &&
+		          ((mt_v && !mt_done) ||
+		           (!wb_slow && (dc2_slow || (e_job && m2.r.v && !e_dc2_done) ||
+		                         (iw_req && !iw_done && iw_ok && sb_empty))))) ||
+		         (e_st == E_W_PART && (wd_push || wd_wtp || (!wd_cb && !wd_sb)));
+	hold1_n = nreset ? (frz_n || steal || stl_set || (m1v_n && m1s_n) || (mtv_n && mts_n) || busy_n) : hold1_q;
+	// DC2 (m2ss_a: the simple-store decision of the access entering;
+	// m2ss_s: DC2's own, dropped when a clear of its hit is possible)
+	m2ss_a = st_simp(mt, x_tk, tk_split);
+	c2_may = m2.x.hit && ((sn_ph == SN_H && sn_inv && sn_src == 2'd0) || sn_ph == SN_F ||
+	                      e_st == E_S_ACT || e_st == E_M_CLR || e_st == E_M_SCAN2 || e_st == E_PUSHV_W);
+	m2ss_s = m2_ss && !c2_may;
+	r_new  = !mt.v || (!e_job && e_st != E_S_START && (tk_fast || m2ss_a));
+	r_stay = !m2.r.v || e_dc2_done || (e_st == E_S_DONE && !sn_frz && !e_kill) ||
+	         (!e_job && !(e_st == E_S_START && !sn_frz) && (m2.fast || m2ss_s));
+	dc2r_n = nreset ? (adv_dt ? r_new : (adv_dc2 || r_stay)) : dc2r_q;
+	// WB
+	sbn_n   = sb_n - 3'(sb_pop) + 3'(sb_push || wb_fsb);
+	ok_new  = (!m3.split && m3.x.ok && !m3.x.flt && m3.x.hit && m3.x.cm == 2'b01 &&
+	           !m3.r.lock && (m3.r.msz != SZ_Q) && dc_en && nofrz &&
+	           ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) || e_st == E_S_DONE)) ||
+	          (fsb_of(m3) && (sbn_n < 3'(SBN)) &&
+	           ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) ||
+	            (e_st == E_S_DONE && !sn_frz)));
+	ok_stay = (st_rdy_r && !st_fault_r) || (!sn_frz && (wb_fast || (wfs_p1 && m4.x1.hit))) || wb_fsb ||
+	          (!sn_frz && e_st == E_W_DONE && !(bo_err && m4.r.ack != 2'd3) &&
+	           !(m4.split && !e_part)) ||
+	          (nofrz && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
+	st_ok_n = nreset ? (adv_ex ? ok_new : ok_stay) : st_ok_q;
+	// DT
+	hz1 = (dw && dw_set == m1.a[10:4]) || !e_quiet || sn_frz || st_at(mt, tk_split, m1.a[11:4]) ||
+	      st_at(m2.r, m2.split, m1.a[11:4]) || st_at(m3.r, m3.split, m1.a[11:4]) ||
+	      st_at(m4.r, m4.split, m1.a[11:4]);
+	hzt = (dw && dw_set == mt.a[10:4]) || !e_quiet || sn_frz ||
+	      st_at(m2.r, m2.split, mt.a[11:4]) || st_at(m3.r, m3.split, mt.a[11:4]) ||
+	      st_at(m4.r, m4.split, mt.a[11:4]);
+	dk1 = !sn_rset && !steal && !hz1;
+	dkt = !sn_rset && !steal && !hzt;
+	h1  = m1.v && (((m1.mem == M_LD || m1.mem == M_RMW) && !dk1) ||
+	               (dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet);
+	ht  = mt.v && (((mt.mem == M_LD || mt.mem == M_RMW) && !dkt) ||
+	               (dw && dw_src != 2'd0 && dw_set == mt.a[10:4]) || !e_quiet ||
+	               (mt_stale && !tk_rdok));
+	hold_dt_n = nreset && (adv_dc1 ? h1 : (!adv_dt && ht));
+end
+// synthesis translate_off
+logic hold1_nq, dc2r_nq, st_ok_nq, hold_dt_nq;
+always_ff @(posedge clk) begin
+	hold1_nq <= hold1_n; dc2r_nq <= dc2r_n; st_ok_nq <= st_ok_n; hold_dt_nq <= hold_dt_n;
+	if (nreset && (hold1_nq !== hold1_q || st_ok_nq !== st_ok_q || hold_dt_nq !== hold_dt ||
+	               (dc2r_nq && !dc2r_q))) begin
+		$display("FAIL: DMU: the holds' next values %b%b%b%b (hold1 dc2r st_ok hold_dt) against the holds %b%b%b%b",
+		         hold1_nq, dc2r_nq, st_ok_nq, hold_dt_nq, hold1_q, dc2r_q, st_ok_q, hold_dt);
+		$finish;
+	end
+end
+// synthesis translate_on
+
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset) begin
