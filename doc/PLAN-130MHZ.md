@@ -427,3 +427,24 @@ ones took their place within 0.1-0.3 ns: ex_u.cond -> fpif.f_dfl
 (-1.45 at 8.333), ex_v -> fpif.pend_vec, DMU dc2r_b2 -> stall_ag (the
 ready correction, -1.28), m2.r.a -> e_x.way, sk_v -> a1_fx x31,
 ag_u.upd2_reg -> rff MLAB / agx_q, dec.room_q -> fetch.qp0_toh.
+
+## Area (2026-10-31): under 20,000 ALMs at ~100 MHz
+
+User decision: this branch under 20,000 ALMs (target 19,000) at ~100 MHz,
+keeping the timing work.  Fits at PERIOD=10 (syn/f100_*):
+f100_a 1865a0f baseline 25,632 ALMs, 99.39 MHz (-0.061);
+f100_b 648609b decoder record ring 25,582 (+0.244);
+f100_c 40b7bd5 DC2 bytes after the way 25,500 (-0.112, ex_v -> stall_ag);
+f100_d 82ef579 fpif outputs formed once 25,167 (+0.209);
+f100_e 1bbfba1 fetch words 8-15 in a ring 24,844, 105.1 MHz (+0.488);
+f100_s0 53376eb + SKID=0 24,539 (-0.229: safe_q -> fpif act -> fph_n);
+f100_f 2c268e0 SKID=0, fpif holds by act 24,620, 101.8 MHz (+0.175).
+Lessons: an ALM holds 4 flip-flops, so area is LUT logic -- cutting
+registers alone saves little; an MLAB costs 10 ALMs at any depth (worth
+it only >= ~8 deep); the kept candidate copies made for the old
+combinational stall chain are now pure cost where their select is a
+registered stall.  Profiling: yosys synth_intel_alm on sv2v output
+(/home/adam/ap68060-work/ysprof: ysprep.sh, modsyn.sh, cones.py --
+LUTs charged to the registers whose cones hold them); standalone module
+runs overcount logic Quartus removes across the hierarchy (BIU, dead
+outputs such as the DMU's sn_line).
