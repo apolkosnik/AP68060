@@ -135,7 +135,7 @@ module ap68060_dmu
 
 	// control registers
 	input  logic [31:0] cacr,
-	input  logic [31:0] tc,
+	input  logic [31:0] tc_n,           // TC as it will be next clock: this module keeps its own copy (tc)
 	input  logic [31:0] urp,
 	input  logic [31:0] srp,
 	input  logic [31:0] dtt0,
@@ -227,6 +227,11 @@ module ap68060_dmu
 	output logic        pq1_v,
 	output logic [27:0] pq1_l
 );
+// TC's copy here, written as the back end's register is (from its next
+// value), preserved: the translations' and the compares' far register
+// becomes a near one
+(* preserve *) logic [31:0] tc;
+always_ff @(posedge clk) tc <= tc_n;
 
 localparam logic [2:0] MT_CINV = 3'd1, MT_CPUSH = 3'd2, MT_PFLUSH = 3'd3, MT_PLPA = 3'd4;
 

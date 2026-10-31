@@ -161,6 +161,7 @@ module ap68060_backend
 	output logic [31:0] itt0,
 	output logic [31:0] itt1,
 	output logic [31:0] tc,
+	output logic [31:0] tc_n,           // ... as it will be next clock (the DMU keeps its own copy)
 	output logic [31:0] urp,
 	output logic [31:0] srp,
 
@@ -1512,19 +1513,27 @@ always_ff @(posedge clk)
 // (registered as the uop enters EX: the odd-address check and the
 // exception address select start from a flip-flop, not the op decode)
 logic       ex_bdb;
+logic       ex_xnew;            // RESET or a maintenance op: WB waits a clock at least (wbh's x_new)
 always_ff @(posedge clk)
-	if (adv_dc2) ex_bdb <= (dc2_u.op == OP_BCC) || (dc2_u.op == OP_DBCC);
+	if (adv_dc2) begin
+		ex_bdb  <= (dc2_u.op == OP_BCC) || (dc2_u.op == OP_DBCC);
+		ex_xnew <= (dc2_u.op == OP_MISC) && (dc2_u.cond == 4'd1 || (dc2_u.cond >= 4'd3 && dc2_u.cond <= 4'd5));
+	end
 // synthesis translate_off
-always_ff @(posedge clk)
+always_ff @(posedge clk) begin
 	if (ex_v && ex_is_fp && ((ex_kx[2] && (fp_xvec != 8'd0)) !== ex_xnz)) begin
 		$display("FAIL: an FPU uop's exception term %b differs from ex_xnz %b (pc %h)", ex_kx[2] && (fp_xvec != 8'd0), ex_xnz, ex_u.pc);
 		$finish;
 	end
-always_ff @(posedge clk)
+	if (ex_v && ex_xnew !== ((ex_u.op == OP_MISC) && (ex_u.cond == 4'd1 || (ex_u.cond >= 4'd3 && ex_u.cond <= 4'd5)))) begin
+		$display("FAIL: EX's maintenance flag %b differs from its op's (pc %h)", ex_xnew, ex_u.pc);
+		$finish;
+	end
 	if (ex_v && ex_bdb !== ((ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC))) begin
 		$display("FAIL: EX's branch flag %b, its op's %b (pc %h)", ex_bdb, (ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC), ex_u.pc);
 		$finish;
 	end
+end
 // synthesis translate_on
 wire        ex_ubr  = (ex_u.br == BR_IMM) || (ex_u.br == BR_EA) ||
                       (ex_u.br == BR_A) || (ex_u.br == BR_B) || (ex_u.op == OP_RTE);
@@ -1783,6 +1792,8 @@ logic        wb_cof;          // the uop's control transfer was taken
 
 wire wb_is_exc   = wb_v && !wb_ok;
 wire wb_commit   = adv_wb && !wb_is_exc;
+// (TC as it will be: a MOVEC committing to it, else held; reset clears it)
+assign tc_n = !nreset ? 32'd0 : (wb_commit && wb_crs[CR_TC]) ? (wb_res & 32'h0000_FFFE) : tc_r;
 wire wb_bound    = wb_commit && wb_u.last;
 wire [31:0] wb_next = wb_redir_pc;
 
@@ -1970,8 +1981,7 @@ always_comb begin
 	hlt_n  = halted || dbl_fault || (wb_commit && wb_u.op == OP_MISC && wb_u.cond == 4'd10);
 	// entering: RESET, maintenance and an SR write each wait at least a clock
 	ok_new = ex_xok && !ex_fault && !ex_xnz && !ex_odd;
-	x_new  = ((ex_u.op == OP_MISC) && (ex_u.cond == 4'd1 || (ex_u.cond >= 4'd3 && ex_u.cond <= 4'd5))) ||
-	         ex_sr_we;
+	x_new  = ex_xnew || ex_sr_we;   // (the op's decode registered as the uop enters EX)
 	h_new  = hlt_n || (ok_new && x_new) ||
 	         (sb_ne_n && (!ok_new || ex_u.ser || (ex_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
 	// (the same with EX's exception decision ok_new taken as 0 and 1: the

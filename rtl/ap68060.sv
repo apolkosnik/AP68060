@@ -266,6 +266,7 @@ logic        dm_hold1, dm_hold1_c, dm_dc2_rdy_c, dm_st_ok, mt_v, mt_ng, mt_wr, m
 logic  [2:0] mt_op, mt_fc;
 logic  [1:0] mt_scope, mt_caches;
 logic [31:0] mt_addr, mt_pa, mt_fslw, urp, srp, dm_st_faddr;
+logic [31:0] tc_n;
 logic        mt_fault, dm_lkend, dm_iack_end;
 logic  [2:0] iack_lvl;
 logic  [1:0] dm_ack;
@@ -333,7 +334,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.urp(urp), .srp(srp),
 	.ipl(ipl_v), .iack_lvl(iack_lvl), .rsto_req(rsto_req), .rsto_busy(rsto_busy),
 	.kill_now(kill_now), .lk_abandon(lk_abandon), .adv_ag(adv_ag), .dm_adv(dm_adv), .dm_kill(dm_kill),
-	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1), .tc(tc),
+	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1), .tc(tc), .tc_n(tc_n),
 	.dbg_pc(dbg_pc), .dbg_retire(dbg_retire), .halted(dbg_halted), .be_idle(be_idle),
 	.fetch_stop(be_fstop)
 );
@@ -358,7 +359,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope), .mt_caches(mt_caches),
 	.mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng), .mt_wr(mt_wr),
 	.mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
-	.cacr(cacr), .tc(tc), .urp(urp), .srp(srp),
+	.cacr(cacr), .tc_n(tc_n), .urp(urp), .srp(srp),
 	.dtt0(dtt0), .dtt1(dtt1), .itt0(itt0), .itt1(itt1),
 	.cdis(cdis), .mdis(mdis), .tw_busy(tw_busy),
 	// (an instruction-side table search waits for every older instruction:
