@@ -3090,19 +3090,23 @@ always_comb begin
 	agvn  = !(flush || kill_now || !nreset) && (stall_ag ? ag_v : (ain_v && !stopped && !halted));
 	ilk_n = agvn && ((nb | nx | nu | nu2) != 5'd0);
 end
-always_comb begin
+// (the same with the kill taken as 0, as a function of the incoming uop:
+// formed for the skid's uop and the sequencer's apart, kept, the skid's
+// valid picking last -- the uop's register numbers against the stages'
+// are five levels on their own)
+function automatic logic ilk_of(input uop_t u);
 	logic agn, cbn, cxn, cbo, cxo, agvn;
 	logic [4:0] nb, nx, nu, nu2;
 	agn = !flush && !stall_ag && (sk_va || !in_eb) && !stopped;
-	cbn = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.base;
-	cxn = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.idx;
+	cbn = adv_dc2 && dc2_capd && dc2_u.d_reg == u.base;
+	cxn = adv_dc2 && dc2_capd && dc2_u.d_reg == u.idx;
 	cbo = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.base;
 	cxo = adv_dc2 && dc2_capd && dc2_u.d_reg == ag_u.idx;
 	if (agn) begin
-		nb  = ain_u.base_v ? wf_next(wm(ain_u.base), wmatch(ag_v, ag_u, ain_u.base), cbn) : 4'd0;
-		nx  = ain_u.idx_v  ? wf_next(wm(ain_u.idx),  wmatch(ag_v, ag_u, ain_u.idx),  cxn) : 4'd0;
-		nu  = ain_u.upd_v  ? wf_next(wm(ain_u.upd_reg),  wmatch(ag_v, ag_u, ain_u.upd_reg),  1'b0) : 4'd0;
-		nu2 = ain_u.upd2_v ? wf_next(wm(ain_u.upd2_reg), wmatch(ag_v, ag_u, ain_u.upd2_reg), 1'b0) : 4'd0;
+		nb  = u.base_v ? wf_next(wm(u.base), wmatch(ag_v, ag_u, u.base), cbn) : 4'd0;
+		nx  = u.idx_v  ? wf_next(wm(u.idx),  wmatch(ag_v, ag_u, u.idx),  cxn) : 4'd0;
+		nu  = u.upd_v  ? wf_next(wm(u.upd_reg),  wmatch(ag_v, ag_u, u.upd_reg),  1'b0) : 4'd0;
+		nu2 = u.upd2_v ? wf_next(wm(u.upd2_reg), wmatch(ag_v, ag_u, u.upd2_reg), 1'b0) : 4'd0;
 	end
 	else begin
 		nb  = wf_next(wf_b[3:0],  1'b0, cbo);
@@ -3114,8 +3118,11 @@ always_comb begin
 		nb = 5'd0; nx = 5'd0; nu = 5'd0; nu2 = 5'd0;
 	end
 	agvn   = !(flush || !nreset) && (stall_ag ? ag_v : (ain_v && !stopped && !halted));
-	ilk_nk = agvn && ((nb | nx | nu | nu2) != 5'd0);
-end
+	ilk_of = agvn && ((nb | nx | nu | nu2) != 5'd0);
+endfunction
+(* keep *) wire ilk_sk = ilk_of(sk_u);
+(* keep *) wire ilk_in = ilk_of(in_u);
+always_comb ilk_nk = sk_v ? ilk_sk : ilk_in;
 // (the next values without the kill -- kill_now is late and zeroes every
 // valid, so it is the last AND -- and with DT's late decision rdy_dt
 // (the DMU's dc2r_n1/n0) picked last; both picks one LUT before the flop)
@@ -3161,7 +3168,8 @@ endfunction
 // (AG's interlock next, formed from the incoming uop's register numbers
 // against the stages' -- five levels on its own -- is the last OR of
 // stall_ag, beside the picks)
-(* keep *) wire sag_ilk = ag_v_n && ilk_nk;
+(* keep *) wire sag_sk = ag_v_n && ilk_sk;
+(* keep *) wire sag_in = ag_v_n && ilk_in;
 (* keep *) wire [5:0] st_c00 = stalls6(1'b0, 1'b0);
 (* keep *) wire [5:0] st_c01 = stalls6(1'b0, 1'b1);
 (* keep *) wire [5:0] st_c10 = stalls6(1'b1, 1'b0);
@@ -3170,7 +3178,7 @@ always_ff @(posedge clk) begin
 	logic [5:0] st;
 	st = ex_okn ? (dm_rdy_dt ? st_c11 : st_c10) : (dm_rdy_dt ? st_c01 : st_c00);
 	{stall_wb, stall_ex, stall_dc2, stall_dt, stall_dc1} <= {5{!kill_now}} & st[5:1];
-	stall_ag <= !kill_now && (st[0] || sag_ilk);
+	stall_ag <= !kill_now && (st[0] || (sk_v ? sag_sk : sag_in));
 end
 // synthesis translate_off
 // the registered stalls against the chain: equal, but for a DMU "not
