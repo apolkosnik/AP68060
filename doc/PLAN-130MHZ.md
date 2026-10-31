@@ -438,7 +438,10 @@ f100_c 40b7bd5 DC2 bytes after the way 25,500 (-0.112, ex_v -> stall_ag);
 f100_d 82ef579 fpif outputs formed once 25,167 (+0.209);
 f100_e 1bbfba1 fetch words 8-15 in a ring 24,844, 105.1 MHz (+0.488);
 f100_s0 53376eb + SKID=0 24,539 (-0.229: safe_q -> fpif act -> fph_n);
-f100_f 2c268e0 SKID=0, fpif holds by act 24,620, 101.8 MHz (+0.175).
+f100_f 2c268e0 SKID=0, fpif holds by act 24,620, 101.8 MHz (+0.175);
+f100_g 79ca4e3 (+ engine xlate shared, predecoder PLA as ROMs) 23,989,
+102.3 MHz (+0.220), RAM blocks 121 -> 204 of 553 (user: block RAM
+available; the predecoder 820 -> 176 ALMs).
 Lessons: an ALM holds 4 flip-flops, so area is LUT logic -- cutting
 registers alone saves little; an MLAB costs 10 ALMs at any depth (worth
 it only >= ~8 deep); the kept candidate copies made for the old
