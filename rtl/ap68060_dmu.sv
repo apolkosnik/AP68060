@@ -3032,14 +3032,20 @@ always_ff @(posedge clk) begin
 				lse[vq_set] <= wn;
 				lsw[vq_set] <= wn;
 			end
-			for (int j = 0; j < 4; j++)
-				if (vp_wm[j]) begin
-					// synthesis translate_off
-					if (vp_lwe) lv[vp_set][j] <= vp_lv;
-					// synthesis translate_on
-					if (vp_lwe && vp_set == sc_set) sc_lv[j] <= vp_lv;
-					if (vp_dwe && vp_set == sc_set) sc_ld[j] <= vp_dv;
-				end
+			for (int j = 0; j < 4; j++) begin
+				// synthesis translate_off
+				if (vp_wm[j] && vp_lwe) lv[vp_set][j] <= vp_lv;
+				// synthesis translate_on
+				// (the scan's copy from each source apart -- at most one
+				// writes in a clock -- its set compared from registers, not
+				// after the port's select of the source)
+				if (vs_wm[j] && vs_lwe && vs_set == sc_set) sc_lv[j] <= vs_lv;
+				if (ve_wm[j] && ve_lwe && ve_set == sc_set) sc_lv[j] <= ve_lv;
+				if (vf_wm[j] && vf_lwe && vf_set == sc_set) sc_lv[j] <= vf_lv;
+				if (vs_wm[j] && vs_dwe && vs_set == sc_set) sc_ld[j] <= vs_dv;
+				if (ve_wm[j] && ve_dwe && ve_set == sc_set) sc_ld[j] <= ve_dv;
+				if (vf_wm[j] && vf_dwe && vf_set == sc_set) sc_ld[j] <= vf_dv;
+			end
 			// (the snooper's copy follows a clock later)
 			dv_we  <= vp_lwe;
 			dv_set <= vp_set;
