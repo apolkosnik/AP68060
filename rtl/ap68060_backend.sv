@@ -260,6 +260,7 @@ logic [4:0] ccr_nx;           // the condition codes next, but for the exception
 logic wbh_n, exh_n, safe_n, ilk_n;
 logic exh_nk, safe_nk, ilk_nk;
 logic wbh_n0, wbh_n1, ex_okn;        // WB's hold next with EX's exception decision (ex_okn) taken as 0 / 1
+logic wbh_n00, wbh_n01, wbh_n10, wbh_n11, ex_irqn;   // ... by EX's decision and the interrupt pending next (ex_irqn): [ok][irq]
 logic  [2:0] ex_kx;           // EX's uop is FPU, DIV, TRAPcc (registered as it enters)
 wire wb_fpchk = wb_v && !wb_u.last && wb_ok &&
                 (wb_u.mem == M_NONE || wb_u.mem == M_LD) &&
@@ -1957,7 +1958,7 @@ assign wb_hold = wb_v && (halted || (!wb_is_exc &&
 // known early -- the interrupt level, the store buffer draining, RSTO --
 // taken at its worst (a clock longer at most)
 always_comb begin
-	logic       irq_n, tr_n, hlt_n, ok_new, x_new, h_new, ok_stay, x_stay, h_stay, h_new0, h_new1;
+	logic       irq_n, tr_n, hlt_n, ok_new, x_new, h_new, ok_stay, x_stay, h_stay, h_new0, h_new1, h_new1i0, h_new1i1, h_stayi0, h_stayi1;
 	// an interrupt pending next cycle
 	irq_n  = irq_pend_n;
 	tr_n   = sr_r[15] || (wb_v && wb_sr_we && wb_sr_new[15]);
@@ -1970,9 +1971,14 @@ always_comb begin
 	         (sb_ne_n && (!ok_new || ex_u.ser || (ex_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
 	// (the same with EX's exception decision ok_new taken as 0 and 1: the
 	// stall registers pick by it last)
-	h_new0 = hlt_n || (sb_ne_n && (1'b1 || ex_u.ser || (ex_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
+	h_new0 = hlt_n || sb_ne_n;
 	h_new1 = hlt_n || x_new || (sb_ne_n && (ex_u.ser || (ex_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
-	ex_okn = ok_new;
+	// (and with the interrupt pending next clock, irq_n -- five levels of
+	// its own -- taken as 0 and 1: the stall registers pick by it too)
+	h_new1i0 = hlt_n || x_new || (sb_ne_n && (ex_u.ser || (ex_u.last && (tr_n || (xstk && xr_dbl)))));
+	h_new1i1 = hlt_n || x_new || (sb_ne_n && (ex_u.ser || ex_u.last));
+	ex_okn  = ok_new;
+	ex_irqn = irq_n;
 	// staying: a store's or a PLPA's fault becomes its exception; RESET
 	// until RSTO is done, maintenance until the DMU is (an SR write's clock
 	// has passed)
@@ -1981,9 +1987,17 @@ always_comb begin
 	x_stay  = (wb_reset && (!rst_issued || rsto_busy)) || (wb_mt && !(mt_seen || mt_done));
 	h_stay  = hlt_n || (ok_stay && x_stay) ||
 	          (sb_ne_n && (!ok_stay || wb_u.ser || (wb_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
+	h_stayi0 = hlt_n || (ok_stay && x_stay) ||
+	           (sb_ne_n && (!ok_stay || wb_u.ser || (wb_u.last && (tr_n || (xstk && xr_dbl)))));
+	h_stayi1 = hlt_n || (ok_stay && x_stay) ||
+	           (sb_ne_n && (!ok_stay || wb_u.ser || wb_u.last));
 	wbh_n = nreset && (adv_ex ? h_new : h_stay);
 	wbh_n0 = nreset && (adv_ex ? h_new0 : h_stay);
 	wbh_n1 = nreset && (adv_ex ? h_new1 : h_stay);
+	wbh_n00 = nreset && (adv_ex ? h_new0   : h_stayi0);
+	wbh_n01 = nreset && (adv_ex ? h_new0   : h_stayi1);
+	wbh_n10 = nreset && (adv_ex ? h_new1i0 : h_stayi0);
+	wbh_n11 = nreset && (adv_ex ? h_new1i1 : h_stayi1);
 end
 always_ff @(posedge clk) wbh_q <= wbh_n;
 // irq_pend's registers as they will be (the main block's ipl_q, nmi_edge,
@@ -3188,9 +3202,9 @@ wire exho_n1  = exh_nk || (ex_v_n && ex_fpw_n);
 // nets below, one LUT from flip-flops)
 // (wbs: the DMU's terms with WB's store valid taken as wbs -- wb_stv is a
 // register here, so it is the first select, not a long wire there and back)
-function automatic logic [5:0] stalls6(input logic ok, input logic fph, input logic wbs);
+function automatic logic [5:0] stalls6(input logic ok, input logic fph, input logic wbs, input logic irq);
 	logic wbh, stv, dc2r, exho, stok, h1k, swb, sex, sdc2, sdt, sdc1, sag;
-	wbh  = ok ? wbh_n1 : wbh_n0;
+	wbh  = ok ? (irq ? wbh_n11 : wbh_n10) : (irq ? wbh_n01 : wbh_n00);
 	stv  = ok ? wb_stv_n1 : wb_stv_n0;
 	dc2r = dm_dc2r_n1;
 	exho = fph ? exho_n1 : exho_n0;
@@ -3214,10 +3228,16 @@ endfunction
 // FPU hold, the later of the two, picks last)
 // (the DMU's wb_st as it is: its record a store, and our store valid)
 wire wbs_sel = wb_v && wb_stv && dm_wbst_r;
-wire [5:0] st_c00 = stalls6(1'b0, 1'b0, wbs_sel);
-wire [5:0] st_c10 = stalls6(1'b1, 1'b0, wbs_sel);
-wire [5:0] st_c01 = stalls6(1'b0, 1'b1, wbs_sel);
-wire [5:0] st_c11 = stalls6(1'b1, 1'b1, wbs_sel);
+// ([ok][fph][irq]; the picks from the earliest select inward: the
+// interrupt pending next, EX's decision, the FPU hold last)
+wire [5:0] st_c000 = stalls6(1'b0, 1'b0, wbs_sel, 1'b0), st_c001 = stalls6(1'b0, 1'b0, wbs_sel, 1'b1);
+wire [5:0] st_c100 = stalls6(1'b1, 1'b0, wbs_sel, 1'b0), st_c101 = stalls6(1'b1, 1'b0, wbs_sel, 1'b1);
+wire [5:0] st_c010 = stalls6(1'b0, 1'b1, wbs_sel, 1'b0), st_c011 = stalls6(1'b0, 1'b1, wbs_sel, 1'b1);
+wire [5:0] st_c110 = stalls6(1'b1, 1'b1, wbs_sel, 1'b0), st_c111 = stalls6(1'b1, 1'b1, wbs_sel, 1'b1);
+wire [5:0] st_c00 = ex_irqn ? st_c001 : st_c000;
+wire [5:0] st_c10 = ex_irqn ? st_c101 : st_c100;
+wire [5:0] st_c01 = ex_irqn ? st_c011 : st_c010;
+wire [5:0] st_c11 = ex_irqn ? st_c111 : st_c110;
 logic stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q, stall_dc1_q, stall_ag_q;
 // (DC1's hold for a lookup made stale by a write landing in its set: AG's
 // address -- its adder's, late -- compared with the write's set, the last
