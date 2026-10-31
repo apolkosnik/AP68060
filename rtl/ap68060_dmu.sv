@@ -1077,6 +1077,16 @@ logic [31:0] tw_pd;               // final page descriptor
 logic        tw_use;              // the data access's search is done: its
 atce_t       tw_e;                // ... entry (or failure) for the access,
                                   // whether or not the ATC took it
+// The engine's translation and lookup from the stolen ports: E_SP_2 (a
+// split access's second part, at the next line) and E_S_XL2 (the current
+// part) never coincide, so one xlate_e serves both, the state picking its
+// inputs (a register: off the tag compares' path)
+wire         ex_sp = (e_st == E_SP_2);
+xres_t       ex_x;
+always_comb
+	ex_x = xlate_e(ex_sp ? {m2.r.a[31:4] + 28'd1, 4'd0} : e_va, m2.r.smode, (m2.r.mem != M_LD), lk_pre,
+	               ex_sp ? lk_hit : (lk_hit || tw_use), (!ex_sp && tw_use) ? tw_e : lk_e,
+	               tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_fix(ex_sp ? st_set : e_va[10:4]));
 
 wire [6:0] tw_ri = tw_va[31:25];
 wire [6:0] tw_pi = tw_va[24:18];
@@ -1851,8 +1861,7 @@ always_ff @(posedge clk) begin
 		end
 		E_SP_2: begin
 			xres_t x;
-			x  = xlate_e({m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode, (m2.r.mem != M_LD),
-			             lk_pre, lk_hit, lk_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_fix(st_set));
+			x  = ex_x;
 			// synthesis translate_off
 			if (x !== xlate_t({m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode, (m2.r.mem != M_LD),
 			                  fc_tt(m2.r.fc) == TT_ALT, lk_tt0, lk_tt1, lk_hit, lk_e,
@@ -1890,8 +1899,7 @@ always_ff @(posedge clk) begin
 			xres_t x;
 			// after a search: its result, not the ATC's (a failed search
 			// leaves no entry, nor does one in the no-allocate mode)
-			x = xlate_e(e_va, m2.r.smode, (m2.r.mem != M_LD), lk_pre, lk_hit || tw_use,
-			            tw_use ? tw_e : lk_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_fix(e_va[10:4]));
+			x = ex_x;
 			// synthesis translate_off
 			if (x !== xlate_t(e_va, m2.r.smode, (m2.r.mem != M_LD), fc_tt(m2.r.fc) == TT_ALT,
 			                  lk_tt0, lk_tt1, lk_hit || tw_use,
