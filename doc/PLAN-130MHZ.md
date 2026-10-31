@@ -410,3 +410,20 @@ than the leading paths it fixed: within the ~300 ns fit-to-fit spread,
 and the AG1 entry capture of DC2's load (m2.x.way / dc2_v -> a1_fb/a1_fx,
 -1.6..-1.9 x ~80) is now a family of its own beside AG2's.  Leading:
 ex_v -> stall_ag/a1 (-2.17), e2_dwe -> ccr_f (-1.87), dc2_v -> rff.sel_q.
+
+Fits f130_h (63faf80) and f130_i (404b20e), from the 120 MHz audit of
+f130_g (re-timed at 8.333: slack -1.53, TNS -231, 841 endpoints; leading
+ex_v -> stall_ag, m2.x.way -> agx_q, e2_dwe -> ccr_f, dc2_v ->
+rff.sel_q, vq_set -> dc2r_b2).  Cycle-neutral changes, each new register
+checked against the compare it replaces: AG1's writer compares (q1_*,
+cqa_*), EX's bypass selects with EX2's write enable (mxd_*), the file's
+select candidates free of the write enables, DT's pending-write set
+compare (vq_mt), CAS's equal pick of the store data in EX2.
+f130_h: 102.18 MHz, -2.10, TNS -2,098, 4,082 ep, 25,363 ALMs (new worst:
+mxd_b -> CAS compare -> e2_stdata, fixed in i).  f130_i: 102.2 MHz,
+-2.09, TNS -1,668, 3,811 ep, 26,138 ALMs; at 8.333: -1.45, TNS -268,
+931 ep -- no better than g.  Every targeted family left the top; new
+ones took their place within 0.1-0.3 ns: ex_u.cond -> fpif.f_dfl
+(-1.45 at 8.333), ex_v -> fpif.pend_vec, DMU dc2r_b2 -> stall_ag (the
+ready correction, -1.28), m2.r.a -> e_x.way, sk_v -> a1_fx x31,
+ag_u.upd2_reg -> rff MLAB / agx_q, dec.room_q -> fetch.qp0_toh.
