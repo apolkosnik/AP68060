@@ -1531,6 +1531,38 @@ always_ff @(posedge clk)
 		$finish;
 	end
 // synthesis translate_on
+// (and DC1's and AG's uops against EX's, the same way: their captures of
+// EX's result select by registered flags)
+logic       mxc_a, mxc_b, mxg_a, mxg_b;
+always_ff @(posedge clk) begin
+	logic exv_n;
+	uop_t exn, c1n, agn;
+	exv_n = !(flush || kill_now || !nreset) && (stall_ex ? ex_v : adv_dc2);
+	exn   = adv_dc2 ? dc2_u : ex_u;
+	c1n   = adv_ag ? ag_u : dc1_u;
+	agn   = ag_ld ? ain_u : ag_u;
+	// (a dynamic FPU uop's A becomes OS_ZERO as it enters DC1: ag_dyncan)
+	mxc_a <= exv_n && !(adv_ag && ag_dyncan) && omatch(c1n.a_src, c1n.a_reg, exn);
+	mxc_b <= exv_n && omatch(c1n.b_src, c1n.b_reg, exn);
+	mxg_a <= exv_n && omatch(agn.a_src, agn.a_reg, exn);
+	mxg_b <= exv_n && omatch(agn.b_src, agn.b_reg, exn);
+end
+// synthesis translate_off
+always_ff @(posedge clk) begin
+	if (dc1_v && ex_v && (mxc_a !== omatch(dc1_u.a_src, dc1_u.a_reg, ex_u) ||
+	                      mxc_b !== omatch(dc1_u.b_src, dc1_u.b_reg, ex_u))) begin
+		$display("FAIL: DC1's operand matches %b%b against EX's uop, the compares %b%b", mxc_a, mxc_b,
+		         omatch(dc1_u.a_src, dc1_u.a_reg, ex_u), omatch(dc1_u.b_src, dc1_u.b_reg, ex_u));
+		$finish;
+	end
+	if (ag_v && ex_v && (mxg_a !== omatch(ag_u.a_src, ag_u.a_reg, ex_u) ||
+	                     mxg_b !== omatch(ag_u.b_src, ag_u.b_reg, ex_u))) begin
+		$display("FAIL: AG's operand matches %b%b against EX's uop, the compares %b%b", mxg_a, mxg_b,
+		         omatch(ag_u.a_src, ag_u.a_reg, ex_u), omatch(ag_u.b_src, ag_u.b_reg, ex_u));
+		$finish;
+	end
+end
+// synthesis translate_on
 wire [31:0] dc2_af  = (exw_fw && mx_a) ? exw_val : dc2_a;
 wire [31:0] dc2_bf  = (exw_fw && mx_b) ? exw_val : dc2_b;
 always_ff @(posedge clk) begin
@@ -2196,13 +2228,13 @@ always_ff @(posedge clk) begin
 		end
 		if (!stall_dc1) dc1_v <= adv_ag;
 		else begin
-			if (exw_f1 && dc1_u.a_src == OS_REG && dc1_u.a_reg == exw_reg) dc1_a <= exw_val;
-			if (exw_f1 && dc1_u.b_src == OS_REG && dc1_u.b_reg == exw_reg) dc1_b <= exw_val;
+			if (exw_f1 && mxc_a) dc1_a <= exw_val;
+			if (exw_f1 && mxc_b) dc1_b <= exw_val;
 		end
 		// snoop into the uop entering DC1
 		if (adv_ag && exw_f1) begin
-			if (ag_u.a_src == OS_REG && ag_u.a_reg == exw_reg) dc1_a <= exw_val;
-			if (ag_u.b_src == OS_REG && ag_u.b_reg == exw_reg) dc1_b <= exw_val;
+			if (mxg_a) dc1_a <= exw_val;
+			if (mxg_b) dc1_b <= exw_val;
 		end
 
 		//------------------------------------------------------------------
@@ -2210,8 +2242,8 @@ always_ff @(posedge clk) begin
 		//------------------------------------------------------------------
 		if (adv_dc1) begin
 			dt_u    <= dc1_u;
-			dt_a    <= (exw_f2 && dc1_u.a_src == OS_REG && dc1_u.a_reg == exw_reg) ? exw_val : dc1_a;
-			dt_b    <= (exw_f2 && dc1_u.b_src == OS_REG && dc1_u.b_reg == exw_reg) ? exw_val : dc1_b;
+			dt_a    <= (exw_f2 && mxc_a) ? exw_val : dc1_a;
+			dt_b    <= (exw_f2 && mxc_b) ? exw_val : dc1_b;
 			dt_ea   <= dc1_ea;
 			dt_upd  <= dc1_upd;
 			dt_upd2 <= dc1_upd2;
