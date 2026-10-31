@@ -194,3 +194,41 @@ picks, the result into WB's registers and the stall registers), then the
 3.2 AG split (the useq -> file -> capture family), the fetch queue's
 consume loop (3.6, the single largest destination), the tag RAM bypass
 compare into the snoop phase and the engine (3.4).
+
+## 6. Log
+
+### 3.1 EX split (EX2), 2026-10-31
+
+Done as planned: EX keeps the units, the result broadcast (exw_*) and the
+early Bcc/DBcc redirect; EX2 (e2_*) holds the registered outcome -- the
+result, the flags after the uop (e2_ccr), the exception terms (xok,
+fault, xnz, odd, the vectors and addresses, the FPU's frame fields), the
+targets and redirect terms -- and WB's registers are formed from EX2's
+at adv_e2.  WB itself is unchanged; its hold-ahead (wbh_n) reads EX2's
+ok as a register, so the stall registers' "ok" pick is a flip-flop now.
+The DMU mirrors it with a record m3b between m3 (EX) and m4 (WB): the
+older-store tests (st_older, ex_st, st_at, st_line, store_holds), the
+per-source hit clears and the WB store's ok-ahead read it.  The FPU
+interface's safe counts EX2 as an older uop (e2_fpchk, exact from
+registers: the one conservative case is gone).
+
+What the extra stage exposed, all fixed in the DMU/back end:
+- the EX2 record was not cleared by a kill (a stale "older store"
+  deadlocked the next load);
+- younger accesses started bus cycles behind a uop that will flush them:
+  a load after RESET on the bus while RSTO was asserted, a read after
+  LPSTOP's broadcast, a read without LOCK ahead of the MOVEC that sets
+  BUSCR.L (the MOVEC's serializing flush came one clock later).  New
+  dm_quiet: a serializing or excepting uop at EX, EX2 or WB holds DC2's
+  slow path (those younger accesses are flushed anyway: no cycle cost).
+- t_cbsplit 29 required the DMU's split-store fallback (a snoop between
+  the halves) to occur at least once at half-rate BCLK; whether the
+  alternate master's periodic write lands between the halves follows from
+  the pipeline's depth, and with one more stage it never does.  The test
+  now walks the store's phase with extra reads and reports the count
+  without requiring it; the exact checks stay.
+
+Regression 392/392 (t_cbsplit as above), corpus smoke 5/5.
+Cycle cost: Dhrystone 1,086 cycles/iteration (was 1,071: +1.4 %),
+Whetstone 784,934 cycles/loop (was 754,922: +4.0 %, the FPU uops wait
+one more stage for "no older uop in flight").

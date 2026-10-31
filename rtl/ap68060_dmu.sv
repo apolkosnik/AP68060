@@ -3,7 +3,8 @@
 //                                                                          //
 // ap68060_dmu.sv - data memory unit: D-ATC, data cache, table walker       //
 //                                                                          //
-// Mirrors the back end's DC1, DT, DC2, EX and WB stages for memory uops.   //
+// Mirrors the back end's DC1, DT, DC2, EX, EX2 and WB stages for memory    //
+// uops (records m1, mt, m2, m3, m3b, m4).                                  //
 //                                                                          //
 // Data cache (MC68060UM section 5): 8 Kbytes, four ways of 128 sets of    //
 // 16-byte lines, physically tagged (PA31-11; the set is PA10-4 = LA10-4). //
@@ -84,6 +85,8 @@ module ap68060_dmu
 	input  logic        adv_dt,
 	input  logic        adv_dc2,
 	input  logic        adv_ex,
+	input  logic        adv_e2,         // EX2 -> WB (the back end's EX is two stages)
+	input  logic        dm_quiet,       // a RESET at EX2 or WB: DC2's slow path waits
 	input  logic        adv_wb,
 	input  logic        kill_now,
 	output logic        dm_hold1,       // DC1 must hold (the engine owns its ports): a
@@ -287,7 +290,7 @@ typedef struct packed {
 } mrec_t;
 
 req_t  m1;
-mrec_t m2, m3, m4;
+mrec_t m2, m3, m3b, m4;         // (m3b: the back end's EX2)
 
 function automatic logic [2:0] nbytes(input logic [1:0] msz);
 	case (msz)
@@ -878,10 +881,11 @@ function automatic logic st_line(input mrec_t m, input logic [27:0] l);
 	st_line = m.r.v && (m.r.mem == M_ST || m.r.mem == M_RMW) &&
 	          (m.x.pa[11:4] == l[7:0] || (m.split && m.x1.pa[11:4] == l[7:0]));
 endfunction
-wire hz = st_line(m3, m2_line) || st_line(m4, m2_line);
+wire hz = st_line(m3, m2_line) || st_line(m3b, m2_line) || st_line(m4, m2_line);
 // any store older than the DC2 uop not yet performed: a table walk for the
 // DC2 uop must see it (the program may just have written a descriptor)
 wire st_older = (m3.r.v && (m3.r.mem == M_ST || m3.r.mem == M_RMW)) ||
+                (m3b.r.v && (m3b.r.mem == M_ST || m3b.r.mem == M_RMW)) ||
                 (m4.r.v && (m4.r.mem == M_ST || m4.r.mem == M_RMW));
 // a RAM write to the load's set, or any engine activity, after its lookup
 // read the RAM makes the captured line stale: the engine reads it again
@@ -1185,9 +1189,9 @@ wire  [31:0] wfs_acc = lalign(st_data, m4.r.msz);
 // (not while an older store is in EX: it reaches WB, which has the engine
 // first, before DC2's job -- the bus sees a store before a younger load's
 // access, whatever the timing)
-wire ex_st    = m3.r.v && (m3.r.mem != M_LD);
+wire ex_st    = (m3.r.v && (m3.r.mem != M_LD)) || (m3b.r.v && (m3b.r.mem != M_LD));
 wire dc2_slow = m2.r.v && !fast_now && !(st_simple && !e_job) && !e_dc2_done && !e_job &&
-                !ex_st;
+                !ex_st && !dm_quiet;
 logic wb_fsb, wb_slow;            // (below, with the store buffer's room)
 
 // store ready: the fast store answers in its own WB cycle (the engine's
@@ -1429,7 +1433,7 @@ always_ff @(posedge clk) begin
 	steal_q   <= steal;
 
 	if (!nreset) begin
-		m1 <= '0; mt <= '0; m2 <= '0; m3 <= '0; m4 <= '0;
+		m1 <= '0; mt <= '0; m2 <= '0; m3 <= '0; m3b <= '0; m4 <= '0;
 		mt_stale <= 1'b0; tk_rdok <= 1'b0; tk_dok <= 1'b0; hold_dt <= 1'b0; hold_dt_b2 <= 1'b0;
 		// (reset leaves the cache alone -- tags, valid and dirty state, data,
 		// 5.3: its valid and dirty bits have their power-up values from
@@ -1606,10 +1610,10 @@ always_ff @(posedge clk) begin
 		begin
 			logic hz1, hzt, dk1, dkt, h1, ht;
 			hz1 = (dw && dw_set == m1.a[10:4]) || !e_quiet || sn_frz || st_at(mt, tk_split, m1.a[11:4]) ||
-			      st_at(m2.r, m2.split, m1.a[11:4]) || st_at(m3.r, m3.split, m1.a[11:4]) ||
+			      st_at(m2.r, m2.split, m1.a[11:4]) || st_at(m3.r, m3.split, m1.a[11:4]) || st_at(m3b.r, m3b.split, m1.a[11:4]) ||
 			      st_at(m4.r, m4.split, m1.a[11:4]);
 			hzt = (dw && dw_set == mt.a[10:4]) || !e_quiet || sn_frz ||
-			      st_at(m2.r, m2.split, mt.a[11:4]) || st_at(m3.r, m3.split, mt.a[11:4]) ||
+			      st_at(m2.r, m2.split, mt.a[11:4]) || st_at(m3.r, m3.split, mt.a[11:4]) || st_at(m3b.r, m3b.split, mt.a[11:4]) ||
 			      st_at(m4.r, m4.split, mt.a[11:4]);
 			dk1 = !sn_rset && !steal && !hz1;
 			dkt = !sn_rset && !steal && !hzt;
@@ -1643,11 +1647,14 @@ always_ff @(posedge clk) begin
 		end
 		else if (adv_ex) m3.r.v <= 1'b0;
 
-		if (adv_ex) begin
-			m4    <= m3;
-			m4_fq <= !m3.split && m3.x.ok && !m3.x.flt && m3.x.hit && m3.x.cm == 2'b01 &&
-			         !m3.r.lock && (m3.r.msz != SZ_Q);
-			m4_fsb <= fsb_of(m3);
+		if (adv_ex) m3b <= m3;
+		else if (adv_e2) m3b.r.v <= 1'b0;
+
+		if (adv_e2) begin
+			m4    <= m3b;
+			m4_fq <= !m3b.split && m3b.x.ok && !m3b.x.flt && m3b.x.hit && m3b.x.cm == 2'b01 &&
+			         !m3b.r.lock && (m3b.r.msz != SZ_Q);
+			m4_fsb <= fsb_of(m3b);
 		end
 		else if (adv_wb) m4.r.v <= 1'b0;
 
@@ -1794,7 +1801,7 @@ always_ff @(posedge clk) begin
 			end
 			else if (!e_kill && m2.sfast && m2.r.mem == M_LD && e_x.ok && !e_x.flt && !e_x.walk &&
 			    e_x.hit && !e_x.cm[1] &&
-			    !hz && !st_line(m3, e_x.pa[31:4]) && !st_line(m4, e_x.pa[31:4]) &&
+			    !hz && !st_line(m3, e_x.pa[31:4]) && !st_line(m3b, e_x.pa[31:4]) && !st_line(m4, e_x.pa[31:4]) &&
 			    !sp_dw && !(dw && (dw_set == m2.r.a[10:4] || dw_set == st_set))) begin
 				// the first part from DC2's copy, the rest from the stolen read
 				// (registered here, merged in E_SP_4)
@@ -1992,7 +1999,7 @@ always_ff @(posedge clk) begin
 				// older stores to this line must reach the RAM first: give
 				// the engine back to them and retry (the line of the part
 				// being read: a split's second part has its own)
-				if (e_part ? (st_line(m3, e_x.pa[31:4]) || st_line(m4, e_x.pa[31:4])) : hz) begin
+				if (e_part ? (st_line(m3, e_x.pa[31:4]) || st_line(m3b, e_x.pa[31:4]) || st_line(m4, e_x.pa[31:4])) : hz) begin
 					steal <= 1'b0; e_st <= E_IDLE;
 				end
 				else if (e_x.cm == 2'b00 && ldd_a[e_x.way]) begin
@@ -2007,7 +2014,7 @@ always_ff @(posedge clk) begin
 				else e_st <= E_S_RD;
 			end
 			else if (alloc && rd && !e_x.hit &&
-			         (e_part ? (st_line(m3, e_x.pa[31:4]) || st_line(m4, e_x.pa[31:4])) : hz)) begin
+			         (e_part ? (st_line(m3, e_x.pa[31:4]) || st_line(m3b, e_x.pa[31:4]) || st_line(m4, e_x.pa[31:4])) : hz)) begin
 				// an older store to this line has not reached memory yet
 				steal <= 1'b0;
 				e_st  <= E_IDLE;
@@ -2032,7 +2039,7 @@ always_ff @(posedge clk) begin
 					e_x.hit <= 1'b0;
 					e_st   <= E_PUSHV;
 				end
-				else if ((m3.r.v && m3.r.mem != M_LD) || (m4.r.v && m4.r.mem != M_LD)) begin
+				else if ((m3.r.v && m3.r.mem != M_LD) || (m3b.r.v && m3b.r.mem != M_LD) || (m4.r.v && m4.r.mem != M_LD)) begin
 					// older stores go to the bus first (program order): the
 					// engine is theirs until they are done, then retry
 					steal <= 1'b0;
@@ -2482,7 +2489,7 @@ always_ff @(posedge clk) begin
 		// and is pushed after the fill (4.6.2).  Returns to e_sret.
 		//==============================================================
 		E_FILL: begin
-			if (store_holds(f_set, f_way, m3, m4))
+			if (store_holds(f_set, f_way, m3, m4) || store_holds(f_set, f_way, m3b, m4))
 				f_way <= dc_foc ? {1'b0, !f_way[0]} : f_way + 2'd1;   // a store's line
 			else begin
 				steal  <= 1'b1;
@@ -2960,6 +2967,7 @@ always_ff @(posedge clk) begin
 			mt.v   <= 1'b0;
 			m2.r.v <= 1'b0;
 			m3.r.v <= 1'b0;
+			m3b.r.v <= 1'b0;
 			m4.r.v <= 1'b0;
 			e_dc2_done <= 1'b0;
 			if (e_st != E_IDLE) e_kill <= 1'b1;
@@ -3152,12 +3160,14 @@ always_ff @(posedge clk) begin
 			if (e_st == E_S_START && !sn_frz) e_x.hit <= 1'b0;
 		end
 		begin
-			logic vsi, c2, c21, c3, c31, c4, c41, ce;
+			logic vsi, c2, c21, c3, c31, c3b, c3b1, c4, c41, ce;
 			vsi = vs_lwe && !vs_lv;
 			c2  = m2.x.hit  && hitc(m2.x.pa[10:4],  m2.x.way,  vsi, vs_set, vs_wm, ve_inv);
 			c21 = m2.x1.hit && hitc(m2.x1.pa[10:4], m2.x1.way, vsi, vs_set, vs_wm, ve_inv);
 			c3  = m3.x.hit  && hitc(m3.x.pa[10:4],  m3.x.way,  vsi, vs_set, vs_wm, ve_inv);
 			c31 = m3.x1.hit && hitc(m3.x1.pa[10:4], m3.x1.way, vsi, vs_set, vs_wm, ve_inv);
+			c3b  = m3b.x.hit  && hitc(m3b.x.pa[10:4],  m3b.x.way,  vsi, vs_set, vs_wm, ve_inv);
+			c3b1 = m3b.x1.hit && hitc(m3b.x1.pa[10:4], m3b.x1.way, vsi, vs_set, vs_wm, ve_inv);
 			c4  = m4.x.hit  && hitc(m4.x.pa[10:4],  m4.x.way,  vsi, vs_set, vs_wm, ve_inv);
 			c41 = m4.x1.hit && hitc(m4.x1.pa[10:4], m4.x1.way, vsi, vs_set, vs_wm, ve_inv);
 			ce  = e_x.hit   && hitc(e_x.pa[10:4],   e_x.way,   vsi, vs_set, vs_wm, ve_inv);
@@ -3166,6 +3176,8 @@ always_ff @(posedge clk) begin
 			    c21 != (iv_v && m2.x1.hit && m2.x1.pa[10:4] == iv_set && iv_wm[m2.x1.way]) ||
 			    c3  != (iv_v && m3.x.hit  && m3.x.pa[10:4]  == iv_set && iv_wm[m3.x.way]) ||
 			    c31 != (iv_v && m3.x1.hit && m3.x1.pa[10:4] == iv_set && iv_wm[m3.x1.way]) ||
+			    c3b  != (iv_v && m3b.x.hit  && m3b.x.pa[10:4]  == iv_set && iv_wm[m3b.x.way]) ||
+			    c3b1 != (iv_v && m3b.x1.hit && m3b.x1.pa[10:4] == iv_set && iv_wm[m3b.x1.way]) ||
 			    c4  != (iv_v && m4.x.hit  && m4.x.pa[10:4]  == iv_set && iv_wm[m4.x.way]) ||
 			    c41 != (iv_v && m4.x1.hit && m4.x1.pa[10:4] == iv_set && iv_wm[m4.x1.way]) ||
 			    ce  != (iv_v && e_x.hit   && e_x.pa[10:4]   == iv_set && iv_wm[e_x.way])) begin
@@ -3192,11 +3204,19 @@ always_ff @(posedge clk) begin
 				if (c31) m3.x1.hit <= 1'b0;
 			end
 			if (adv_ex) begin
-				if (c3) begin
+				if (c3)  m3b.x.hit  <= 1'b0;
+				if (c31) m3b.x1.hit <= 1'b0;
+			end
+			else begin
+				if (c3b)  m3b.x.hit  <= 1'b0;
+				if (c3b1) m3b.x1.hit <= 1'b0;
+			end
+			if (adv_e2) begin
+				if (c3b) begin
 					m4.x.hit <= 1'b0;
 					m4_fq    <= 1'b0;
 				end
-				if (c31) m4.x1.hit <= 1'b0;
+				if (c3b1) m4.x1.hit <= 1'b0;
 			end
 			else begin
 				if (c4) begin
@@ -3305,18 +3325,18 @@ always_ff @(posedge clk) begin
 			// (into the store buffer: the engine idle, the buffer's count as
 			// it will be below its size)
 			sbn_n   = sb_n - 3'(sb_pop) + 3'(sb_push || wb_fsb);
-			ok_new  = (!m3.split && m3.x.ok && !m3.x.flt && m3.x.hit && m3.x.cm == 2'b01 &&
-			           !m3.r.lock && (m3.r.msz != SZ_Q) && dc_en && nofrz &&
+			ok_new  = (!m3b.split && m3b.x.ok && !m3b.x.flt && m3b.x.hit && m3b.x.cm == 2'b01 &&
+			           !m3b.r.lock && (m3b.r.msz != SZ_Q) && dc_en && nofrz &&
 			           ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) || e_st == E_S_DONE)) ||
-			          (fsb_of(m3) && (sbn_n < 3'(SBN)) &&
+			          (fsb_of(m3b) && (sbn_n < 3'(SBN)) &&
 			           ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) ||
 			            (e_st == E_S_DONE && !sn_frz)));
 			ok_stay = (st_rdy_r && !st_fault_r) || (!sn_frz && (wb_fast || (wfs_p1 && m4.x1.hit))) || wb_fsb ||
 			          (!sn_frz && e_st == E_W_DONE && !(bo_err && m4.r.ack != 2'd3) &&
 			           !(m4.split && !e_part)) ||
 			          (nofrz && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
-			st_ok_q <= adv_ex ? ok_new : ok_stay;
-			st_ok_b2 <= adv_ex ? ok_new : ok_stay;
+			st_ok_q <= adv_e2 ? ok_new : ok_stay;
+			st_ok_b2 <= adv_e2 ? ok_new : ok_stay;
 		end
 	end
 end
@@ -3434,17 +3454,17 @@ always_comb begin
 	dc2r_n0 = nreset ? (adv_dt ? r_new0 : (adv_dc2 || r_stay)) : dc2r_q;
 	// WB
 	sbn_n   = sb_n - 3'(sb_pop) + 3'(sb_push || wb_fsb);
-	ok_new  = (!m3.split && m3.x.ok && !m3.x.flt && m3.x.hit && m3.x.cm == 2'b01 &&
-	           !m3.r.lock && (m3.r.msz != SZ_Q) && dc_en && nofrz &&
+	ok_new  = (!m3b.split && m3b.x.ok && !m3b.x.flt && m3b.x.hit && m3b.x.cm == 2'b01 &&
+	           !m3b.r.lock && (m3b.r.msz != SZ_Q) && dc_en && nofrz &&
 	           ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) || e_st == E_S_DONE)) ||
-	          (fsb_of(m3) && (sbn_n < 3'(SBN)) &&
+	          (fsb_of(m3b) && (sbn_n < 3'(SBN)) &&
 	           ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) ||
 	            (e_st == E_S_DONE && !sn_frz)));
 	ok_stay = (st_rdy_r && !st_fault_r) || (!sn_frz && (wb_fast || (wfs_p1 && m4.x1.hit))) || wb_fsb ||
 	          (!sn_frz && e_st == E_W_DONE && !(bo_err && m4.r.ack != 2'd3) &&
 	           !(m4.split && !e_part)) ||
 	          (nofrz && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
-	st_ok_n = nreset ? (adv_ex ? ok_new : ok_stay) : st_ok_q;
+	st_ok_n = nreset ? (adv_e2 ? ok_new : ok_stay) : st_ok_q;
 	// (ok_stay with wb_st taken as 0 / 1: wb_fast and wb_fsb are its)
 	wbfast1 = m4_fq && dc_en && (e_st == E_IDLE) && !e_wst_done;
 	wbfsb1  = m4_fsb && (e_st == E_IDLE) && !e_wst_done && !wfs_p1 && sb_room;
@@ -3456,14 +3476,14 @@ always_comb begin
 	           (!sn_frz && e_st == E_W_DONE && !(bo_err && m4.r.ack != 2'd3) &&
 	            !(m4.split && !e_part)) ||
 	           (nofrz && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
-	st_ok_n0 = nreset ? (adv_ex ? ok_new : ok_stay0) : st_ok_q;
-	st_ok_n1 = nreset ? (adv_ex ? ok_new : ok_stay1) : st_ok_q;
+	st_ok_n0 = nreset ? (adv_e2 ? ok_new : ok_stay0) : st_ok_q;
+	st_ok_n1 = nreset ? (adv_e2 ? ok_new : ok_stay1) : st_ok_q;
 	// DT
 	hz1 = (dw && dw_set == m1.a[10:4]) || !e_quiet || sn_frz || st_at(mt, tk_split, m1.a[11:4]) ||
-	      st_at(m2.r, m2.split, m1.a[11:4]) || st_at(m3.r, m3.split, m1.a[11:4]) ||
+	      st_at(m2.r, m2.split, m1.a[11:4]) || st_at(m3.r, m3.split, m1.a[11:4]) || st_at(m3b.r, m3b.split, m1.a[11:4]) ||
 	      st_at(m4.r, m4.split, m1.a[11:4]);
 	hzt = (dw && dw_set == mt.a[10:4]) || !e_quiet || sn_frz ||
-	      st_at(m2.r, m2.split, mt.a[11:4]) || st_at(m3.r, m3.split, mt.a[11:4]) ||
+	      st_at(m2.r, m2.split, mt.a[11:4]) || st_at(m3.r, m3.split, mt.a[11:4]) || st_at(m3b.r, m3b.split, mt.a[11:4]) ||
 	      st_at(m4.r, m4.split, mt.a[11:4]);
 	dk1 = !sn_rset && !steal && !hz1;
 	dkt = !sn_rset && !steal && !hzt;

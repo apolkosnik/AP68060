@@ -258,7 +258,7 @@ logic [31:0] vbr, cacr;
 logic        bc_clr;
 logic  [2:0] sfc, dfc;
 logic        kill_now, adv_ag, lk_abandon;
-logic  [5:0] dm_adv;                // the DMU's copies of the advances
+logic  [6:0] dm_adv;                // the DMU's copies of the advances
 logic        dm_kill;               // ... and of the kill
 logic [31:0] dtt0, dtt1, itt0, itt1, tc;
 logic        q_odd;
@@ -271,7 +271,8 @@ logic        mt_fault, dm_lkend, dm_iack_end;
 logic  [2:0] iack_lvl;
 logic  [1:0] dm_ack;
 
-logic        dm_req, adv_dc1, adv_dt, adv_dc2, adv_ex, adv_wb, dm_hold_dt;
+logic        dm_quiet;
+logic        dm_req, adv_dc1, adv_dt, adv_dc2, adv_ex, adv_e2, adv_wb, dm_hold_dt;
 logic        dm_hold_dt_b, dm_hold1_b, dm_dc2_rdy_b, dm_st_ok_b;   // the DMU holds' twins for the stall chain
 logic        dm_hold1_n, dm_dc2r_n, dm_st_ok_n, dm_hold_dt_n;   // ... and their next values, for the registered stalls
 logic        dm_hold1_nk, dm_dc2r_n1, dm_dc2r_n0, dm_rdy_dt;
@@ -311,12 +312,12 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.ucond_v(ucond_v), .ucond(ucond),
 	.sr(sr), .vbr(vbr), .cacr(cacr), .bc_clr(bc_clr), .sfc(sfc), .dfc(dfc),
 	.dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem), .dm_msz(dm_msz),
-	.dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke), .dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .dm_older(dm_older),
+	.dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke), .dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .dm_older(dm_older), .dm_quiet(dm_quiet),
 	.bht_we(bht_we), .bht_wa(bht_wa), .bht_dis(bht_dis),
 	.lp_we(lp_we), .lp_wa(lp_wa), .lp_tk(lp_tk), .lp_mp(lp_mp), .sn_ihit(sn_ihit),
 	.tw_busy(tw_busy), .pst5(pst5),
 	.irq_pending(irq_pending),
-	.adv_dc1(adv_dc1), .adv_dt(adv_dt), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_wb(adv_wb),
+	.adv_dc1(adv_dc1), .adv_dt(adv_dt), .adv_dc2(adv_dc2), .adv_ex(adv_ex), .adv_e2(adv_e2), .adv_wb(adv_wb),
 	.dm_dc2_rdy(dm_dc2_rdy), .dm_dc2_rdy_c(dm_dc2_rdy_c), .dm_ldata(dm_ldata), .dm_ldata_al(dm_ldata_al), .dm_ldata_alv(dm_ldata_alv), .dm_fault(dm_fault),
 	.dm_fvec(dm_fvec), .dm_faddr(dm_faddr), .dm_fslw(dm_fslw), .if_cause(if_cause),
 	.dm_st_v(dm_st_v), .dm_st_data(dm_st_data), .dm_st_rdy(dm_st_rdy), .dm_st_ok(dm_st_ok),
@@ -341,11 +342,11 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 
 ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.clk(clk), .nreset(nrst_dm),
-	.adv_ag(dm_adv[5]), .dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem),
+	.adv_ag(dm_adv[6]), .dm_req(dm_req), .dm_va(dm_va), .dm_mem(dm_mem),
 	.dm_msz(dm_msz), .dm_fc(dm_fc), .dm_lock(dm_lock), .dm_locke(dm_locke),
 	.dm_super(dm_super), .dm_noalloc(dm_noalloc), .dm_ack(dm_ack), .iack_lvl(iack_lvl),
-	.dm_older(dm_older),
-	.adv_dc1(dm_adv[4]), .adv_dt(dm_adv[3]), .adv_dc2(dm_adv[2]), .adv_ex(dm_adv[1]), .adv_wb(dm_adv[0]),
+	.dm_older(dm_older), .dm_quiet(dm_quiet),
+	.adv_dc1(dm_adv[5]), .adv_dt(dm_adv[4]), .adv_dc2(dm_adv[3]), .adv_ex(dm_adv[2]), .adv_e2(dm_adv[1]), .adv_wb(dm_adv[0]),
 	.kill_now(dm_kill), .dm_hold1(dm_hold1), .dm_hold1_c(dm_hold1_c), .hold_dt(dm_hold_dt),
 	.hold_dt_b(dm_hold_dt_b), .hold1_b(dm_hold1_b), .dc2_rdy_b(dm_dc2_rdy_b), .st_ok_b(dm_st_ok_b),
 	.hold1_n(dm_hold1_n), .dc2r_n(dm_dc2r_n), .st_ok_n(dm_st_ok_n), .hold_dt_n(dm_hold_dt_n),

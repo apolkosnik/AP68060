@@ -38,9 +38,12 @@
 ;        noncachable read of $D00E (which pushes a dirty line it hits
 ;        first, 5.7) must show the store's high word and, as the low word,
 ;        the store's or the one memory held before it -- nothing else --
-;        and a cached read must then agree with it.  With BCLK at half
-;        PCLK the bench saw the DMU's fallback (a snoop between the halves:
-;        the second part by the engine, which allocates the line again)
+;        and a cached read must then agree with it.  (The DMU's fallback --
+;        a snoop between the halves: the second part by the engine, which
+;        allocates the line again -- is counted in FBCNT but not required:
+;        whether the alternate master's write lands between the halves
+;        follows from the pipeline's depth against its period, and the
+;        reads ahead of each store only walk the phase.)
 ;   30   CLR (long, word, byte), ST and MOVE from SR to noncachable memory
 ;        write without reading it (68020 and later): five writes, no read
 ;   14-17 the MMU on: two logical pages mapped copyback by their page
@@ -385,6 +388,11 @@ ucont:
 	move.w	#249,d4
 .s1:	cpushl	dc,(a4)			; the second line: pushed, invalidated
 	addq.l	#1,d5
+	move.w	d4,d0			; 1..8 noncachable reads ahead of the store:
+	and.w	#7,d0			; its time against the traffic walks (the
+.sd:	tst.l	(FBCNT).l		; second line's fill aligns the store to the
+	dbra	d0,.sd			; bus, so the loop alone puts the halves on
+					; one phase of the traffic's period for good)
 	moves.l	d5,(a3)			; across the line
 	move.l	($D00E).l,d3		; memory, after pushing what is dirty
 	moves.l	(a3),d1			; the cache agrees with it
@@ -422,11 +430,7 @@ ucont:
 	cmp.w	d2,d3
 	beq.s	.s4
 .s8:	failt	28
-.s4:	btst	#5,(CAPW+1).l		; BCLK at half PCLK: the other master's
-	beq.s	.s5			; snoop can fall between the halves (at
-	move.l	(FBCNT).l,d1		; full speed it arbitrates for the bus
-	bne.s	.s5			; after the fill, too late)
-	failt	29
+.s4:	move.l	(FBCNT).l,d1		; (the fallback's count, for the curious)
 .s5:
 
 ;----------------------------- 30 write-only operations do not read

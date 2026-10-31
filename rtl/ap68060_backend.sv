@@ -1,7 +1,7 @@
 //--------------------------------------------------------------------------//
 // AP68060 - pipelined MC68040                                            //
 //                                                                          //
-// ap68060_backend.sv - AG, DC1, DT, DC2, EX and WB stages                   //
+// ap68060_backend.sv - AG, DC1, DT, DC2, EX, EX2 and WB stages              //
 //                                                                          //
 //   AG   read the front register file, effective address, (An)+/-(An)     //
 //        and LEA-class register updates (written to the front file)       //
@@ -9,7 +9,9 @@
 //   DT   tag compare, translation and the fast-path decision (dmu)         //
 //   DC2  way select and operand alignment (ap68060_dmu)                    //
 //   EX   ALU, shifter, multiply/divide, branch resolution, front-file      //
-//        result write                                                      //
+//        result write, the early Bcc redirect                              //
+//   EX2  the uop's outcome in registers (result, flags, exception terms,  //
+//        targets); WB's registers are formed from them                     //
 //   WB   back (architectural) register file, CCR/SR, stores, exceptions,  //
 //        interrupts, trace, serialization                                  //
 //                                                                          //
@@ -79,6 +81,7 @@ module ap68060_backend
 	output logic        dm_locke,
 	output logic        dm_super,
 	output logic        dm_older,       // uops older than DC2 are in EX or WB
+	output logic        dm_quiet,       // a serializing or excepting uop at EX, EX2 or WB: younger accesses start no bus cycle
 	input  logic        sn_ihit,        // a snoop dropped valid instruction-cache data
 	input  logic        tw_busy,        // the DMU runs a table search
 	output logic  [4:0] pst5,           // PST4-PST0 this clock (MC68060UM table 2-7)
@@ -125,7 +128,8 @@ module ap68060_backend
 	output logic        adv_dc1,        // DC1 -> DT
 	output logic        adv_dt,         // DT -> DC2
 	output logic        adv_dc2,        // DC2 -> EX
-	output logic        adv_ex,         // EX -> WB
+	output logic        adv_ex,         // EX -> EX2
+	output logic        adv_e2,         // EX2 -> WB
 	output logic        adv_wb,         // WB completes
 	input  logic        dm_dc2_rdy,     // DC2 memory op has its result (a register)
 	input  logic        dm_dc2_rdy_c,   // ... as the DMU's state gives it now (checks)
@@ -154,7 +158,7 @@ module ap68060_backend
 	output logic        kill_now,       // this cycle: younger uops are discarded
 	output logic        lk_abandon,     // an open locked sequence is abandoned
 	output logic        adv_ag,         // AG -> DC1
-	output logic  [5:0] dm_adv,         // the DMU's copies: {AG, DC1, DT, DC2, EX, WB}
+	output logic  [6:0] dm_adv,         // the DMU's copies: {AG, DC1, DT, DC2, EX, EX2, WB}
 	output logic        dm_kill,        // ... and of kill_now
 	output logic [31:0] dtt0,
 	output logic [31:0] dtt1,
@@ -253,6 +257,21 @@ logic [31:0] fv;
 // (ew_same: ex_u.pc == wb_u.pc, kept as the two load -- the compare
 // stays off the FPU's hold, and so the stall chain)
 logic ew_same;
+logic ex2_same;               // ex_u.pc == e2_u.pc, the same way
+// EX2: the uop's outcome as EX decided it, in registers; WB's registers
+// are formed from these (the exception select, the redirect, the CCR), so
+// EX's late decisions -- the ALU's condition, the exception-pending flag,
+// the forwarding -- end in flip-flops instead of the WB select trees
+logic        e2_v;
+uop_t        e2_u;
+logic [31:0] e2_npc, e2_res, e2_upd, e2_upd2, e2_stdata, e2_next, e2_otgt, e2_oddpc;
+logic [31:0] e2_faddr, e2_fslw, e2_fpxaddr;
+logic        e2_dwe, e2_st, e2_ok, e2_xok, e2_fault, e2_xnz, e2_odd, e2_snw, e2_isfp, e2_fpx;
+logic        e2_fpxnext, e2_fpxcommit, e2_mispred, e2_sr_we, e2_smcr, e2_early, e2_cof, e2_xnew;
+logic  [7:0] e2_fvec, e2_xvec;
+logic  [3:0] e2_fpxfmt;
+logic [15:0] e2_sr_new;
+logic  [4:0] e2_ccr;
 logic wb_ok;                  // WB's uop has no exception (wb_exc == 0), registered
 logic [4:0] ccr_nx;           // the condition codes next, but for the exception entry's (see the block)
 // the holds' next values (for the registered stalls, at the end of this
@@ -266,6 +285,10 @@ logic  [2:0] ex_kx;           // EX's uop is FPU, DIV, TRAPcc (registered as it 
 wire wb_fpchk = wb_v && !wb_u.last && wb_ok &&
                 (wb_u.mem == M_NONE || wb_u.mem == M_LD) &&
                 ex_v && ex_kx[2] && ew_same;     // (ex_kx[2]: EX's uop is FPU, registered)
+wire e2_fpchk = e2_v && !e2_u.last && e2_ok &&
+                (e2_u.mem == M_NONE || e2_u.mem == M_LD) &&
+                ex_v && ex_kx[2] && ex2_same;
+wire safe_c   = (!wb_v || wb_fpchk) && (!e2_v || e2_fpchk);
 // The FPU interface's safe (no older uop in flight: !wb_v || wb_fpchk) as
 // a register formed a clock ahead, so its hold is one LUT of flip-flops
 // and not the root of the stall chain.  Exact from the registers in every
@@ -279,37 +302,34 @@ function automatic logic memok(input uop_t u);
 endfunction
 wire ex_okc   = (ex_u.exc == 8'd0) && !ex_snw && !ex_fault && (ex_kx == 3'd0) && !ex_br;
 wire dc2_fpu  = (dc2_u.op == OP_FPU);
-always_comb begin
-	logic nv;
-	if (flush || kill_now || !nreset) nv = 1'b1;
-	else if (stall_wb)
-		nv = !wb_v || (!wb_u.last && wb_ok && memok(wb_u) &&
-		               (ex_v ? (ex_kx[2] && ew_same)
-		                     : (adv_dc2 && dc2_fpu && (dc2_u.pc == wb_u.pc))));
-	else if (adv_ex)
-		nv = !ex_u.last && ex_okc && memok(ex_u) && adv_dc2 && dc2_fpu && (dc2_u.pc == ex_u.pc);
-	else nv = 1'b1;
-	safe_n = nv;
-end
+// EX's uop next clock is an FPU uop of the instruction whose uop is at pc:
+// DC2's entering, or EX's own staying (same_q: its registered compare
+// with that stage's uop); an empty EX next clock counts as not (the older
+// uop is in flight: safe stays down, as the check requires)
+function automatic logic fps_n(input logic [31:0] pc, input logic same_q);
+	fps_n = adv_dc2 ? (dc2_fpu && (dc2_u.pc == pc)) : (ex_v && stall_ex && ex_kx[2] && same_q);
+endfunction
+function automatic logic safe_f(input logic k);
+	logic wbp, e2p;
+	if (stall_wb)
+		wbp = !wb_v || (!wb_u.last && wb_ok && memok(wb_u) && fps_n(wb_u.pc, ew_same));
+	else
+		wbp = !adv_e2 || (!e2_u.last && e2_ok && memok(e2_u) && fps_n(e2_u.pc, ex2_same));
+	if (stall_e2)
+		e2p = !e2_v || (!e2_u.last && e2_ok && memok(e2_u) && fps_n(e2_u.pc, ex2_same));
+	else
+		e2p = !adv_ex || (!ex_u.last && ex_okc && memok(ex_u) && fps_n(ex_u.pc, 1'b1));
+	safe_f = (flush || k || !nreset) || (wbp && e2p);
+endfunction
+always_comb safe_n  = safe_f(kill_now);
 // (the same with the kill taken as 0: a kill clears every stage's valid,
 // so the stalls are zero whatever this is; its logic stays off their D)
-always_comb begin
-	logic nv;
-	if (flush || 1'b0 || !nreset) nv = 1'b1;
-	else if (stall_wb)
-		nv = !wb_v || (!wb_u.last && wb_ok && memok(wb_u) &&
-		               (ex_v ? (ex_kx[2] && ew_same)
-		                     : (adv_dc2 && dc2_fpu && (dc2_u.pc == wb_u.pc))));
-	else if (adv_ex)
-		nv = !ex_u.last && ex_okc && memok(ex_u) && adv_dc2 && dc2_fpu && (dc2_u.pc == ex_u.pc);
-	else nv = 1'b1;
-	safe_nk = nv;
-end
+always_comb safe_nk = safe_f(1'b0);
 always_ff @(posedge clk) safe_q <= safe_n;
 // synthesis translate_off
 always_ff @(posedge clk)
-	if (nreset && safe_q && !(!wb_v || wb_fpchk)) begin
-		$display("FAIL: the FPU interface's safe register %b, the check %b (wb_v %b fpchk %b)", safe_q, !wb_v || wb_fpchk, wb_v, wb_fpchk);
+	if (nreset && safe_q && !safe_c) begin
+		$display("FAIL: the FPU interface's safe register %b, the check %b (wb_v %b fpchk %b e2_v %b fpchk %b)", safe_q, safe_c, wb_v, wb_fpchk, e2_v, e2_fpchk);
 		$finish;
 	end
 // synthesis translate_on
@@ -366,7 +386,7 @@ assign dfc  = dfc_r;
 // stall / advance (bubbles collapse: a stage moves into an empty one)
 //--------------------------------------------------------------------------
 logic wb_hold, ex_hold, dc2_hold, ag_hold;
-logic stall_wb, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag;
+logic stall_wb, stall_e2, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag;
 // Every hold the chain reads is a register, formed a clock ahead (or from
 // registers in one level): WB's (wbh_q, and the DMU's store answer), EX's
 // (from flags registered as the uop enters), DC2's and DC1's (the DMU's),
@@ -417,13 +437,15 @@ assign dc2_hold  = dc2_v && dc2_mx && !dm_dc2_rdy_b;
 // registers equal it, except that a DMU "not ready" may be a clock longer
 // (dc2r_n is conservative) -- never shorter.
 wire c_wb  = wb_hold_r;
-wire c_ex  = ex_v  && (ex_hold  || c_wb);
+wire c_e2  = e2_v  && c_wb;
+wire c_ex  = ex_v  && (ex_hold  || c_e2);
 wire c_dc2 = dc2_v && (dc2_hold || c_ex);
 wire c_dt  = dt_v  && (c_dc2 || dm_hold_dt_b);
 wire c_dc1 = dc1_v && (c_dt  || dm_hold1_b);
 wire c_ag  = ag_v  && (ag_hold  || c_dc1);
 
 assign adv_wb  = wb_v  && !stall_wb;
+assign adv_e2  = e2_v  && !stall_e2;
 assign adv_ex  = ex_v  && !stall_ex;
 assign adv_dc2 = dc2_v && !stall_dc2;
 assign adv_dt  = dt_v  && !stall_dt;
@@ -436,8 +458,9 @@ assign adv_ag  = ag_v  && !stall_ag;
 (* keep *) wire dma_dt  = dt_v  && !stall_dt;
 (* keep *) wire dma_dc2 = dc2_v && !stall_dc2;
 (* keep *) wire dma_ex  = ex_v  && !stall_ex;
+(* keep *) wire dma_e2  = e2_v  && !stall_e2;
 (* keep *) wire dma_wb  = wb_v  && !stall_wb;
-assign dm_adv = {dma_ag, dma_dc1, dma_dt, dma_dc2, dma_ex, dma_wb};
+assign dm_adv = {dma_ag, dma_dc1, dma_dt, dma_dc2, dma_ex, dma_e2, dma_wb};
 
 // AG's input: a skid register in front of it, so the sequencer's pop does
 // not wait for the stall chain.  The sequencer may pop whenever the skid is
@@ -767,7 +790,20 @@ assign dm_locke   = ag_u.mlocke || (bus_le && !bus_lkdone && ag_wr);
 // FC2 of the access selects the root and the supervisor checks: MOVES
 // translates its SFC/DFC space (WinUAE: super = (sfc & 4) != 0)
 assign dm_super   = dm_fc[2];
-assign dm_older   = ex_v || wb_v;
+assign dm_older   = ex_v || e2_v || wb_v;
+// Younger accesses start no bus cycle while a uop at EX, EX2 or WB will
+// flush them: a serializing one (its commit redirects: RESET, whose RSTO
+// follows once the transfer in progress ends, 2.8.4; LPSTOP, no bus cycle
+// after its broadcast but the acknowledge, 7.8.2.1; MOVEC, NOP, the
+// cache operations), or one that takes an exception (from its decode at
+// EX, from EX's decision at EX2 and WB).  Their bus cycles -- a read
+// without LOCK ahead of the MOVEC that sets BUSCR.L, a locked one inside
+// the sequence an exception abandons -- would only be noise.
+function automatic logic quiet_op(input uop_t u);
+	quiet_op = u.ser || (u.exc != 8'd0);
+endfunction
+assign dm_quiet   = (ex_v && quiet_op(ex_u)) || (e2_v && (quiet_op(e2_u) || !e2_ok)) ||
+                    (wb_v && (wb_u.ser || !wb_ok));
 
 
 
@@ -1220,6 +1256,11 @@ ap68060_alu_slow alu_s (
 always_ff @(posedge clk)
 	if (nreset && ex_v && wb_v && ew_same != (ex_u.pc == wb_u.pc)) begin
 		$display("FAIL: ew_same %b, the EX and WB PCs %h %h", ew_same, ex_u.pc, wb_u.pc);
+		$finish;
+	end
+always_ff @(posedge clk)
+	if (nreset && ex_v && e2_v && ex2_same != (ex_u.pc == e2_u.pc)) begin
+		$display("FAIL: ex2_same %b, the EX and EX2 PCs %h %h", ex2_same, ex_u.pc, e2_u.pc);
 		$finish;
 	end
 // synthesis translate_on
@@ -1982,18 +2023,18 @@ always_comb begin
 	tr_n   = sr_r[15] || (wb_v && wb_sr_we && wb_sr_new[15]);
 	hlt_n  = halted || dbl_fault || (wb_commit && wb_u.op == OP_MISC && wb_u.cond == 4'd10);
 	// entering: RESET, maintenance and an SR write each wait at least a clock
-	ok_new = ex_xok && !ex_fault && !ex_xnz && !ex_odd;
-	x_new  = ex_xnew || ex_sr_we;   // (the op's decode registered as the uop enters EX)
+	ok_new = e2_ok;                 // (EX's decision, a register in EX2)
+	x_new  = e2_xnew || e2_sr_we;
 	h_new  = hlt_n || (ok_new && x_new) ||
-	         (sb_ne_n && (!ok_new || ex_u.ser || (ex_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
+	         (sb_ne_n && (!ok_new || e2_u.ser || (e2_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
 	// (the same with EX's exception decision ok_new taken as 0 and 1: the
 	// stall registers pick by it last)
 	h_new0 = hlt_n || sb_ne_n;
-	h_new1 = hlt_n || x_new || (sb_ne_n && (ex_u.ser || (ex_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
+	h_new1 = hlt_n || x_new || (sb_ne_n && (e2_u.ser || (e2_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
 	// (and with the interrupt pending next clock, irq_n -- five levels of
 	// its own -- taken as 0 and 1: the stall registers pick by it too)
-	h_new1i0 = hlt_n || x_new || (sb_ne_n && (ex_u.ser || (ex_u.last && (tr_n || (xstk && xr_dbl)))));
-	h_new1i1 = hlt_n || x_new || (sb_ne_n && (ex_u.ser || ex_u.last));
+	h_new1i0 = hlt_n || x_new || (sb_ne_n && (e2_u.ser || (e2_u.last && (tr_n || (xstk && xr_dbl)))));
+	h_new1i1 = hlt_n || x_new || (sb_ne_n && (e2_u.ser || e2_u.last));
 	ex_okn  = ok_new;
 	ex_irqn = irq_n;
 	// staying: a store's or a PLPA's fault becomes its exception; RESET
@@ -2008,13 +2049,13 @@ always_comb begin
 	           (sb_ne_n && (!ok_stay || wb_u.ser || (wb_u.last && (tr_n || (xstk && xr_dbl)))));
 	h_stayi1 = hlt_n || (ok_stay && x_stay) ||
 	           (sb_ne_n && (!ok_stay || wb_u.ser || wb_u.last));
-	wbh_n = nreset && (adv_ex ? h_new : h_stay);
-	wbh_n0 = nreset && (adv_ex ? h_new0 : h_stay);
-	wbh_n1 = nreset && (adv_ex ? h_new1 : h_stay);
-	wbh_n00 = nreset && (adv_ex ? h_new0   : h_stayi0);
-	wbh_n01 = nreset && (adv_ex ? h_new0   : h_stayi1);
-	wbh_n10 = nreset && (adv_ex ? h_new1i0 : h_stayi0);
-	wbh_n11 = nreset && (adv_ex ? h_new1i1 : h_stayi1);
+	wbh_n = nreset && (adv_e2 ? h_new : h_stay);
+	wbh_n0 = nreset && (adv_e2 ? h_new0 : h_stay);
+	wbh_n1 = nreset && (adv_e2 ? h_new1 : h_stay);
+	wbh_n00 = nreset && (adv_e2 ? h_new0   : h_stayi0);
+	wbh_n01 = nreset && (adv_e2 ? h_new0   : h_stayi1);
+	wbh_n10 = nreset && (adv_e2 ? h_new1i0 : h_stayi0);
+	wbh_n11 = nreset && (adv_e2 ? h_new1i1 : h_stayi1);
 end
 always_ff @(posedge clk) wbh_q <= wbh_n;
 // irq_pend's registers as they will be (the main block's ipl_q, nmi_edge,
@@ -2256,7 +2297,7 @@ always_ff @(posedge clk) begin
 	dbg_retire <= 1'b0;
 
 	if (!nreset) begin
-		ag_v  <= 1'b0; dc1_v <= 1'b0; dt_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; wb_v <= 1'b0;
+		ag_v  <= 1'b0; dc1_v <= 1'b0; dt_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; e2_v <= 1'b0; wb_v <= 1'b0;
 		sk_v  <= 1'b0;
 		sk_vr <= 1'b0; sk_va <= 1'b0;
 		eredir_pend <= 1'b0;
@@ -2480,9 +2521,17 @@ always_ff @(posedge clk) begin
 			md_z     <= 1'b0;
 		end
 		if (!stall_ex) ex_v <= adv_dc2;
-		// EX's next uop against WB's next: EX's own when it moves on
-		if (adv_dc2) ew_same <= adv_ex ? (dc2_u.pc == ex_u.pc) : (dc2_u.pc == wb_u.pc);
-		else if (adv_ex) ew_same <= 1'b1;
+		// EX's next uop against EX2's next and WB's next: EX's own when it
+		// moves on, EX2's when that moves on (an empty stage: don't care)
+		if (adv_dc2) begin
+			ex2_same <= adv_ex ? (dc2_u.pc == ex_u.pc) : (dc2_u.pc == e2_u.pc);
+			ew_same  <= adv_e2 ? (dc2_u.pc == e2_u.pc) : (dc2_u.pc == wb_u.pc);
+		end
+		else if (adv_ex) begin
+			ex2_same <= 1'b1;
+			ew_same  <= 1'b1;
+		end
+		else if (adv_e2) ew_same <= ex2_same;
 		if (ex_md_start) md_go <= 1'b1;
 		if (ex_v && ex_div0) md_z <= 1'b1;
 		// multi-cycle operations: phase 0's registers (the bit fields',
@@ -2511,22 +2560,40 @@ always_ff @(posedge clk) begin
 		if (adv_ex || kill_now) ex_sp <= 2'd0;
 
 		//------------------------------------------------------------------
-		// EX -> WB
+		// EX -> EX2: the outcome in registers
 		//------------------------------------------------------------------
 		if (adv_ex) begin
-			wb_u        <= ex_u;
-			wb_npc      <= ex_npc;
-			wb_res      <= exw_val;
-			wb_dwe      <= ex_d_eff;
-			wb_upd_val  <= ex_upd;
-			wb_upd2_val <= ex_upd2;
-			wb_st       <= (ex_u.mem == M_ST || ex_u.mem == M_RMW) && !ex_stkill;
-			// (the same, and no exception: the DMU's store valid from a
-			// flip-flop -- wb_exc's compare sat on the stall chain)
-			wb_stv      <= (ex_u.mem == M_ST || ex_u.mem == M_RMW) && !ex_stkill &&
-			               ex_xok && !ex_fault && !ex_xnz && !ex_odd;
-			wb_ok       <= ex_xok && !ex_fault && !ex_xnz && !ex_odd;
-			wb_st_data  <= ex_st;
+			logic [4:0] nf;
+			e2_u        <= ex_u;
+			e2_npc      <= ex_npc;
+			e2_res      <= exw_val;
+			e2_dwe      <= ex_d_eff;
+			e2_upd      <= ex_upd;
+			e2_upd2     <= ex_upd2;
+			e2_st       <= (ex_u.mem == M_ST || ex_u.mem == M_RMW) && !ex_stkill;
+			e2_stdata   <= ex_st;
+			e2_xok      <= ex_xok;
+			e2_fault    <= ex_fault;
+			e2_xnz      <= ex_xnz;
+			e2_odd      <= ex_odd;
+			e2_ok       <= ex_xok && !ex_fault && !ex_xnz && !ex_odd;
+			e2_snw      <= ex_snw;
+			e2_fvec     <= ex_fvec;
+			e2_faddr    <= ex_faddr;
+			e2_fslw     <= ex_fslw;
+			e2_xvec     <= ex_xvec;
+			e2_isfp     <= ex_is_fp;
+			e2_fpx      <= ex_kx[2] && (fp_xvec != 8'd0);
+			e2_fpxaddr  <= fp_xaddr;
+			e2_fpxfmt   <= fp_xfmt;
+			e2_fpxnext  <= fp_xnext;
+			e2_fpxcommit <= fp_xcommit;
+			e2_otgt     <= ex_otgt;
+			e2_oddpc    <= ex_odd_pc;
+			e2_mispred  <= ex_mispred;
+			e2_sr_we    <= ex_sr_we;
+			e2_sr_new   <= ex_sr_new;
+			e2_xnew     <= ex_xnew;
 			// a store into the instruction stream just ahead (the fetch
 			// queue and the instructions in flight) refetches after itself:
 			// the 68040 does not promise this, the previous core's AmigaOS
@@ -2534,9 +2601,8 @@ always_ff @(posedge clk) begin
 			// (a store from a uop before the last one -- MOVEM, a bit
 			// field, CAS2 -- defers the refetch to the instruction's end:
 			// redirecting there would drop the instruction's remaining uops)
-			wb_redir    <= ex_mispred || ex_u.ser || ex_sr_we ||
-			               (ex_u.last && (smc_pend || ex_smc));
-			wb_eredir   <= ex_early;
+			e2_smcr     <= ex_u.last && (smc_pend || ex_smc);
+			e2_early    <= ex_early;
 			if (ex_early) begin
 				fe_flush    <= 1'b1;
 				redir_v     <= 1'b1;
@@ -2548,113 +2614,14 @@ always_ff @(posedge clk) begin
 			if (ex_u.last) smc_pend <= 1'b0;
 			else if (ex_smc) smc_pend <= 1'b1;
 			// where execution continues, predicted correctly or not
-			wb_redir_pc <= ex_br ? ex_next : ex_npc;
-			wb_sr_we    <= ex_sr_we;
-			wb_crs      <= cr_sel(ex_u);
-			wb_uoh      <= 32'd1 << ex_u.upd_reg;
-			wb_u2oh     <= 32'd1 << ex_u.upd2_reg;
-			wb_doh      <= 32'd1 << ex_u.d_reg;
-			wb_reset    <= (ex_u.op == OP_MISC) && (ex_u.cond == 4'd1);
-			wb_mt       <= (ex_u.op == OP_MISC) && (ex_u.cond >= 4'd3) && (ex_u.cond <= 4'd5);
-			wb_is_stop  <= (ex_u.op == OP_MISC) && (ex_u.cond == 4'd2 || ex_u.cond == 4'd8);
-			wb_cof      <= ex_br && ex_tkn;
-			wb_sr_new   <= ex_sr_new;
-			if (ex_u.exc == EXC_SNR || ex_snw) begin
-				wb_exc      <= EXC_IFS;     // refetched by WB, never an error
-				wb_xf       <= xflags(EXC_IFS);
-				wb_exc_addr <= ex_u.pc;
-				wb_exc_fslw <= 32'd0;
-			end
-			else if (ex_u.exc != 8'd0) begin
-				logic ifs, ifa;
-				// instruction fetch faults: a speculative one is refetched
-				// once (wb_refetch) and becomes an access error when it
-				// faults again at the same instruction
-				ifs = (ex_u.exc == EXC_IFS || ex_u.exc == EXC_IFSA);
-				ifa = (ex_u.exc == EXC_IFA || ex_u.exc == EXC_IFSA);
-				if (ifs && !(rt_armed && rt_pc == ex_u.pc)) begin
-					wb_exc <= ex_u.exc;
-					wb_xf  <= xflags(ex_u.exc);
-				end
-				else if (ifs || ex_u.exc == EXC_IFB || ex_u.exc == EXC_IFA) begin
-					wb_exc <= 8'd2;
-					wb_xf  <= xflags(8'd2);
-				end
-				else begin
-					wb_exc <= ex_u.exc;
-					wb_xf  <= xflags(ex_u.exc);
-				end
-				// a faulted instruction fetch (MC68060UM 8.4.4): FA is the
-				// instruction's opword address; FSLW IO, MA when the faulted
-				// word was an extension word, read, long, TT normal, TM the
-				// program space (FC 6 or 2), and the cause: the translation's
-				// (PTA PTB IL PF SP, TWE LK for a bus error in the search) or a
-				// bus error (RE)
-				if (ifs || ex_u.exc == EXC_IFB || ex_u.exc == EXC_IFA) begin
-					wb_exc_addr <= ex_u.pc;
-					wb_exc_fslw <= FSLW_IO | ((ex_u.target != ex_u.pc) ? FSLW_MA : 32'd0) |
-					               FSLW_R | {13'd0, sr_r[13], 2'b10, 16'd0} |
-					               (ifa ? if_cause : (FSLW_RE | (if_cause & FSLW_TTR)));
-				end
-				else begin
-					wb_exc_addr <= ex_u.pc;
-					wb_exc_fslw <= 32'd0;
-				end
-			end
-			else if (ex_fault) begin
-				wb_exc      <= ex_fvec;
-				wb_xf       <= xflags(ex_fvec);
-				wb_exc_addr <= ex_faddr;
-				wb_exc_fslw <= ex_fslw;
-			end
-			else if (!ex_xnz && ex_odd) begin
-				wb_exc      <= 8'd3;
-				wb_xf       <= xflags(8'd3);
-				wb_exc_addr <= {ex_otgt[31:1], 1'b0};
-				wb_exc_fslw <= 32'd0;
-			end
-			else if (ex_is_fp && ex_xnz) begin
-				// FPU exceptions bring their frame format, PC and address;
-				// the FPU-disabled frame ($4) has the instruction's PC at +$C
-				wb_exc      <= ex_xvec;
-				wb_xf       <= xflags(ex_xvec);
-				wb_exc_addr <= fp_xaddr;
-				wb_exc_fslw <= (fp_xfmt == 4'h4) ? ex_u.pc : 32'd0;
-			end
-			else begin
-				wb_exc      <= ex_xvec;
-				wb_xf       <= xflags(ex_xvec);
-				wb_exc_addr <= ex_u.pc;
-				wb_exc_fslw <= 32'd0;
-			end
-			wb_exc_pcv <= ex_xok && !ex_fault && !ex_xnz && ex_odd;
-			wb_exc_pc  <= ex_odd_pc;
-			wb_exc_fmtv <= 1'b0;
-			wb_xcommit  <= 1'b0;
-			// (an FPU uop's exception: its vector alone -- the divide's zero
-			// and the ALU's condition, the other units' terms of ex_xnz, are
-			// not its; the select of the exception registers is then two
-			// levels shorter)
-			if (ex_xok && !ex_fault && ex_is_fp && ex_kx[2] && (fp_xvec != 8'd0)) begin
-				wb_exc_pcv  <= 1'b1;
-				wb_exc_pc   <= fp_xnext ? ex_npc : ex_u.pc;
-				wb_exc_fmtv <= 1'b1;
-				wb_exc_fmt  <= fp_xfmt;
-				wb_xcommit  <= fp_xcommit;
-			end
-			wb_oddrte  <= ex_xok && !ex_fault && !ex_xnz && ex_odd &&
-			              ex_u.op == OP_RTE;
-			wb_hodd    <= ex_xok && !ex_fault && !ex_xnz && ex_odd &&
-			              ex_u.br == BR_A && ex_u.op == OP_MOV && ex_u.cond == 4'hF;
+			e2_next     <= ex_br ? ex_next : ex_npc;
+			e2_cof      <= ex_br && ex_tkn;
 			// CCR after this uop (CHK, CHK2, TRAPcc and divide-by-zero set
 			// their flags and then trap: the stacked SR carries them)
-			if (ex_xok && !ex_fault) begin
-				logic [4:0] nf;
-				// (the adder's flags, the late ones, picked last)
-				nf = ex_fs ? alu_sumfl : (ex_u.op == OP_CAS) ? cas_flags : ex_flags;
-				wb_ccr <= (nf & ex_u.ccr_we) | (ccr_f & ~ex_u.ccr_we);
-			end
-			else wb_ccr <= ccr_f;
+			// (the adder's flags, the late ones, picked last)
+			nf = ex_fs ? alu_sumfl : (ex_u.op == OP_CAS) ? cas_flags : ex_flags;
+			if (ex_xok && !ex_fault) e2_ccr <= (nf & ex_u.ccr_we) | (ccr_f & ~ex_u.ccr_we);
+			else e2_ccr <= ccr_f;
 			if (ex_u.op == OP_LATCH || (ex_u.op == OP_IACKV && !ex_u.cond[0])) ex_latch <= ex_av;
 			if (ex_u.op == OP_BFSET && !ex_u.cond[0]) begin
 				logic [5:0] w;
@@ -2674,6 +2641,124 @@ always_ff @(posedge clk) begin
 			end
 			if (ex_u.op == OP_BF) bf_lonew <= bf_lo_out;
 		end
+		if (!stall_e2) e2_v <= adv_ex;
+
+		//------------------------------------------------------------------
+		// EX2 -> WB: WB's registers from EX2's
+		//------------------------------------------------------------------
+		if (adv_e2) begin
+			wb_u        <= e2_u;
+			wb_npc      <= e2_npc;
+			wb_res      <= e2_res;
+			wb_dwe      <= e2_dwe;
+			wb_upd_val  <= e2_upd;
+			wb_upd2_val <= e2_upd2;
+			wb_st       <= e2_st;
+			// (the same, and no exception: the DMU's store valid from a
+			// flip-flop -- wb_exc's compare sat on the stall chain)
+			wb_stv      <= e2_st && e2_ok;
+			wb_ok       <= e2_ok;
+			wb_st_data  <= e2_stdata;
+			wb_redir    <= e2_mispred || e2_u.ser || e2_sr_we || e2_smcr;
+			wb_eredir   <= e2_early;
+			wb_redir_pc <= e2_next;
+			wb_sr_we    <= e2_sr_we;
+			wb_crs      <= cr_sel(e2_u);
+			wb_uoh      <= 32'd1 << e2_u.upd_reg;
+			wb_u2oh     <= 32'd1 << e2_u.upd2_reg;
+			wb_doh      <= 32'd1 << e2_u.d_reg;
+			wb_reset    <= (e2_u.op == OP_MISC) && (e2_u.cond == 4'd1);
+			wb_mt       <= (e2_u.op == OP_MISC) && (e2_u.cond >= 4'd3) && (e2_u.cond <= 4'd5);
+			wb_is_stop  <= (e2_u.op == OP_MISC) && (e2_u.cond == 4'd2 || e2_u.cond == 4'd8);
+			wb_cof      <= e2_cof;
+			wb_sr_new   <= e2_sr_new;
+			if (e2_u.exc == EXC_SNR || e2_snw) begin
+				wb_exc      <= EXC_IFS;     // refetched by WB, never an error
+				wb_xf       <= xflags(EXC_IFS);
+				wb_exc_addr <= e2_u.pc;
+				wb_exc_fslw <= 32'd0;
+			end
+			else if (e2_u.exc != 8'd0) begin
+				logic ifs, ifa;
+				// instruction fetch faults: a speculative one is refetched
+				// once (wb_refetch) and becomes an access error when it
+				// faults again at the same instruction
+				ifs = (e2_u.exc == EXC_IFS || e2_u.exc == EXC_IFSA);
+				ifa = (e2_u.exc == EXC_IFA || e2_u.exc == EXC_IFSA);
+				if (ifs && !(rt_armed && rt_pc == e2_u.pc)) begin
+					wb_exc <= e2_u.exc;
+					wb_xf  <= xflags(e2_u.exc);
+				end
+				else if (ifs || e2_u.exc == EXC_IFB || e2_u.exc == EXC_IFA) begin
+					wb_exc <= 8'd2;
+					wb_xf  <= xflags(8'd2);
+				end
+				else begin
+					wb_exc <= e2_u.exc;
+					wb_xf  <= xflags(e2_u.exc);
+				end
+				// a faulted instruction fetch (MC68060UM 8.4.4): FA is the
+				// instruction's opword address; FSLW IO, MA when the faulted
+				// word was an extension word, read, long, TT normal, TM the
+				// program space (FC 6 or 2), and the cause: the translation's
+				// (PTA PTB IL PF SP, TWE LK for a bus error in the search) or a
+				// bus error (RE)
+				if (ifs || e2_u.exc == EXC_IFB || e2_u.exc == EXC_IFA) begin
+					wb_exc_addr <= e2_u.pc;
+					wb_exc_fslw <= FSLW_IO | ((e2_u.target != e2_u.pc) ? FSLW_MA : 32'd0) |
+					               FSLW_R | {13'd0, sr_r[13], 2'b10, 16'd0} |
+					               (ifa ? if_cause : (FSLW_RE | (if_cause & FSLW_TTR)));
+				end
+				else begin
+					wb_exc_addr <= e2_u.pc;
+					wb_exc_fslw <= 32'd0;
+				end
+			end
+			else if (e2_fault) begin
+				wb_exc      <= e2_fvec;
+				wb_xf       <= xflags(e2_fvec);
+				wb_exc_addr <= e2_faddr;
+				wb_exc_fslw <= e2_fslw;
+			end
+			else if (!e2_xnz && e2_odd) begin
+				wb_exc      <= 8'd3;
+				wb_xf       <= xflags(8'd3);
+				wb_exc_addr <= {e2_otgt[31:1], 1'b0};
+				wb_exc_fslw <= 32'd0;
+			end
+			else if (e2_isfp && e2_xnz) begin
+				// FPU exceptions bring their frame format, PC and address;
+				// the FPU-disabled frame ($4) has the instruction's PC at +$C
+				wb_exc      <= e2_xvec;
+				wb_xf       <= xflags(e2_xvec);
+				wb_exc_addr <= e2_fpxaddr;
+				wb_exc_fslw <= (e2_fpxfmt == 4'h4) ? e2_u.pc : 32'd0;
+			end
+			else begin
+				wb_exc      <= e2_xvec;
+				wb_xf       <= xflags(e2_xvec);
+				wb_exc_addr <= e2_u.pc;
+				wb_exc_fslw <= 32'd0;
+			end
+			wb_exc_pcv <= e2_xok && !e2_fault && !e2_xnz && e2_odd;
+			wb_exc_pc  <= e2_oddpc;
+			wb_exc_fmtv <= 1'b0;
+			wb_xcommit  <= 1'b0;
+			// (an FPU uop's exception: its vector alone -- the divide's zero
+			// and the ALU's condition, the other units' terms of ex_xnz, are
+			// not its; the select of the exception registers is then two
+			// levels shorter)
+			if (e2_xok && !e2_fault && e2_isfp && e2_fpx) begin
+				wb_exc_pcv  <= 1'b1;
+				wb_exc_pc   <= e2_fpxnext ? e2_npc : e2_u.pc;
+				wb_exc_fmtv <= 1'b1;
+				wb_exc_fmt  <= e2_fpxfmt;
+				wb_xcommit  <= e2_fpxcommit;
+			end
+			wb_oddrte  <= e2_ok && e2_odd && e2_u.op == OP_RTE;
+			wb_hodd    <= e2_ok && e2_odd && e2_u.br == BR_A && e2_u.op == OP_MOV && e2_u.cond == 4'hF;
+			wb_ccr     <= e2_ccr;
+		end
 		// (not when the next uop enters EX this cycle: the reset above is
 		// for it, and the done belongs to the one leaving)
 		if (md_done && md_go && !adv_dc2) md_fin <= 1'b1;
@@ -2686,7 +2771,7 @@ always_ff @(posedge clk) begin
 		end
 		// overflow of the uop leaving EX (word forms check 16 bits)
 		if (adv_ex && (ex_u.op == OP_DIV || ex_u.op == OP_MUL)) md_ovfl <= (ex_u.op == OP_DIV) && md_q_dkill;
-		if (!stall_wb) wb_v <= adv_ex;
+		if (!stall_wb) wb_v <= adv_e2;
 		// an SR-writing uop's first clock in WB has passed
 		if (!stall_wb) wb_srw <= 1'b0;
 		else if (wb_v && wb_sr_we) wb_srw <= 1'b1;
@@ -2878,7 +2963,7 @@ always_ff @(posedge clk) begin
 		// flush: kill every stage (the redirecting/excepting uop has left)
 		//------------------------------------------------------------------
 		if (flush) begin
-			ag_v <= 1'b0; dc1_v <= 1'b0; dt_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; wb_v <= 1'b0;
+			ag_v <= 1'b0; dc1_v <= 1'b0; dt_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; e2_v <= 1'b0; wb_v <= 1'b0;
 			eredir_pend <= 1'b0;
 		end
 		else begin
@@ -2908,13 +2993,13 @@ always_ff @(posedge clk) begin
 		end
 		if (flush || kill_now) begin sk_v <= 1'b0; sk_vr <= 1'b0; sk_va <= 1'b0; end
 		if (kill_now) begin
-			ag_v <= 1'b0; dc1_v <= 1'b0; dt_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; wb_v <= 1'b0;
+			ag_v <= 1'b0; dc1_v <= 1'b0; dt_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; e2_v <= 1'b0; wb_v <= 1'b0;
 		end
 	end
 end
 
 assign dm_st_v    = wb_v && wb_stv;
-assign be_idle    = !(sk_v || ag_v || dc1_v || dt_v || dc2_v || ex_v || wb_v);
+assign be_idle    = !(sk_v || ag_v || dc1_v || dt_v || dc2_v || ex_v || e2_v || wb_v);
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && wb_v && (wb_stv != (wb_st && wb_exc == 8'd0) || wb_ok != (wb_exc == 8'd0))) begin
@@ -3109,7 +3194,7 @@ always_ff @(posedge clk)
 		if ((ag_u.upd_v && wf_u[3:0] != mu) || (ag_u.upd2_v && wf_u2[3:0] != mu2) ||
 		    (ag_u.base_v && wf_b[2:0] != mb[2:0]) || (ag_u.idx_v && wf_x[2:0] != mx[2:0]) ||
 		    (ag_u.base_v && wf_b[3] && !mb[3]) || (ag_u.idx_v && wf_x[3] && !mx[3]) ||
-		    ((wf_b[4] || wf_x[4] || wf_u[4] || wf_u2[4]) && !wb_v)) begin
+		    ((wf_b[4] || wf_x[4] || wf_u[4] || wf_u2[4]) && !(e2_v || wb_v))) begin   // (the writer that left EX is in EX2)
 			$display("FAIL: AG writer flags b %b/%b x %b/%b u %b/%b u2 %b/%b (pc %h)",
 			         wf_b, mb, wf_x, mx, wf_u, mu, wf_u2, mu2, ag_u.pc);
 			$finish;
@@ -3188,7 +3273,8 @@ always_comb ilk_nk = sk_v ? ilk_sk : ilk_in;
 // valid, so it is the last AND -- and with DT's late decision rdy_dt
 // (the DMU's dc2r_n1/n0) picked last; both picks one LUT before the flop)
 wire kf       = flush || !nreset;
-wire wb_v_n   = !kf && (stall_wb  ? wb_v  : adv_ex);
+wire wb_v_n   = !kf && (stall_wb  ? wb_v  : adv_e2);
+wire e2_v_n   = !kf && (stall_e2  ? e2_v  : adv_ex);
 wire ex_v_n   = !kf && (stall_ex  ? ex_v  : adv_dc2);
 wire dc2_v_n  = !kf && (stall_dc2 ? dc2_v : adv_dt);
 wire dt_v_n   = !kf && (stall_dt  ? dt_v  : adv_dc1);
@@ -3199,9 +3285,9 @@ wire ag_v_n   = !kf && (stall_ag  ? ag_v  : (ain_v && !stopped && !halted));
 // fault (the clears last, as in the block)
 wire stv_clr  = !(wb_v && wb_st && dm_st_rdy && dm_st_fault && wb_exc == 8'd0) &&
                 !(wb_v && wb_mt && mt_done && wb_u.cond == 4'd5 && mt_fault && wb_exc == 8'd0);
-wire stv_in   = (ex_u.mem == M_ST || ex_u.mem == M_RMW) && !ex_stkill;
-wire wb_stv_n1 = (adv_ex ? stv_in : wb_stv) && stv_clr;
-wire wb_stv_n0 = (adv_ex ? 1'b0   : wb_stv) && stv_clr;
+wire stv_in   = e2_st;
+wire wb_stv_n1 = (adv_e2 ? stv_in : wb_stv) && stv_clr;
+wire wb_stv_n0 = (adv_e2 ? 1'b0   : wb_stv) && stv_clr;
 wire dc2_mx_n = adv_dt ? ((dt_u.mem != M_NONE) && (dt_u.exc == 8'd0)) : dc2_mx;
 wire ex_fpw_n = adv_dc2 ? ((dc2_u.op == OP_FPU) && !((dc2_u.mem != M_NONE) && dm_fault) && (dc2_u.exc == 8'd0))
                         : ex_fpw;
@@ -3223,8 +3309,8 @@ wire exho_n1  = exh_nk || (ex_v_n && ex_fpw_n);
 // nets below, one LUT from flip-flops)
 // (wbs: the DMU's terms with WB's store valid taken as wbs -- wb_stv is a
 // register here, so it is the first select, not a long wire there and back)
-function automatic logic [5:0] stalls6(input logic ok, input logic fph, input logic wbs, input logic irq);
-	logic wbh, stv, dc2r, exho, stok, h1k, swb, sex, sdc2, sdt, sdc1, sag;
+function automatic logic [6:0] stalls6(input logic ok, input logic fph, input logic wbs, input logic irq);
+	logic wbh, stv, dc2r, exho, stok, h1k, swb, se2, sex, sdc2, sdt, sdc1, sag;
 	wbh  = ok ? (irq ? wbh_n11 : wbh_n10) : (irq ? wbh_n01 : wbh_n00);
 	stv  = ok ? wb_stv_n1 : wb_stv_n0;
 	dc2r = dm_dc2r_n1;
@@ -3232,12 +3318,13 @@ function automatic logic [5:0] stalls6(input logic ok, input logic fph, input lo
 	stok = wbs ? dm_st_ok_n1 : dm_st_ok_n0;
 	h1k  = wbs ? dm_hold1_nk1 : dm_hold1_nk0;
 	swb  = wb_v_n  && (wbh || (stv && !stok));
-	sex  = ex_v_n  && (exho || swb);
+	se2  = e2_v_n  && swb;
+	sex  = ex_v_n  && (exho || se2);
 	sdc2 = dc2_v_n && ((dc2_mx_n && !dc2r) || sex);
 	sdt  = dt_v_n  && (sdc2 || dm_hold_dt_n);
 	sdc1 = dc1_v_n && (sdt  || h1k);
 	sag  = ag_v_n  && sdc1;                 // (AG's interlock ORed in last, below)
-	stalls6 = {swb, sex, sdc2, sdt, sdc1, sag};
+	stalls6 = {swb, se2, sex, sdc2, sdt, sdc1, sag};
 endfunction
 // (AG's interlock next, formed from the incoming uop's register numbers
 // against the stages' -- five levels on its own -- is the last OR of
@@ -3251,15 +3338,15 @@ endfunction
 wire wbs_sel = wb_v && wb_stv && dm_wbst_r;
 // ([ok][fph][irq]; the picks from the earliest select inward: the
 // interrupt pending next, EX's decision, the FPU hold last)
-wire [5:0] st_c000 = stalls6(1'b0, 1'b0, wbs_sel, 1'b0), st_c001 = stalls6(1'b0, 1'b0, wbs_sel, 1'b1);
-wire [5:0] st_c100 = stalls6(1'b1, 1'b0, wbs_sel, 1'b0), st_c101 = stalls6(1'b1, 1'b0, wbs_sel, 1'b1);
-wire [5:0] st_c010 = stalls6(1'b0, 1'b1, wbs_sel, 1'b0), st_c011 = stalls6(1'b0, 1'b1, wbs_sel, 1'b1);
-wire [5:0] st_c110 = stalls6(1'b1, 1'b1, wbs_sel, 1'b0), st_c111 = stalls6(1'b1, 1'b1, wbs_sel, 1'b1);
-wire [5:0] st_c00 = ex_irqn ? st_c001 : st_c000;
-wire [5:0] st_c10 = ex_irqn ? st_c101 : st_c100;
-wire [5:0] st_c01 = ex_irqn ? st_c011 : st_c010;
-wire [5:0] st_c11 = ex_irqn ? st_c111 : st_c110;
-logic stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q, stall_dc1_q, stall_ag_q;
+wire [6:0] st_c000 = stalls6(1'b0, 1'b0, wbs_sel, 1'b0), st_c001 = stalls6(1'b0, 1'b0, wbs_sel, 1'b1);
+wire [6:0] st_c100 = stalls6(1'b1, 1'b0, wbs_sel, 1'b0), st_c101 = stalls6(1'b1, 1'b0, wbs_sel, 1'b1);
+wire [6:0] st_c010 = stalls6(1'b0, 1'b1, wbs_sel, 1'b0), st_c011 = stalls6(1'b0, 1'b1, wbs_sel, 1'b1);
+wire [6:0] st_c110 = stalls6(1'b1, 1'b1, wbs_sel, 1'b0), st_c111 = stalls6(1'b1, 1'b1, wbs_sel, 1'b1);
+wire [6:0] st_c00 = ex_irqn ? st_c001 : st_c000;
+wire [6:0] st_c10 = ex_irqn ? st_c101 : st_c100;
+wire [6:0] st_c01 = ex_irqn ? st_c011 : st_c010;
+wire [6:0] st_c11 = ex_irqn ? st_c111 : st_c110;
+logic stall_wb_q, stall_e2_q, stall_ex_q, stall_dc2_q, stall_dt_q, stall_dc1_q, stall_ag_q;
 // (DC1's hold for a lookup made stale by a write landing in its set: AG's
 // address -- its adder's, late -- compared with the write's set, the last
 // OR of DC1's and AG's stall registers)
@@ -3267,13 +3354,13 @@ wire dwm_h = dm_req && dm_dwm_v && (dm_dwm_set == ag_maddr[10:4]);
 // (the FPU hold next, the latest select, is the one LUT before every
 // flip-flop: DC1's and AG's other terms are ORed into both its candidates)
 always_ff @(posedge clk) begin
-	logic [5:0] st0, st1;
+	logic [6:0] st0, st1;
 	logic dc1_o, ag_o;
 	st0   = ex_okn ? st_c10 : st_c00;
 	st1   = ex_okn ? st_c11 : st_c01;
 	dc1_o = dc1_v_n && dwm_h;
 	ag_o  = (sk_v ? sag_sk : sag_in) || (ag_v_n && dc1_v_n && dwm_h);
-	{stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q} <= {4{!kill_now}} & (fph_n ? st1[5:2] : st0[5:2]);
+	{stall_wb_q, stall_e2_q, stall_ex_q, stall_dc2_q, stall_dt_q} <= {5{!kill_now}} & (fph_n ? st1[6:2] : st0[6:2]);
 	stall_dc1_q <= fph_n ? (!kill_now && (st1[1] || dc1_o)) : (!kill_now && (st0[1] || dc1_o));
 	stall_ag_q  <= fph_n ? (!kill_now && (st1[0] || ag_o))  : (!kill_now && (st0[0] || ag_o));
 end
@@ -3281,6 +3368,7 @@ end
 // not ready (its registered "ready" from the DMU), one LUT from flip-flops
 wire dc2h_c = dc2_v && dc2_mx && !dm_dc2_rdy_b;
 assign stall_wb  = stall_wb_q;
+assign stall_e2  = stall_e2_q;
 assign stall_ex  = stall_ex_q;
 assign stall_dc2 = stall_dc2_q || dc2h_c;
 assign stall_dt  = stall_dt_q  || (dt_v && dc2h_c);
@@ -3300,11 +3388,11 @@ always_ff @(posedge clk) begin
 		$display("FAIL: AG's interlock next value %b, the register %b", ilk_nq, ilk_q);
 		$finish;
 	end
-	if (nreset && (stall_wb !== c_wb || stall_ex !== c_ex ||
+	if (nreset && (stall_wb !== c_wb || stall_e2 !== c_e2 || stall_ex !== c_ex ||
 	               (c_dc2 && !stall_dc2) || (c_dt && !stall_dt) || (c_dc1 && !stall_dc1) || (c_ag && !stall_ag) ||
 	               (!cons && (stall_dc2 !== c_dc2 || stall_dt !== c_dt || stall_dc1 !== c_dc1 || stall_ag !== c_ag)))) begin
-		$display("FAIL: the registered stalls %b%b%b%b%b%b (wb ex dc2 dt dc1 ag), the chain %b%b%b%b%b%b, conservative %b",
-		         stall_wb, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag, c_wb, c_ex, c_dc2, c_dt, c_dc1, c_ag, cons);
+		$display("FAIL: the registered stalls %b%b%b%b%b%b%b (wb e2 ex dc2 dt dc1 ag), the chain %b%b%b%b%b%b%b, conservative %b",
+		         stall_wb, stall_e2, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag, c_wb, c_e2, c_ex, c_dc2, c_dt, c_dc1, c_ag, cons);
 		$finish;
 	end
 end
