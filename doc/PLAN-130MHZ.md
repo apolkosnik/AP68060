@@ -1,0 +1,196 @@
+# Re-pipelining the core for 130 MHz
+
+Goal (2026-10-31): the core passing the regression and the corpus with
+Fmax 130 MHz (PERIOD = 7.692 ns, `PERIOD=7.692 syn/fitcore.sh f130_x`),
+no multicycle or false-path exceptions, no seed sweeps.  Area may grow.
+
+## 1. The budget
+
+What the 120 MHz work measured on this device: a path of 4-5 LUT levels
+with ~1 ns of wire needs 8.6-9.6 ns register to register (the 8.333 ns
+fits fail by 0.3-1.3 ns on exactly those); the clock skew between a
+launch and a latch in different placement regions costs up to 0.5 ns.
+At 7.692 ns the budget is therefore **3 LUT levels on any path that
+crosses a module boundary or fans out widely, 4 levels inside a block**,
+with a register at every module boundary that carries a decision.
+
+The 120 MHz branch reached that shape locally (every stall a register,
+every select registered a clock ahead, every late decision the last
+pick).  What remains is structural: whole stages whose work is 5-6 levels
+deep even when perfectly arranged.  Those stages are split.
+
+## 2. The pipeline today
+
+```
+fetch   F0 (set read, BTB read)  F1 (translate, tag compare, BTB take)  F2 (words)
+decode  D1a (parse from the queue)  D1b (record, predictions)  -> 4-entry FIFO
+useq    D2a (ROM address)  D2b (uop from the word)  D2c (uop from the state) -> 2-word queue
+backend SKID  AG (file read, forward, EA add)  DC1  DT  DC2  EX  WB
+dmu     DC1 (ATC, tag read)  DT (compare, fast decision)  DC2 (way, align)  WB (fast store)
+        + the engine: a 54-state machine owning the slow paths
+fpu     a sequential state machine at the EX stage (the P1-P6 pipeline is PIPE=0 here)
+```
+
+## 3. The stage map for 130 MHz
+
+Each item names the deep work it removes from one clock and what it
+costs in cycles.  The order is the order of work.
+
+### 3.1 EX split: EX1 (result) / EX2 (flags, condition, exception)
+
+Today EX forms the ALU result, its flags, the condition (alu_cc), the
+exception-pending flag ex_xnz = f(alu_cc, md_z, fp_xvec), the Bcc/DBcc
+early redirect, and feeds the stall registers' last pick (ex_okn) and
+the operand captures of four younger stages -- the widest fan-out in
+the design after the kill.
+
+- EX1: operands -> ALU sum / logic / shifter result, registered
+  (alu_res, alu_sum, the one-hot result case).  Its broadcast to the
+  captures stays where it is (one clock late, exw_q) and so gets a
+  whole clock of wire.
+- EX2: flags from the registered sum and operands (N/Z/V/C/X), alu_cc,
+  ex_xnz, the trap and CHK decisions, the early redirect.  WB's decision
+  (xgo) reads EX2's registers as it reads EX's now.
+- CCR dependence: a uop in EX1 that reads X or the CCR (ADDX/SUBX/NEGX,
+  Scc, DBcc, Bcc, ABCD, the shifts' X) while EX2 holds a CCR writer
+  takes EX2's flags through one forward mux (the flags are EX2's output
+  register, one LUT), no interlock.
+- Cost: branch resolution one clock later (mispredict +1), one more
+  stage of the ~410-bit uop (narrow it first: 3.7).
+
+### 3.2 AG split: AG1 (operands) / AG2 (address)
+
+Today the file read happens as the uop enters AG (ports addressed from
+the sequencer's queue), and AG itself scales the index, picks the
+captured/forwarded value, and adds three operands; the capture
+AND-OR into agb_q/agx_q from DC2's load data and EX's broadcast is the
+8.333 ns fits' worst family (sk_v -> the file's address register,
+alv_q -> agb_q, m2.x.way -> agx_q).
+
+- AG1: the file read's result, the forward from EX's broadcast and
+  from DC2's handed-over load, the index sign extension and scale, the
+  interlock compares -- all into registers.  The skid merges into AG1
+  (AG1 is the skid: it holds when AG2 does).
+- AG2: add3 only, into dm_va and the register updates.
+- Cost: load-use for an address register +1 clock (today a load's data
+  reaches AG the clock after DC2 through the capture; with AG1 it still
+  does, into AG1's registers, then AG2 adds); the measured cost of
+  removing the DC2 capture outright was 2.1 % Dhrystone -- this keeps the
+  capture, so less.
+
+### 3.3 DT split: the fast decision a clock later
+
+DT compares the tag chunks (now formed in DC1) against four ATC ways'
+pages, picks the way, forms rdy_dt (the fast-path decision: 7 terms
+from the compare, the dirty-way mask, the engine's state) and feeds DC2's
+stall register the same clock (dc2h_c corrects it combinationally).
+
+- DT1: the compare and the way one-hot, registered (today's chunk ANDs
+  end in a register).
+- DT2: rdy_dt from DT1's registers alone; DC2 becomes a stage that always
+  takes the access and holds it when DT2 says not ready (the "assume
+  ready, correct later" structure exists already as dc2h_c; it becomes a
+  plain register).  A load's data path gains a clock (DC2's way select
+  from a registered one-hot: one LUT level less in DC2 as well).
+- Cost: load latency +1 (the handed-over capture 3.2 absorbs one of them
+  for address operands).
+
+### 3.4 The DMU's engine in two-process form with a one-hot state
+
+The engine's 54 states decide from the lookup records, the valid/dirty
+RAMs and the walker (e_x.way from the tag RAM's write register, tw_use
+-> e_x.pa, the kill into the walker's registers).  At 8.333 ns the
+engine is the second cluster and the placement-sensitive one.
+
+- One always_comb for next state and the per-state actions as one-hot
+  flags, every action decided from registers of the state before it
+  (the 120 MHz work did this for E_S_ACT's victim, E_M_PLW's loads, the
+  stolen lookup's translation; it becomes the rule).
+- The lookups the engine steals from DC1 take their address from a
+  register (st_la is one already) and return through DT1's registers:
+  one clock more per engine lookup.
+- Cost: cache misses, table walks, pushes each a few clocks longer
+  (invisible in Dhrystone, ~1 % Whetstone at most).
+
+### 3.5 WB: the commit decision ahead of its effects
+
+WB decides x_go, the redirect, the SR/CCR update and the store's
+acceptance in one clock from EX's registered state, and the decision
+reaches the whole core (flush, fe_flush, the file's front-valid drop,
+the DMU's kill).  At 130 MHz the fan-out alone is a clock.
+
+- WB1: the decision registers (x_go, wb_redir, kill) formed from EX2's
+  registers; WB2: their effects.  The kill is then a register seen by
+  every stage one clock later; stages advance one more uop into the
+  shadow of a redirect and drop it (the DMU already tolerates a killed
+  record: it marks and drains).
+- Cost: mispredict and exception entry +1 clock.
+
+### 3.6 Fetch and decode
+
+- The queue's consume loop (dec.r_use_f -> fetch.qw): D1a's take as a
+  registered one-hot formed a clock ahead from the queue count's next
+  value (the pattern of the uop queue's hd_nu/hd_ue).
+- F0's next address from the BTB's take (btb0 write register -> fpc):
+  the BTB's compare into a register (F1 takes a clock later: one more
+  bubble on a BTB hit, or the BTB predicts F0's next line from the
+  line before, as the 060 does).
+- D1a's length and fault decisions for the multi-part path: left as
+  they are unless the fit names them.
+
+### 3.7 The uop and the register files
+
+- Narrow the uop per stage (the fields each stage reads are known: AG
+  reads base/idx/disp/upd*, EX a_src/b_src/op/sz/cond, WB d_reg/exc/
+  br/target): fewer registers to add per new stage and a shorter fan-out
+  from the sequencer.
+- The register files' address registers (rdaddr_reg) take their picks
+  from the sequencer's queue state; with AG1 the picks are registers
+  formed a clock ahead with no late select (ag_ld, sk_ld disappear:
+  AG1 takes whenever AG2 advances).
+
+### 3.8 FPU
+
+The FPU is a sequential state machine whose steps were split for
+120 MHz; the 7.692 ns fit will say which steps (the 64-bit normalizer,
+the rounding, the 32x32 partial products) need one more register.  The
+P1-P6 arithmetic pipeline (PIPE) stays off.
+
+## 4. Verification per step
+
+Every step: the regression (tb/run_tests.sh, 393 PASS), the corpus
+smoke (tb/run_cputest.py without --full), the benchmarks (tb/run_bench.sh:
+Dhrystone cycles/iteration, Whetstone cycles/loop, recorded per step so
+the cycle cost of each split is known), and a fit at PERIOD=7.692 judged
+by the failing-endpoint histogram and syn/paths_by_module.py, not by Fmax
+alone (fit-to-fit noise is ~300 ns TNS on near-identical netlists).  The
+full corpus at the end of each section of 3.
+
+## 5. Baseline
+
+f130_a, HEAD dff41b3 at PERIOD=7.692: Fmax 95.51 MHz, slack -2.778 ns,
+TNS -1,747 ns, 3,793 failing endpoints (16 below -2 ns, 343 in -2..-1,
+3,434 in -1..0), 25,584 ALMs.
+
+By module pair (TNS, endpoints, worst): backend internal -689 / 1,375 /
+-2.40; DMU internal -318 / 696 / -2.78; fetch internal -157 / 312; snoop
+internal -127 / 169; decode -> fetch -118 / 231 (the queue's consume
+loop); useq -> backend -108 / 277 (the head's base/index through the
+file into AG's captures); backend -> DMU -53 / 221; DMU -> BIU -52 / 94.
+
+The largest destination families: fetch.qw -147 ns / 283 endpoints (the
+queue words), snoop.fq -68 / 90, AG's agb_q/agx_q -109 / 91 (worst
+-1.84: useq.hd.base -> the file -> the capture), EX's operand registers
+ex_av/ex_bv and the slow ALU's xs_q.res -92 / 129 (ex_u.op and ex_u.cond
+decoding into the operand picks: -1.83), WB's registers (wb_redir_pc,
+wb_st_data, wb_exc_pc, wb_exc_addr, wb_res, wb_ccr) -138 / 180, the
+stall registers' worst paths from ex_u.op (-2.40 into stall_ag_q), the
+tag RAM's write register into the snoop phase and e_x.hit/way (-2.78,
+the read-during-write bypass compare), the DMU's dw_word / m2.x1.pa /
+tw_va / e_acc / pv_line (each -20..-30), the BIU's data output (-29).
+
+So the 3.1 EX split comes first (ex_u.op/cond decode into the operand
+picks, the result into WB's registers and the stall registers), then the
+3.2 AG split (the useq -> file -> capture family), the fetch queue's
+consume loop (3.6, the single largest destination), the tag RAM bypass
+compare into the snoop phase and the engine (3.4).
