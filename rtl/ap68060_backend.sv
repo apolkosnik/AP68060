@@ -96,7 +96,6 @@ module ap68060_backend
 	input  logic        dm_hold1_b, dm_hold_dt_b, dm_dc2_rdy_b, dm_st_ok_b,   // the four holds' twins, for the stall chain alone
 	input  logic        dm_hold1_n, dm_dc2r_n, dm_st_ok_n, dm_hold_dt_n,   // ... and their next values (dc2r conservative), for the registered stalls
 	input  logic        dm_hold1_nk, dm_dc2r_n1, dm_dc2r_n0, dm_rdy_dt,   // hold1_n without the kill; dc2r_n for DT's late decision 1 / 0
-	input  logic        dm_hold1_nk0, dm_hold1_nk1, dm_st_ok_n0, dm_st_ok_n1, dm_sf_late,   // ... and for the snooper's late request 0 / 1
 	input  logic        dm_hold1_c,     // ... as its state gives it now (checks)
 	input  logic        dm_hold_dt,     // ... and DT (a register)
 	// WB maintenance (CINV/CPUSH/PFLUSH/PTEST) in the DMU
@@ -255,6 +254,7 @@ logic wb_ok;                  // WB's uop has no exception (wb_exc == 0), regist
 // the blocks that form them
 logic wbh_n, exh_n, safe_n, ilk_n;
 logic exh_nk, safe_nk, ilk_nk;
+logic wbh_n0, wbh_n1, ex_okn;        // WB's hold next with EX's exception decision (ex_okn) taken as 0 / 1
 logic  [2:0] ex_kx;           // EX's uop is FPU, DIV, TRAPcc (registered as it enters)
 wire wb_fpchk = wb_v && !wb_u.last && wb_ok &&
                 (wb_u.mem == M_NONE || wb_u.mem == M_LD) &&
@@ -1941,7 +1941,7 @@ assign wb_hold = wb_v && (halted || (!wb_is_exc &&
 // known early -- the interrupt level, the store buffer draining, RSTO --
 // taken at its worst (a clock longer at most)
 always_comb begin
-	logic       irq_n, tr_n, hlt_n, ok_new, x_new, h_new, ok_stay, x_stay, h_stay;
+	logic       irq_n, tr_n, hlt_n, ok_new, x_new, h_new, ok_stay, x_stay, h_stay, h_new0, h_new1;
 	// an interrupt pending next cycle
 	irq_n  = irq_pend_n;
 	tr_n   = sr_r[15] || (wb_v && wb_sr_we && wb_sr_new[15]);
@@ -1952,6 +1952,11 @@ always_comb begin
 	         ex_sr_we;
 	h_new  = hlt_n || (ok_new && x_new) ||
 	         (sb_ne_n && (!ok_new || ex_u.ser || (ex_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
+	// (the same with EX's exception decision ok_new taken as 0 and 1: the
+	// stall registers pick by it last)
+	h_new0 = hlt_n || (sb_ne_n && (1'b1 || ex_u.ser || (ex_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
+	h_new1 = hlt_n || x_new || (sb_ne_n && (ex_u.ser || (ex_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
+	ex_okn = ok_new;
 	// staying: a store's or a PLPA's fault becomes its exception; RESET
 	// until RSTO is done, maintenance until the DMU is (an SR write's clock
 	// has passed)
@@ -1961,6 +1966,8 @@ always_comb begin
 	h_stay  = hlt_n || (ok_stay && x_stay) ||
 	          (sb_ne_n && (!ok_stay || wb_u.ser || (wb_u.last && (irq_n || tr_n || (xstk && xr_dbl)))));
 	wbh_n = nreset && (adv_ex ? h_new : h_stay);
+	wbh_n0 = nreset && (adv_ex ? h_new0 : h_stay);
+	wbh_n1 = nreset && (adv_ex ? h_new1 : h_stay);
 end
 always_ff @(posedge clk) wbh_q <= wbh_n;
 // irq_pend's registers as they will be (the main block's ipl_q, nmi_edge,
@@ -3119,13 +3126,14 @@ wire dc2_v_n  = !kf && (stall_dc2 ? dc2_v : adv_dt);
 wire dt_v_n   = !kf && (stall_dt  ? dt_v  : adv_dc1);
 wire dc1_v_n  = !kf && (stall_dc1 ? dc1_v : adv_ag);
 wire ag_v_n   = !kf && (stall_ag  ? ag_v  : (ain_v && !stopped && !halted));
-// WB's store valid as it will be: loaded as the uop enters, cleared by a
-// store's or a PLPA's fault (the clears last, as in the block)
-wire wb_stv_n = (adv_ex ? ((ex_u.mem == M_ST || ex_u.mem == M_RMW) && !ex_stkill &&
-                           ex_xok && !ex_fault && !ex_xnz && !ex_odd)
-                        : wb_stv) &&
-                !(wb_v && wb_st && dm_st_rdy && dm_st_fault && wb_exc == 8'd0) &&
+// WB's store valid as it will be: loaded as the uop enters (with EX's
+// exception decision taken as 0 / 1), cleared by a store's or a PLPA's
+// fault (the clears last, as in the block)
+wire stv_clr  = !(wb_v && wb_st && dm_st_rdy && dm_st_fault && wb_exc == 8'd0) &&
                 !(wb_v && wb_mt && mt_done && wb_u.cond == 4'd5 && mt_fault && wb_exc == 8'd0);
+wire stv_in   = (ex_u.mem == M_ST || ex_u.mem == M_RMW) && !ex_stkill;
+wire wb_stv_n1 = (adv_ex ? stv_in : wb_stv) && stv_clr;
+wire wb_stv_n0 = (adv_ex ? 1'b0   : wb_stv) && stv_clr;
 wire dc2_mx_n = adv_dt ? ((dt_u.mem != M_NONE) && (dt_u.exc == 8'd0)) : dc2_mx;
 wire ex_fpw_n = adv_dc2 ? ((dc2_u.op == OP_FPU) && !((dc2_u.mem != M_NONE) && dm_fault) && (dc2_u.exc == 8'd0))
                         : ex_fpw;
@@ -3133,37 +3141,31 @@ wire hs_n     = (ex_v && !adv_ex) ? fp_hs0 : fp_hs1;
 wire ns_n     = (ex_v && !adv_ex) ? fp_ns0 : fp_ns1;
 wire fph_n    = ex_v_n && (hs_n || (!safe_nk && !ns_n));
 wire exho_n   = exh_nk || (ex_v_n && ex_fpw_n && fph_n);
-wire dc2h_n1  = dc2_v_n && dc2_mx_n && !dm_dc2r_n1;
-wire dc2h_n0  = dc2_v_n && dc2_mx_n && !dm_dc2r_n0;
-// the candidates: [s] the snooper's late request taken as s, [r] DT's
-// late decision taken as r; kept as nets, so the two picks are the one
-// LUT before each flip-flop
-(* keep *) wire [1:0] swb_c, sex_c;
-(* keep *) wire [1:0] sdc2_c [2], sdt_c [2], sdc1_c [2], sag_c [2];
-genvar gs;
-generate
-	for (gs = 0; gs < 2; gs++) begin : g_s
-		wire stok = gs ? dm_st_ok_n1 : dm_st_ok_n0;
-		wire h1k  = gs ? dm_hold1_nk1 : dm_hold1_nk0;
-		assign swb_c[gs] = wb_v_n && (wbh_n || (wb_stv_n && !stok));
-		assign sex_c[gs] = ex_v_n && (exho_n || swb_c[gs]);
-		assign sdc2_c[gs][1] = dc2_v_n && (dc2h_n1 || sex_c[gs]);
-		assign sdc2_c[gs][0] = dc2_v_n && (dc2h_n0 || sex_c[gs]);
-		assign sdt_c[gs][1]  = dt_v_n  && (sdc2_c[gs][1] || dm_hold_dt_n);
-		assign sdt_c[gs][0]  = dt_v_n  && (sdc2_c[gs][0] || dm_hold_dt_n);
-		assign sdc1_c[gs][1] = dc1_v_n && (sdt_c[gs][1]  || h1k);
-		assign sdc1_c[gs][0] = dc1_v_n && (sdt_c[gs][0]  || h1k);
-		assign sag_c[gs][1]  = ag_v_n  && (ilk_nk || sdc1_c[gs][1]);
-		assign sag_c[gs][0]  = ag_v_n  && (ilk_nk || sdc1_c[gs][0]);
-	end
-endgenerate
+// the six stalls' next values as one flat function each, for EX's
+// exception decision (ok) and DT's fast/simple-store decision (rdy) taken
+// as 0/1: four candidates, kept as nets, the two late picks and the kill
+// the LUT before the flip-flops
+function automatic logic [5:0] stalls6(input logic ok, input logic rdy);
+	logic wbh, stv, dc2r, swb, sex, sdc2, sdt, sdc1, sag;
+	wbh  = ok ? wbh_n1 : wbh_n0;
+	stv  = ok ? wb_stv_n1 : wb_stv_n0;
+	dc2r = rdy ? dm_dc2r_n1 : dm_dc2r_n0;
+	swb  = wb_v_n  && (wbh || (stv && !dm_st_ok_n));
+	sex  = ex_v_n  && (exho_n || swb);
+	sdc2 = dc2_v_n && ((dc2_mx_n && !dc2r) || sex);
+	sdt  = dt_v_n  && (sdc2 || dm_hold_dt_n);
+	sdc1 = dc1_v_n && (sdt  || dm_hold1_nk);
+	sag  = ag_v_n  && (ilk_nk || sdc1);
+	stalls6 = {swb, sex, sdc2, sdt, sdc1, sag};
+endfunction
+(* keep *) wire [5:0] st_c00 = stalls6(1'b0, 1'b0);
+(* keep *) wire [5:0] st_c01 = stalls6(1'b0, 1'b1);
+(* keep *) wire [5:0] st_c10 = stalls6(1'b1, 1'b0);
+(* keep *) wire [5:0] st_c11 = stalls6(1'b1, 1'b1);
 always_ff @(posedge clk) begin
-	stall_wb  <= !kill_now && swb_c[dm_sf_late];
-	stall_ex  <= !kill_now && sex_c[dm_sf_late];
-	stall_dc2 <= !kill_now && sdc2_c[dm_sf_late][dm_rdy_dt];
-	stall_dt  <= !kill_now && sdt_c[dm_sf_late][dm_rdy_dt];
-	stall_dc1 <= !kill_now && sdc1_c[dm_sf_late][dm_rdy_dt];
-	stall_ag  <= !kill_now && sag_c[dm_sf_late][dm_rdy_dt];
+	logic [5:0] st;
+	st = ex_okn ? (dm_rdy_dt ? st_c11 : st_c10) : (dm_rdy_dt ? st_c01 : st_c00);
+	{stall_wb, stall_ex, stall_dc2, stall_dt, stall_dc1, stall_ag} <= {6{!kill_now}} & st;
 end
 // synthesis translate_off
 // the registered stalls against the chain: equal, but for a DMU "not

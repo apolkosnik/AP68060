@@ -221,6 +221,7 @@ logic [31:0] sn_wword;
 logic [15:0] sn_wbe;
 logic        sn_ic, sn_ic_all, sn_ic_done, sn_ihit;
 logic        sf_req, sf_more, sf_ack, dt_we, dv_we, dv_lv, pq0_v, pq1_v;
+logic        sf_may;
 logic  [6:0] sf_set, dt_set, dv_set;
 logic  [1:0] sf_way, dt_way;
 logic [20:0] dt_tag;
@@ -233,7 +234,7 @@ ap68060_snoop snoop (
 	.a_i(a_i), .ts_n_i(ts_n_i), .tt_i(tt_i), .snoop_n(snoop_n),
 	.dc_req(sn_req), .dc_pa(sn_pa), .dc_look(sn_look), .dc_hit(sn_hit),
 	.dc_inv(sn_inv), .dc_ovf(sn_ovf), .busy(sn_busy),
-	.sf_req(sf_req), .sf_set(sf_set), .sf_way(sf_way), .sf_more(sf_more), .sf_ack(sf_ack),
+	.sf_req(sf_req), .sf_may(sf_may), .sf_set(sf_set), .sf_way(sf_way), .sf_more(sf_more), .sf_ack(sf_ack),
 	.dt_we(dt_we), .dt_set(dt_set), .dt_way(dt_way), .dt_tag(dt_tag),
 	.dv_we(dv_we), .dv_set(dv_set), .dv_wm(dv_wm), .dv_lv(dv_lv),
 	.pq0_v(pq0_v), .pq0_l(pq0_l), .pq1_v(pq1_v), .pq1_l(pq1_l),
@@ -273,7 +274,6 @@ logic        dm_req, adv_dc1, adv_dt, adv_dc2, adv_ex, adv_wb, dm_hold_dt;
 logic        dm_hold_dt_b, dm_hold1_b, dm_dc2_rdy_b, dm_st_ok_b;   // the DMU holds' twins for the stall chain
 logic        dm_hold1_n, dm_dc2r_n, dm_st_ok_n, dm_hold_dt_n;   // ... and their next values, for the registered stalls
 logic        dm_hold1_nk, dm_dc2r_n1, dm_dc2r_n0, dm_rdy_dt;
-logic        dm_hold1_nk0, dm_hold1_nk1, dm_st_ok_n0, dm_st_ok_n1, dm_sf_late;
 logic [31:0] dm_va;
 logic  [1:0] dm_mem, dm_msz;
 logic  [2:0] dm_fc;
@@ -322,7 +322,6 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.dm_hold_dt_b(dm_hold_dt_b), .dm_hold1_b(dm_hold1_b), .dm_dc2_rdy_b(dm_dc2_rdy_b), .dm_st_ok_b(dm_st_ok_b),
 	.dm_hold1_n(dm_hold1_n), .dm_dc2r_n(dm_dc2r_n), .dm_st_ok_n(dm_st_ok_n), .dm_hold_dt_n(dm_hold_dt_n),
 	.dm_hold1_nk(dm_hold1_nk), .dm_dc2r_n1(dm_dc2r_n1), .dm_dc2r_n0(dm_dc2r_n0), .dm_rdy_dt(dm_rdy_dt),
-	.dm_hold1_nk0(dm_hold1_nk0), .dm_hold1_nk1(dm_hold1_nk1), .dm_st_ok_n0(dm_st_ok_n0), .dm_st_ok_n1(dm_st_ok_n1), .dm_sf_late(dm_sf_late),
 	.mt_caches(mt_caches), .mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng),
 	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
 	.dm_st_faddr(dm_st_faddr),
@@ -345,7 +344,6 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.hold_dt_b(dm_hold_dt_b), .hold1_b(dm_hold1_b), .dc2_rdy_b(dm_dc2_rdy_b), .st_ok_b(dm_st_ok_b),
 	.hold1_n(dm_hold1_n), .dc2r_n(dm_dc2r_n), .st_ok_n(dm_st_ok_n), .hold_dt_n(dm_hold_dt_n),
 	.hold1_nk(dm_hold1_nk), .dc2r_n1(dm_dc2r_n1), .dc2r_n0(dm_dc2r_n0), .rdy_dt(dm_rdy_dt),
-	.hold1_nk0(dm_hold1_nk0), .hold1_nk1(dm_hold1_nk1), .st_ok_n0(dm_st_ok_n0), .st_ok_n1(dm_st_ok_n1), .sf_late(dm_sf_late),
 	.dc2_rdy(dm_dc2_rdy), .dc2_rdy_c(dm_dc2_rdy_c), .ldata(dm_ldata), .ldata_al(dm_ldata_al), .ldata_alv(dm_ldata_alv), .fault(dm_fault), .fvec(dm_fvec),
 	.faddr(dm_faddr), .fslw(dm_fslw),
 	.st_v(dm_st_v), .st_data(dm_st_data), .st_rdy(dm_st_rdy), .st_ok(dm_st_ok),
@@ -375,7 +373,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.sn_req(sn_req), .sn_pa(sn_pa), .sn_look(sn_look), .sn_hit(sn_hit),
 	.sn_dirty(sn_dirty), .sn_line(sn_line), .sn_inv(sn_inv), .sn_act(sn_act), .sn_wr(sn_wr),
 	.sn_wbe(sn_wbe), .sn_wword(sn_wword),
-	.sf_req(sf_req), .sf_set(sf_set), .sf_way(sf_way), .sf_more(sf_more), .sf_ack(sf_ack),
+	.sf_req(sf_req), .sf_may(sf_may), .sf_set(sf_set), .sf_way(sf_way), .sf_more(sf_more), .sf_ack(sf_ack),
 	.dt_we(dt_we), .dt_set(dt_set), .dt_way(dt_way), .dt_tag(dt_tag),
 	.dv_we(dv_we), .dv_set(dv_set), .dv_wm(dv_wm), .dv_lv(dv_lv),
 	.pq0_v(pq0_v), .pq0_l(pq0_l), .pq1_v(pq1_v), .pq1_l(pq1_l)

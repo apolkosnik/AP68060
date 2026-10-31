@@ -52,6 +52,7 @@ module ap68060_snoop
 	output logic        dc_ovf,         // (simulation) the queue overflowed
 	output logic        busy,           // invalidations still to be made
 	output logic        sf_req,         // a way to invalidate (fast)
+	output logic        sf_may,         // ... or may be, this clock (a lookup in progress): from registers
 	output logic  [6:0] sf_set,
 	output logic  [1:0] sf_way,
 	output logic        sf_more,        // ... and another one after it
@@ -205,6 +206,7 @@ end
 // (entries now: the queue's, and the registered hit; the head is the
 // queue's first, else the registered hit's set and way)
 assign sf_req  = (fn != 0) || sp_new || sp_ask;
+assign sf_may  = (fn != 0) || sp_new || sp_v;      // (sp_ask needs sp_v)
 assign sf_set  = (fn != 0) ? fq[0][8:2] : sb_l[6:0];
 assign sf_way  = (fn != 0) ? fq[0][1:0] : sb_way;
 assign sf_more = (fn > 1) || (fn == 1 && sp_new) || ((fn != 0 || sp_new) && sp_ask);

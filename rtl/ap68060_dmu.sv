@@ -93,7 +93,6 @@ module ap68060_dmu
 	output logic        hold_dt_b, hold1_b, dc2_rdy_b, st_ok_b,   // the back end's copies of the four holds (preserved twins)
 	output logic        hold1_n, dc2r_n, st_ok_n, hold_dt_n,     // ... and their next values (dc2r_n conservative), for its registered stalls
 	output logic        hold1_nk, dc2r_n1, dc2r_n0, rdy_dt,       // hold1_n without the kill; dc2r_n with DT's late decision rdy_dt taken as 1 / 0 (the back end picks last)
-	output logic        hold1_nk0, hold1_nk1, st_ok_n0, st_ok_n1, sf_late,   // ... and with the snooper's late request sf_late taken as 0 / 1
 	                                    // data read is stale
 	output logic        dc2_rdy,        // DC2's access is done: a register, conservative
 	output logic        dc2_rdy_c,      // ... as the stage's own state gives it (checks)
@@ -203,6 +202,7 @@ module ap68060_dmu
 	// and way, invalidated in one frozen clock (sf_ack), one per clock while
 	// sf_more says another follows
 	input  logic        sf_req,
+	input  logic        sf_may,         // ... or may: the DMU holds on it (conservative, from the snooper's registers)
 	input  logic  [6:0] sf_set,
 	input  logic  [1:0] sf_way,
 	input  logic        sf_more,
@@ -1387,12 +1387,14 @@ always_ff @(posedge clk) begin
 		logic       vf_lwe, vf_lv, vf_dwe, vf_dv, ve_lwe, ve_lv, ve_dwe, ve_dv;
 		logic       vs_lwe, vs_lv, vs_dwe, vs_dv;
 		logic [3:0] ve_inv;             // the engine's invalidation, by source (the records' hit clears)
+		logic [7:0] ve_site;            // the engine's valid/dirty write, by site (the scan's copy)
 		vp_set = '0; vp_wm = '0; vp_lwe = 1'b0; vp_lv = 1'b0;
 		vp_dwe = 1'b0; vp_dv = 1'b0;
 		vf_set = '0; vf_wm = '0; vf_lwe = 1'b0; vf_lv = 1'b0; vf_dwe = 1'b0; vf_dv = 1'b0;
 		ve_set = '0; ve_wm = '0; ve_lwe = 1'b0; ve_lv = 1'b0; ve_dwe = 1'b0; ve_dv = 1'b0;
 		vs_set = '0; vs_wm = '0; vs_lwe = 1'b0; vs_lv = 1'b0; vs_dwe = 1'b0; vs_dv = 1'b0;
 		ve_inv = 4'd0;
+		ve_site = 8'd0;
 		m1s_n = m1_stale; mts_n = mt_stale; m2ss_n = m2_ss;
 
 		//--------------------------------------------------------------
@@ -1833,6 +1835,7 @@ always_ff @(posedge clk) begin
 				if (e_x.hit && dc_en) begin
 					ve_set = e_va[10:4]; ve_wm[e_x.way] = 1'b1;
 					ve_lwe = 1'b1; ve_lv = 1'b0; ve_dwe = 1'b1; ve_dv = 1'b0;
+					ve_site[0] = 1'b1;
 					ve_inv[0] = 1'b1;
 					e_x.hit <= 1'b0;
 				end
@@ -2052,6 +2055,7 @@ always_ff @(posedge clk) begin
 				if (e_x.cm == 2'b01)
 					if (be != 16'd0) begin
 						ve_set = e_va[10:4]; ve_wm[e_x.way] = 1'b1; ve_dwe = 1'b1; ve_dv = 1'b1;
+						ve_site[1] = 1'b1;
 					end
 			end
 			if (wd_cb) begin
@@ -2172,6 +2176,7 @@ always_ff @(posedge clk) begin
 			// every line invalid, a set a cycle (CINVA; and after reset)
 			ve_set = clr_i; ve_wm = 4'hF;
 			ve_lwe = 1'b1; ve_lv = 1'b0;
+			ve_site[2] = 1'b1;
 			ve_inv[1] = 1'b1;
 			clr_i <= clr_i + 7'd1;
 			if (clr_i == 7'd127) begin
@@ -2304,6 +2309,7 @@ always_ff @(posedge clk) begin
 				if (m && !(mt_op == MT_CPUSH && dc_dpi)) begin
 					ve_set = s; ve_wm[w] = 1'b1;
 					ve_lwe = 1'b1; ve_lv = 1'b0; ve_dwe = 1'b1; ve_dv = 1'b0;
+					ve_site[3] = 1'b1;
 					ve_inv[2] = 1'b1;           // (s, w: ms_i)
 				end
 				if ((mt_scope == 2'd1 && w == 2'd3) || ms_i == 9'h1FF) e_st <= E_M_IC;
@@ -2366,6 +2372,7 @@ always_ff @(posedge clk) begin
 			end
 			ve_set = f_set; ve_wm[f_way] = 1'b1;
 			ve_lwe = 1'b1; ve_lv = 1'b0; ve_dwe = 1'b1; ve_dv = 1'b0;
+			ve_site[4] = 1'b1;
 			bo.line <= 1'b1; bo.rd <= 1'b1; bo.tt <= TT_NORMAL;
 			bo.tm <= m2.r.smode ? TM_SDATA : TM_UDATA;
 			bo.upa <= e_x.upa; bo.ci <= 1'b0; bo.lock <= 1'b0; bo.locke <= 1'b0;
@@ -2388,6 +2395,7 @@ always_ff @(posedge clk) begin
 				twd_b   <= f_tag;
 				ve_set = f_set; ve_wm[f_way] = 1'b1;
 				ve_lwe = 1'b1; ve_lv = 1'b1; ve_dwe = 1'b1; ve_dv = 1'b0;
+				ve_site[5] = 1'b1;
 				rrc <= rrc + 2'd1;
 			end
 			else if (pv_v) begin
@@ -2399,6 +2407,7 @@ always_ff @(posedge clk) begin
 				dw_src  <= 2'd2;
 				ve_set = f_set; ve_wm[f_way] = 1'b1;
 				ve_lwe = 1'b1; ve_lv = 1'b1; ve_dwe = 1'b1; ve_dv = pv_dirty;
+				ve_site[6] = 1'b1;
 				pv_v <= 1'b0;
 			end
 			if (bo_err && fill_late_ok) begin
@@ -2471,6 +2480,7 @@ always_ff @(posedge clk) begin
 			// invalidated, or (pv_keep) left valid and clean
 			ve_set = f_set; ve_wm[f_way] = 1'b1;
 			ve_lwe = 1'b1; ve_lv = pv_keep && fv_lv; ve_dwe = 1'b1; ve_dv = 1'b0;
+			ve_site[7] = 1'b1;
 			ve_inv[3] = !(pv_keep && fv_lv);
 		end
 		E_PUSHV_B: begin
@@ -2961,7 +2971,9 @@ always_ff @(posedge clk) begin
 			$finish;
 		end
 		// synthesis translate_on
-		dt_inv <= (iv_v && adv_dt && mt.a[10:4] == iv_set) ? iv_wm : 4'd0;
+		// (per invalidation source, from registers: hitc)
+		for (int j = 0; j < 4; j++)
+			dt_inv[j] <= adv_dt && hitc(mt.a[10:4], 2'(j), vs_lwe && !vs_lv, vs_set, vs_wm, ve_inv);
 		if (dt_inv[m2.x.way] && m2.x.hit) begin
 			if (!adv_dc2) begin
 				xres_t xm;
@@ -3056,11 +3068,19 @@ always_ff @(posedge clk) begin
 				// writes in a clock -- its set compared from registers, not
 				// after the port's select of the source)
 				if (vs_wm[j] && vs_lwe && vs_set == sc_set) sc_lv[j] <= vs_lv;
-				if (ve_wm[j] && ve_lwe && ve_set == sc_set) sc_lv[j] <= ve_lv;
 				if (vf_wm[j] && vf_lwe && vf_set == sc_set) sc_lv[j] <= vf_lv;
 				if (vs_wm[j] && vs_dwe && vs_set == sc_set) sc_ld[j] <= vs_dv;
-				if (ve_wm[j] && ve_dwe && ve_set == sc_set) sc_ld[j] <= ve_dv;
 				if (vf_wm[j] && vf_dwe && vf_set == sc_set) sc_ld[j] <= vf_dv;
+				// (the engine's write by site, each site's set and way from its
+				// own registers -- not the state-wide select ve_set)
+				if (ve_site[0] && e_va[10:4] == sc_set && e_x.way == 2'(j)) begin sc_lv[j] <= 1'b0; sc_ld[j] <= 1'b0; end
+				if (ve_site[1] && e_va[10:4] == sc_set && e_x.way == 2'(j)) sc_ld[j] <= 1'b1;
+				if (ve_site[2] && clr_i == sc_set) sc_lv[j] <= 1'b0;
+				if (ve_site[3] && ms_i[8:2] == sc_set && ms_i[1:0] == 2'(j)) begin sc_lv[j] <= 1'b0; sc_ld[j] <= 1'b0; end
+				if (ve_site[4] && f_set == sc_set && f_way == 2'(j)) begin sc_lv[j] <= 1'b0; sc_ld[j] <= 1'b0; end
+				if (ve_site[5] && f_set == sc_set && f_way == 2'(j)) begin sc_lv[j] <= 1'b1; sc_ld[j] <= 1'b0; end
+				if (ve_site[6] && f_set == sc_set && f_way == 2'(j)) begin sc_lv[j] <= 1'b1; sc_ld[j] <= pv_dirty; end
+				if (ve_site[7] && f_set == sc_set && f_way == 2'(j)) begin sc_lv[j] <= pv_keep && fv_lv; sc_ld[j] <= 1'b0; end
 			end
 			// (the snooper's copy follows a clock later)
 			dv_we  <= vp_lwe;
@@ -3079,7 +3099,7 @@ always_ff @(posedge clk) begin
 			logic frz_n, nofrz, m1v_n, mtv_n, busy_n, stl_set, r_new, r_stay, ok_new, ok_stay;
 			logic [2:0] sbn_n;
 			// the snoop port may hold the cache next cycle
-			frz_n = sn_frz || sn_req || sf_req;
+			frz_n = sn_frz || sn_req || sf_may;   // (sf_may: the snooper's late hit taken as possible)
 			nofrz = !frz_n;
 			// DC1: the snoop port, a port stolen now or next cycle (steal_q is
 			// steal now), the records' stale lookups, the engine's state next
@@ -3143,11 +3163,9 @@ end
 // the exact three equal, dc2r_n implies the block's.
 //--------------------------------------------------------------------------
 assign rdy_dt = tk_fast || st_simp(mt, x_tk, tk_split);
-assign sf_late = sf_req;
 always_comb begin
 	logic frz_n, nofrz, m1v_n, mtv_n, busy_n, stl_set, r_new, r_stay, ok_new, ok_stay;
 	logic m1s_n, mts_n, m2ss_s, c2_may, m1v_nk, mtv_nk, r_new1, r_new0;
-	logic frz0, frz1, h1k_rest, ok_new0, ok_new1, ok_stay0, ok_stay1;
 	logic [2:0] sbn_n;
 	logic hz1, hzt, dk1, dkt, h1, ht;
 	// DC1's and DT's stale flags as they will be (m1s_n, mts_n above)
@@ -3160,7 +3178,7 @@ always_comb begin
 	else if (tk_rdok) mts_n = 1'b0;
 	else mts_n = mt_stale;
 	// DC1
-	frz_n = sn_frz || sn_req || sf_req;
+	frz_n = sn_frz || sn_req || sf_may;
 	nofrz = !frz_n;
 	m1v_n   = !kill_now && (adv_ag ? dm_req : (!adv_dc1 && m1.v));
 	mtv_n   = !kill_now && (adv_dc1 ? m1.v : (!adv_dt && mt.v));
@@ -3182,13 +3200,6 @@ always_comb begin
 	m1v_nk  = adv_ag ? dm_req : (!adv_dc1 && m1.v);
 	mtv_nk  = adv_dc1 ? m1.v : (!adv_dt && mt.v);
 	hold1_nk = nreset ? (frz_n || steal || stl_set || (m1v_nk && m1s_n) || (mtv_nk && mts_n) || busy_n) : hold1_q;
-	// (the snooper's fast request sf_req is late -- its tag compare --; the
-	// same with it taken as 0 and 1, the back end picking by it last)
-	frz0 = sn_frz || sn_req;
-	frz1 = 1'b1;
-	h1k_rest = steal || stl_set || (m1v_nk && m1s_n) || (mtv_nk && mts_n) || busy_n;
-	hold1_nk0 = nreset ? (frz0 || h1k_rest) : hold1_q;
-	hold1_nk1 = nreset ? (frz1 || h1k_rest) : hold1_q;
 	// DC2 (rdy_dt: the access entering is fast or a simple store -- DT's
 	// late decision; m2ss_s: DC2's own, dropped when a clear of its hit is
 	// possible)
@@ -3216,26 +3227,6 @@ always_comb begin
 	           !(m4.split && !e_part)) ||
 	          (nofrz && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
 	st_ok_n = nreset ? (adv_ex ? ok_new : ok_stay) : st_ok_q;
-	// (with the snooper's late request taken as 0: nofrz = !frz0; as 1:
-	// nofrz = 0)
-	ok_new0  = (!m3.split && m3.x.ok && !m3.x.flt && m3.x.hit && m3.x.cm == 2'b01 &&
-	            !m3.r.lock && (m3.r.msz != SZ_Q) && dc_en && !frz0 &&
-	            ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) || e_st == E_S_DONE)) ||
-	           (fsb_of(m3) && (sbn_n < 3'(SBN)) &&
-	            ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) ||
-	             (e_st == E_S_DONE && !sn_frz)));
-	ok_new1  = (fsb_of(m3) && (sbn_n < 3'(SBN)) &&
-	            ((e_st == E_IDLE && !(e_job && m2.r.v && !e_dc2_done)) ||
-	             (e_st == E_S_DONE && !sn_frz)));
-	ok_stay0 = (st_rdy_r && !st_fault_r) || (!sn_frz && (wb_fast || (wfs_p1 && m4.x1.hit))) || wb_fsb ||
-	           (!sn_frz && e_st == E_W_DONE && !(bo_err && m4.r.ack != 2'd3) &&
-	            !(m4.split && !e_part)) ||
-	           (!frz0 && m4_fq && dc_en && !e_wst_done && e_st == E_S_DONE);
-	ok_stay1 = (st_rdy_r && !st_fault_r) || (!sn_frz && (wb_fast || (wfs_p1 && m4.x1.hit))) || wb_fsb ||
-	           (!sn_frz && e_st == E_W_DONE && !(bo_err && m4.r.ack != 2'd3) &&
-	            !(m4.split && !e_part));
-	st_ok_n0 = nreset ? (adv_ex ? ok_new0 : ok_stay0) : st_ok_q;
-	st_ok_n1 = nreset ? (adv_ex ? ok_new1 : ok_stay1) : st_ok_q;
 	// DT
 	hz1 = (dw && dw_set == m1.a[10:4]) || !e_quiet || sn_frz || st_at(mt, tk_split, m1.a[11:4]) ||
 	      st_at(m2.r, m2.split, m1.a[11:4]) || st_at(m3.r, m3.split, m1.a[11:4]) ||
