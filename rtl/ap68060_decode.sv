@@ -1499,35 +1499,91 @@ end
 
 // the records' data and the part under construction: no reset (the count
 // and IR's flags qualify them)
+// The head record rq0 is flip-flops (D2 reads all of it); records 1-3 are
+// an MLAB ring (rq_mem) from rq_rp: record k at rq_rp + k - 1.  A record
+// entering at position rq_n (1-3, or 1-3 after a pop's shift) is written
+// at rq_rp + rq_n - 1 either way; a pop loads rq0 from the ring's head
+// (record 1), never the address written in the same clock.  D2 reads
+// record 1's first micro-instruction and kind (rq1.rt/k0): those fields
+// are also kept in flip-flops for records 1-3 (rq_rt/rq_k), the ring's
+// read port being rq0's.
+localparam int RQW = $bits(dinst_t);
+logic  [1:0] rq_rp;
+wire   [1:0] rq_wa = rq_rp + rq_n[1:0] - 2'd1;
+wire         rq_we = wr && (pop ? (rq_n >= 3'd2) : (rq_n >= 3'd1));
+wire [RQW-1:0] rq_q;
+ap68060_lutram #(.AW(2), .DW(RQW)) rq_mem (.clk(clk), .we(rq_we), .waddr(rq_wa), .wdata(nrec_q),
+                                          .raddr(rq_rp), .q(rq_q));
+logic  [9:0] rq_rt [1:3];
+logic [18:0] rq_k  [1:3];
+initial rq_rp = 2'd0;
 always_ff @(posedge clk) begin
+	if (pop) rq_rp <= rq_rp + 2'd1;
 	case ({wr, pop})
 		2'b01: begin
-			rq0 <= rq1; rq1 <= rq2; rq2 <= rq3;
+			rq0 <= dinst_t'(rq_q);
+			rq_rt[1] <= rq_rt[2]; rq_k[1] <= rq_k[2];
+			rq_rt[2] <= rq_rt[3]; rq_k[2] <= rq_k[3];
 		end
 		2'b10: begin
 			case (rq_n)
 				3'd0:    rq0 <= nrec_q;
-				3'd1:    rq1 <= nrec_q;
-				3'd2:    rq2 <= nrec_q;
-				default: rq3 <= nrec_q;
+				3'd1:    begin rq_rt[1] <= nrec_q.rt; rq_k[1] <= nrec_q.k0; end
+				3'd2:    begin rq_rt[2] <= nrec_q.rt; rq_k[2] <= nrec_q.k0; end
+				default: begin rq_rt[3] <= nrec_q.rt; rq_k[3] <= nrec_q.k0; end
 			endcase
 		end
 		2'b11: begin
-			rq0 <= (rq_n == 3'd1) ? nrec_q : rq1;
-			rq1 <= (rq_n == 3'd2) ? nrec_q : rq2;
-			rq2 <= (rq_n == 3'd3) ? nrec_q : rq3;
-			rq3 <= nrec_q;
+			rq0 <= (rq_n == 3'd1) ? nrec_q : dinst_t'(rq_q);
+			rq_rt[1] <= (rq_n == 3'd2) ? nrec_q.rt : rq_rt[2];
+			rq_k[1]  <= (rq_n == 3'd2) ? nrec_q.k0 : rq_k[2];
+			rq_rt[2] <= (rq_n == 3'd3) ? nrec_q.rt : rq_rt[3];
+			rq_k[2]  <= (rq_n == 3'd3) ? nrec_q.k0 : rq_k[3];
+			rq_rt[3] <= nrec_q.rt; rq_k[3] <= nrec_q.k0;
 		end
 		default: ;
 	endcase
 	if (ir_v && ir_part) part <= nrec;
 end
+// (record 1 as D2 sees it: its rt and k0 alone)
+always_comb begin
+	rq1    = '0;
+	rq1.rt = rq_rt[1];
+	rq1.k0 = rq_k[1];
+end
+// synthesis translate_off
+// the shift FIFO the ring replaces, every record below the count checked
+dinst_t rs1, rs2, rs3;
+always_ff @(posedge clk) begin
+	case ({wr, pop})
+		2'b01: begin rs1 <= rs2; rs2 <= rs3; end
+		2'b10: case (rq_n)
+			3'd1:    rs1 <= nrec_q;
+			3'd2:    rs2 <= nrec_q;
+			3'd3, 3'd4: rs3 <= nrec_q;
+			default: ;
+		endcase
+		2'b11: begin
+			rs1 <= (rq_n == 3'd2) ? nrec_q : rs2;
+			rs2 <= (rq_n == 3'd3) ? nrec_q : rs3;
+			rs3 <= nrec_q;
+		end
+		default: ;
+	endcase
+end
+always_ff @(posedge clk)
+	if (nreset && ((rq_n >= 3'd2 && (rq_q !== rs1 || rq_rt[1] !== rs1.rt || rq_k[1] !== rs1.k0)) ||
+	               (rq_n >= 3'd3 && (rq_rt[2] !== rs2.rt || rq_k[2] !== rs2.k0)) ||
+	               (rq_n >= 3'd4 && (rq_rt[3] !== rs3.rt || rq_k[3] !== rs3.k0)))) begin
+		$display("FAIL: decode: the record ring's head or kinds differ from the shift FIFO's (n %0d)", rq_n);
+		$finish;
+	end
+// synthesis translate_on
 
 //--------------------------------------------------------------------------
 // D1b registers: the redirect, the BTB's maintenance, the return stack,
 // the parts of a multi-part instruction, the record FIFO
 //--------------------------------------------------------------------------
-dinst_t rq2, rq3;
 // the BTB write D1b decides, written out a clock later (its decision is
 // the redirect's: a deep path, kept off the write's fields)
 logic        bq_we, bq_wv, bq_wslot;
