@@ -36,6 +36,7 @@ module ap68060_backend
 
 	// uops from the sequencer
 	input  logic        in_v,
+	input  logic        in_eb,          // !in_v's twin register (AG's capture select)
 	input  uop_t        in_u,
 	output logic        in_rdy,
 	input  logic  [1:0] uq_n,           // the sequencer's queue count, and the
@@ -410,6 +411,7 @@ logic        sk_v;
 // (a copy of sk_v for the register file's read addresses alone: sk_v
 // selects the whole uop, and its fan-out would delay the reads)
 (* preserve *) logic sk_vr;
+(* preserve *) logic sk_va;          // ... and for AG's capture select
 uop_t        sk_u;
 wire         ain_v = sk_v || in_v;
 uop_t        ain_u;
@@ -513,17 +515,43 @@ logic  [6:0] fsel_q;
 // (the drop's term in four kept copies, a byte each: x_go comes late and
 // one copy reached every bit)
 (* keep *) wire [3:0] fv_clr = {4{(wb_commit && wb_redir) || wb_refetch || x_go || !nreset}};
+// (fv is written a clock after the file, from the registered write fq_*,
+// so its entries' enables come from flip-flops, not the late write
+// enables; a select formed in between sees the pending write below.  A
+// drop takes the pending write with it, as it took the write itself.)
+logic  [2:0] fq_e;
+logic  [4:0] fq_wa [3];
+logic [31:0] fq_oh [3];
+always_ff @(posedge clk) begin
+	for (int w = 0; w < 3; w++) begin
+		fq_e[w]  <= fwe[w] && !fv_clr[0];
+		fq_wa[w] <= fwa[w];
+		fq_oh[w] <= fwoh[w];
+	end
+end
 always_comb begin
 	fv_n = fv;
-	for (int i = 0; i < 3; i++) if (fwe[i]) fv_n = fv_n | fwoh[i];
+	for (int i = 0; i < 3; i++) if (fq_e[i]) fv_n = fv_n | fq_oh[i];
 	for (int b = 0; b < 4; b++) if (fv_clr[b]) fv_n[8*b +: 8] = 8'd0;
 end
+// synthesis translate_off
+// fv as written at once (the model the selects are checked against)
+logic [31:0] fvm;
+always_ff @(posedge clk) begin
+	logic [31:0] m;
+	m = fvm;
+	for (int i = 0; i < 3; i++) if (fwe[i]) m = m | fwoh[i];
+	if (fv_clr[0]) m = 32'd0;
+	fvm <= m;
+end
+// synthesis translate_on
 // (fv's own entry read at each candidate, this clock's writes -- their
 // enables late -- and the drop applied after it, not through fv_n's 32:1)
 function automatic logic fvn_at(input logic [4:0] a);
 	logic v;
 	v = fv[a];
-	for (int w = 0; w < 3; w++) if (fwe[w] && fwa[w] == a) v = 1'b1;
+	for (int w = 0; w < 3; w++) if (fq_e[w] && fq_wa[w] == a) v = 1'b1;   // pending
+	for (int w = 0; w < 3; w++) if (fwe[w] && fwa[w] == a) v = 1'b1;     // this clock's
 	fvn_at = v && !fv_clr[0];
 endfunction
 (* keep *) logic [6:0] fs0, fs1, fs2;   // (the candidates kept: the selects pick last)
@@ -540,8 +568,8 @@ always_ff @(posedge clk)
 // synthesis translate_off
 always_ff @(posedge clk)
 	for (int r = 0; r < 7; r++)
-		if (fsel_q[r] !== fv[rra[r]]) begin
-			$display("FAIL: read port %0d's registered front select %b, fv's %b (register %0d)", r, fsel_q[r], fv[rra[r]], rra[r]);
+		if (fsel_q[r] !== fvm[rra[r]]) begin
+			$display("FAIL: read port %0d's registered front select %b, fv's %b (register %0d)", r, fsel_q[r], fvm[rra[r]], rra[r]);
 			$finish;
 		end
 // synthesis translate_on
@@ -568,15 +596,15 @@ always_ff @(posedge clk)
 		$finish;
 	end
 always_ff @(posedge clk)
-	if (nreset && sk_vr != sk_v) begin
-		$display("FAIL: the skid's copy sk_vr %b differs from sk_v %b", sk_vr, sk_v);
+	if (nreset && (sk_vr != sk_v || sk_va != sk_v || in_eb == in_v)) begin
+		$display("FAIL: the skid's copies sk_vr %b sk_va %b differ from sk_v %b, or in_eb %b from !in_v %b", sk_vr, sk_va, sk_v, in_eb, !in_v);
 		$finish;
 	end
 // synthesis translate_on
 assign rra[2] = ag_u.upd2_reg;
 assign rra[3] = ag_u.a_reg;
 assign rra[4] = ag_u.b_reg;
-always_comb for (int i = 0; i < 7; i++) rrd[i] = (RSEL[i] ? fsel_q[i] : fv[rra[i]]) ? frd[i] : brd[i];
+always_comb for (int i = 0; i < 7; i++) rrd[i] = fsel_q[i] ? frd[i] : brd[i];   // (every port's select registered)
 
 logic [31:0] agb_q, agx_q;     // the base, and the index sign-extended
 wire  [31:0] ag_base = agb_q;
@@ -2113,7 +2141,7 @@ always_ff @(posedge clk) begin
 	if (!nreset) begin
 		ag_v  <= 1'b0; dc1_v <= 1'b0; dt_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; wb_v <= 1'b0;
 		sk_v  <= 1'b0;
-		sk_vr <= 1'b0;
+		sk_vr <= 1'b0; sk_va <= 1'b0;
 		eredir_pend <= 1'b0;
 		wb_eredir   <= 1'b0;
 		fv <= 32'd0;
@@ -2742,17 +2770,17 @@ always_ff @(posedge clk) begin
 			// the skid: emptied when AG takes it; filled by a popped uop AG
 			// did not take
 			if (sk_v) begin
-				if (ag_take) begin sk_v <= 1'b0; sk_vr <= 1'b0; end
+				if (ag_take) begin sk_v <= 1'b0; sk_vr <= 1'b0; sk_va <= 1'b0; end
 			end
 			else if (SKID && in_v && in_rdy && !ag_take) begin
 				sk_v  <= 1'b1;
-				sk_vr <= 1'b1;
+				sk_vr <= 1'b1; sk_va <= 1'b1;
 				sk_u  <= in_u;
 				sk_base_a <= in_u.base;
 				sk_idx_a  <= in_u.idx;
 			end
 		end
-		if (flush || kill_now) begin sk_v <= 1'b0; sk_vr <= 1'b0; end
+		if (flush || kill_now) begin sk_v <= 1'b0; sk_vr <= 1'b0; sk_va <= 1'b0; end
 		if (kill_now) begin
 			ag_v <= 1'b0; dc1_v <= 1'b0; dt_v <= 1'b0; dc2_v <= 1'b0; ex_v <= 1'b0; wb_v <= 1'b0;
 		end
@@ -2878,7 +2906,8 @@ always_ff @(posedge clk) begin
 	logic [4:0] nb, nx, nu, nu2;
 	logic [31:0] b, x, bh, xh;
 	logic        b1, b0, x1, x0;
-	ag_new = !flush && !stall_ag && ain_v && !stopped;
+	// (ain_v from the twins sk_va and in_eb: the select's own flip-flops)
+	ag_new = !flush && !stall_ag && (sk_va || !in_eb) && !stopped;
 	// a plain load leaving DC2 whose data a base or index takes
 	cb_n = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.base;
 	cx_n = adv_dc2 && dc2_capd && dc2_u.d_reg == ain_u.idx;

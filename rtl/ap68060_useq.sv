@@ -62,6 +62,7 @@ module ap68060_useq
 	// uop FIFO towards the back end: uq0 is the head
 	output logic  [1:0] uq_n,
 	output logic        uq_e,           // ... none (uq_n == 0), a register
+	output logic        uq_eb,          // ... its twin for the back end's AG (preserved: placed by it)
 	output uop_t        uq0,
 	// the head's next base and index, for the back end's register-file
 	// selects: D2c's uop's (the head when the queue is empty, or is popped
@@ -1519,6 +1520,7 @@ always_ff @(posedge clk) begin
 		mv_fix   <= 2'd0;
 		uq_n     <= 2'd0;
 		uq_e     <= 1'b1;
+		uq_eb     <= 1'b1;
 		uq_rp    <= 1'b0;
 		uq_wp    <= 1'b0;
 	end
@@ -1569,6 +1571,7 @@ always_ff @(posedge clk) begin
 		if (uq_pop && uq_n != 2'd0) uq_n <= emit ? uq_n : uq_n - 2'd1;
 		else                        uq_n <= emit ? uq_n + 2'd1 : uq_n;
 		uq_e <= (uq_pop && uq_n != 2'd0) ? (!emit && uq_n == 2'd1) : (!emit && uq_n == 2'd0);
+		uq_eb <= (uq_pop && uq_n != 2'd0) ? (!emit && uq_n == 2'd1) : (!emit && uq_n == 2'd0);
 		if (emit) uq_wp <= !uq_wp;
 		if (uq_pop && uq_n != 2'd0) uq_rp <= !uq_rp;
 
@@ -1620,6 +1623,7 @@ always_ff @(posedge clk) begin
 			mv_fix <= 2'd0;
 			uq_n  <= 2'd0;
 			uq_e  <= 1'b1;
+			uq_eb  <= 1'b1;
 			uq_rp <= 1'b0;
 			uq_wp <= 1'b0;
 		end
@@ -1628,6 +1632,7 @@ always_ff @(posedge clk) begin
 			ssp      <= exc_ssp;
 			uq_n     <= 2'd0;
 			uq_e     <= 1'b1;
+			uq_eb     <= 1'b1;
 			uq_rp    <= 1'b0;
 			uq_wp    <= 1'b0;
 		end

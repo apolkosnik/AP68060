@@ -163,23 +163,51 @@ module ap68060_rf #(
 		for (int i = 0; i < 32; i++) lvt[i] = 2'd0;
 		for (int r = 0; r < NR; r++) sel_q[r] = 2'd0;
 	end
-	// (the live value table's entries written by the one-hot selects, not a
-	// decode of the address after the late write enables)
-	always_ff @(posedge clk)
+	// The live value table is written a clock after the banks, from the
+	// registered write (lq_*): its entries' enables come from flip-flops,
+	// not from the late write enables (the stall chain's end).  A read in
+	// between sees that write through the pending bypass below.
+	logic  [2:0] lq_e;
+	logic  [4:0] lq_wa [3];
+	logic [31:0] lq_oh [3];
+	initial lq_e = 3'd0;
+	always_ff @(posedge clk) begin
+		lq_e <= we;
+		for (int w = 0; w < 3; w++) begin lq_wa[w] <= wa[w]; lq_oh[w] <= woh[w]; end
 		for (int w = 0; w < NW; w++)
-			if (we[w])
+			if (lq_e[w])
 				for (int i = 0; i < 32; i++)
-					if (woh[w][i]) lvt[i] <= 2'(w);
-	// a registered port's select: the table's entry for next clock's
-	// address, as this clock's writes leave it (the later port wins, as in
-	// the table) -- the table's 32:1 read is off the read path
-	function automatic logic [1:0] nsel(input logic [4:0] a);
+					if (lq_oh[w][i]) lvt[i] <= 2'(w);
+	end
+	// the table's entry as it stands with the pending write (last clock's)
+	function automatic logic [1:0] lvt_eff(input logic [4:0] a);
 		logic [1:0] v;
 		v = lvt[a];
+		for (int w = 0; w < NW; w++)
+			if (lq_e[w] && lq_wa[w] == a) v = 2'(w);
+		lvt_eff = v;
+	endfunction
+	// a registered port's select: the table's entry for next clock's
+	// address, as this clock's writes leave it (the later port wins, as in
+	// the table) -- the table's 32:1 read is off the read path, and the
+	// late enables are the last term
+	function automatic logic [1:0] nsel(input logic [4:0] a);
+		logic [1:0] v;
+		v = lvt_eff(a);
 		for (int w = 0; w < NW; w++)
 			if (we[w] && wa[w] == a) v = 2'(w);
 		nsel = v;
 	endfunction
+	// synthesis translate_off
+	// the table as written at once (the model the selects are checked against)
+	logic [1:0] lvm [32];
+	initial for (int i = 0; i < 32; i++) lvm[i] = 2'd0;
+	always_ff @(posedge clk)
+		for (int w = 0; w < NW; w++)
+			if (we[w])
+				for (int i = 0; i < 32; i++)
+					if (woh[w][i]) lvm[i] <= 2'(w);
+	// synthesis translate_on
 	// (the candidates kept as nodes: the late selects are the one level
 	// before the flip-flop)
 	(* keep *) logic [1:0] ns0 [NR], ns1 [NR], ns2 [NR];
@@ -203,14 +231,14 @@ module ap68060_rf #(
 			end
 	always_ff @(posedge clk)
 		for (int r = 0; r < NR; r++)
-			if (REGSEL[r] && sel_q[r] !== lvt[ra[r]]) begin
-				$display("FAIL: register file: read port %0d's registered select %0d, the table's %0d (register %0d)", r, sel_q[r], lvt[ra[r]], ra[r]);
+			if (REGSEL[r] && sel_q[r] !== lvm[ra[r]]) begin
+				$display("FAIL: register file: read port %0d's registered select %0d, the table's %0d (register %0d)", r, sel_q[r], lvm[ra[r]], ra[r]);
 				$finish;
 			end
 	// synthesis translate_on
 	always_comb
 		for (int r = 0; r < NR; r++)
-			rd[r] = q[REGSEL[r] ? sel_q[r] : lvt[ra[r]]][r];
+			rd[r] = q[REGSEL[r] ? sel_q[r] : lvt_eff(ra[r])][r];
 endmodule
 
 //--------------------------------------------------------------------------
