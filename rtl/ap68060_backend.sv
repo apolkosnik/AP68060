@@ -1520,7 +1520,6 @@ always_ff @(posedge clk)
 		$display("FAIL: an FPU uop's exception term %b differs from ex_xnz %b (pc %h)", ex_kx[2] && (fp_xvec != 8'd0), ex_xnz, ex_u.pc);
 		$finish;
 	end
-// synthesis translate_off
 always_ff @(posedge clk)
 	if (ex_v && ex_bdb !== ((ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC))) begin
 		$display("FAIL: EX's branch flag %b, its op's %b (pc %h)", ex_bdb, (ex_u.op == OP_BCC) || (ex_u.op == OP_DBCC), ex_u.pc);
