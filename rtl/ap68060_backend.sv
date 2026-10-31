@@ -941,9 +941,14 @@ logic        md_fin;          // ... and the unit has finished (done is a pulse:
                               // be stalled by WB in that cycle)
 logic        md_z;            // ... is a divide by zero (from its second cycle)
 wire         ex_is_md   = (ex_u.op == OP_MUL) || (ex_u.op == OP_DIV);
-wire         ex_div0    = ex_kx[1] &&
-                          ((ex_u.sz == SZ_W) ? (ex_av[15:0] == 16'd0) : (ex_av == 32'd0));
-assign ex_md_start = ex_v && ex_is_md && !md_go && !ex_div0 && !md_busy && !ex_fault;
+// (the zero test on the operand register alone: a divide whose operand
+// is EX2's result this clock (the bypass) waits the clock in which the
+// register takes it -- the bypass's wide register stays off this test,
+// which the stall registers read through the hold next, exh_n)
+wire         ex_bxp     = xw_v && (mxe_a || mxe_b);
+wire         ex_div0    = ex_kx[1] && !ex_bxp &&
+                          ((ex_u.sz == SZ_W) ? (ex_av_r[15:0] == 16'd0) : (ex_av_r == 32'd0));
+assign ex_md_start = ex_v && ex_is_md && !md_go && !ex_div0 && !md_busy && !ex_fault && !ex_bxp;
 
 // word forms: DIVU.W/DIVS.W divide the 32-bit Dn by a 16-bit source;
 // MULU.W/MULS.W multiply the low words

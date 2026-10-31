@@ -357,3 +357,31 @@ Two small steps from that, 2026-10-31:
 Corpus runs stopped on request (2026-10-31): the full run of the
 pre-split HEAD ended at 3,759 of 4,504 slices, 3,640 pass, 99 known, no
 failure under the current rules; the smoke on the AG split passed 5/5.
+
+### 3.5 WB's decisions as registers: the design
+
+kill_now, x_go, dbl_fault, take_irq/take_sbe/take_trace are each
+`adv_wb ? X1 : X0` from WB's registers (two forms, the advance picking
+last); kill_now then fans out to the DMU (its records, the engine's
+dispatch: wb_ok -> tw_va -1.78), the stall registers' last AND, the
+front-valid drop, the capture flags, xstk/x_first/xr_dbl.  The same
+method as the stall registers: each decision formed a clock ahead from
+the next values of its terms and registered (kill_q etc.), checked equal
+to the direct form every clock; the consumers read the registers (with
+preserved copies per module).  The next values exist already for most
+terms (wb_v_n, the stall register's D for adv_wb, ok_new/ok_stay for
+wb_ok, irq_pend_n, tr_n, sb_ne_n); to add: wb_redir's and wb_xf's next
+(the EX2 -> WB exception select as an always_comb the clocked block
+copies), the store buffer's error next (a DMU export), and xstk /
+x_first / xr_dbl / halted next from the registered decisions themselves
+(x_go_q, dbl_q) so no decision's cone feeds another's in the same clock.
+
+Fit f130_e (1279cb6, AG1): Fmax 96.16 MHz, slack -2.71, TNS -1,957,
+4,233 endpoints, 25,942 ALMs -- worse than d.  New at the top: the
+divide-by-zero test on EX's bypassed operand (e2_dwe -> the bypass mux
+-> a 32-bit zero test -> exh_n -> every stall register, -2.7; fixed:
+the test on the register alone, a divide waits the bypass clock), AG2's
+update-register compares into the capture (ag_u.upd_reg -> agx_q, -2.06
+x 47: the b1/b0 compares, formed each clock; to be registered from the
+uops' next values), the sequencer's MOVEM state into the file's selects
+(useq.mv_act -> rff.sel_q -1.89), xr_dbl -> ccr_f (3.5).
