@@ -98,6 +98,8 @@ module ap68060_backend
 	input  logic        dm_hold1_nk, dm_dc2r_n1, dm_dc2r_n0, dm_rdy_dt,   // hold1_n without the kill; dc2r_n for DT's late decision 1 / 0
 	input  logic        dm_hold1_nk0, dm_hold1_nk1, dm_st_ok_n0, dm_st_ok_n1,   // ... and with WB's store valid taken as 0 / 1 (picked here by wb_stv)
 	input  logic        dm_wbst_r,      // the DMU's part of its wb_st (WB's record is a store), from its registers
+	input  logic        dm_dwm_v,       // a fast store's write lands next clock: its set compared with AG's address here,
+	input  logic  [6:0] dm_dwm_set,     // the stale-lookup hold ORed into DC1's and AG's stall registers last
 	input  logic        dm_hold1_c,     // ... as its state gives it now (checks)
 	input  logic        dm_hold_dt,     // ... and DT (a register)
 	// WB maintenance (CINV/CPUSH/PFLUSH/PTEST) in the DMU
@@ -3009,10 +3011,12 @@ always_ff @(posedge clk) begin
 	// late); the index sign-extended on each source in parallel.  (EX's
 	// result of this cycle is written into the file at this edge: the flags
 	// wait for it, and exw_q brings it next clock.)
-	b1 = fwe_ag[1] && fwa[1] == ain_u.base;
-	b0 = fwe_ag[0] && fwa[0] == ain_u.base;
-	x1 = fwe_ag[1] && fwa[1] == ain_u.idx;
-	x0 = fwe_ag[0] && fwa[0] == ain_u.idx;
+	// (the compares for the skid's uop and the sequencer's apart, the
+	// skid's valid picking: one level less on the capture)
+	b1 = fwe_ag[1] && (sk_v ? (fwa[1] == sk_u.base) : (fwa[1] == in_u.base));
+	b0 = fwe_ag[0] && (sk_v ? (fwa[0] == sk_u.base) : (fwa[0] == in_u.base));
+	x1 = fwe_ag[1] && (sk_v ? (fwa[1] == sk_u.idx)  : (fwa[1] == in_u.idx));
+	x0 = fwe_ag[0] && (sk_v ? (fwa[0] == sk_u.idx)  : (fwa[0] == in_u.idx));
 	b = ({32{ain_u.base_v && b1}}                  & fwd[1])  |
 	    ({32{ain_u.base_v && !b1 && b0}}           & ag_updv)  |
 	    ({32{ain_u.base_v && !b1 && !b0}} & ain_fb);
@@ -3210,11 +3214,16 @@ wire [5:0] st_c10 = stalls6(1'b1, 1'b0, wbs_sel);
 wire [5:0] st_c01 = stalls6(1'b0, 1'b1, wbs_sel);
 wire [5:0] st_c11 = stalls6(1'b1, 1'b1, wbs_sel);
 logic stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q, stall_dc1_q, stall_ag_q;
+// (DC1's hold for a lookup made stale by a write landing in its set: AG's
+// address -- its adder's, late -- compared with the write's set, the last
+// OR of DC1's and AG's stall registers)
+wire dwm_h = dm_req && dm_dwm_v && (dm_dwm_set == ag_maddr[10:4]);
 always_ff @(posedge clk) begin
 	logic [5:0] st;
 	st = fph_n ? (ex_okn ? st_c11 : st_c01) : (ex_okn ? st_c10 : st_c00);
-	{stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q, stall_dc1_q} <= {5{!kill_now}} & st[5:1];
-	stall_ag_q <= !kill_now && (st[0] || (sk_v ? sag_sk : sag_in));
+	{stall_wb_q, stall_ex_q, stall_dc2_q, stall_dt_q} <= {4{!kill_now}} & st[5:2];
+	stall_dc1_q <= !kill_now && (st[1] || (dc1_v_n && dwm_h));
+	stall_ag_q  <= !kill_now && (st[0] || (sk_v ? sag_sk : sag_in) || (ag_v_n && dc1_v_n && dwm_h));
 end
 // the stall nets: the registers, and DC2's hold for an access that entered
 // not ready (its registered "ready" from the DMU), one LUT from flip-flops

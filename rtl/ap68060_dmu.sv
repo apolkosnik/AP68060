@@ -95,6 +95,8 @@ module ap68060_dmu
 	output logic        hold1_nk, dc2r_n1, dc2r_n0, rdy_dt,       // hold1_n without the kill; dc2r_n with DT's late decision rdy_dt taken as 1 / 0 (the back end picks last)
 	output logic        hold1_nk0, hold1_nk1, st_ok_n0, st_ok_n1,  // hold1_nk and st_ok_n with WB's store valid (wb_st) taken as 0 / 1: the back end picks by its own register
 	output logic        wbst_r,         // wb_st's part from this module's registers (WB's record is a store): the back end's select, with its st_v
+	output logic        dwm_v,          // a fast store's write lands next clock (dw, from another source): with its set, dwm_set, the back
+	output logic  [6:0] dwm_set,        // end compares AG's address and ORs the stale-lookup hold in last (hold1_nk0/1 are without it)
 	                                    // data read is stale
 	output logic        dc2_rdy,        // DC2's access is done: a register, conservative
 	output logic        dc2_rdy_c,      // ... as the stage's own state gives it (checks)
@@ -1042,6 +1044,8 @@ endfunction
 //--------------------------------------------------------------------------
 wire wb_st   = m4.r.v && st_v && (m4.r.mem == M_ST || m4.r.mem == M_RMW);
 assign wbst_r = m4.r.v && (m4.r.mem == M_ST || m4.r.mem == M_RMW);
+assign dwm_v   = dw && (dw_src != 2'd0);
+assign dwm_set = dw_set;
 // (whether WB's access can be a fast store at all: registered as it
 // enters WB, cleared with its hit)
 logic m4_fq;
@@ -3219,7 +3223,10 @@ always_comb begin
 	logic [2:0] sbn_n;
 	logic hz1, hzt, dk1, dkt, h1, ht;
 	// DC1's and DT's stale flags as they will be (m1s_n, mts_n above)
-	if (adv_ag) m1s_n = (dw && dw_src != 2'd0 && dw_set == dm_va[10:4]) || !e_quiet || tk_relook;
+	// (the AG address's set compare -- the address is AG's adder's, late --
+	// is left out here and ORed in by the back end, for the holds the stall
+	// registers read; hold1_n, the exact one, keeps it)
+	if (adv_ag) m1s_n = !e_quiet || tk_relook;
 	else if ((dw && dw_src != 2'd0 && dw_set == m1.a[10:4]) || !e_quiet || tk_relook) m1s_n = 1'b1;
 	else if (!steal && !sn_rset) m1s_n = 1'b0;
 	else m1s_n = m1_stale;
@@ -3244,7 +3251,7 @@ always_comb begin
 		           (!wb_slow && (dc2_slow || (e_job && m2.r.v && !e_dc2_done) ||
 		                         (iw_req && !iw_done && iw_ok && sb_empty))))) ||
 		         (e_st == E_W_PART && (wd_push || wd_wtp || (!wd_cb && !wd_sb)));
-	hold1_n = nreset ? (frz_n || steal || stl_set || (m1v_n && m1s_n) || (mtv_n && mts_n) || busy_n) : hold1_q;
+	hold1_n = nreset ? (frz_n || steal || stl_set || (m1v_n && (m1s_n || (adv_ag && dw && dw_src != 2'd0 && dw_set == dm_va[10:4]))) || (mtv_n && mts_n) || busy_n) : hold1_q;
 	// (the same without the kill, for the stalls: a kill clears every
 	// stage's valid, so the stall is zero whatever the hold)
 	m1v_nk  = adv_ag ? dm_req : (!adv_dc1 && m1.v);

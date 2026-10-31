@@ -275,7 +275,8 @@ logic        dm_hold_dt_b, dm_hold1_b, dm_dc2_rdy_b, dm_st_ok_b;   // the DMU ho
 logic        dm_hold1_n, dm_dc2r_n, dm_st_ok_n, dm_hold_dt_n;   // ... and their next values, for the registered stalls
 logic        dm_hold1_nk, dm_dc2r_n1, dm_dc2r_n0, dm_rdy_dt;
 logic        dm_hold1_nk0, dm_hold1_nk1, dm_st_ok_n0, dm_st_ok_n1;
-logic        dm_wbst_r;
+logic        dm_wbst_r, dm_dwm_v;
+logic  [6:0] dm_dwm_set;
 logic [31:0] dm_va;
 logic  [1:0] dm_mem, dm_msz;
 logic  [2:0] dm_fc;
@@ -325,7 +326,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.dm_hold1_n(dm_hold1_n), .dm_dc2r_n(dm_dc2r_n), .dm_st_ok_n(dm_st_ok_n), .dm_hold_dt_n(dm_hold_dt_n),
 	.dm_hold1_nk(dm_hold1_nk), .dm_dc2r_n1(dm_dc2r_n1), .dm_dc2r_n0(dm_dc2r_n0), .dm_rdy_dt(dm_rdy_dt),
 	.dm_hold1_nk0(dm_hold1_nk0), .dm_hold1_nk1(dm_hold1_nk1), .dm_st_ok_n0(dm_st_ok_n0), .dm_st_ok_n1(dm_st_ok_n1),
-	.dm_wbst_r(dm_wbst_r),
+	.dm_wbst_r(dm_wbst_r), .dm_dwm_v(dm_dwm_v), .dm_dwm_set(dm_dwm_set),
 	.mt_caches(mt_caches), .mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng),
 	.mt_wr(mt_wr), .mt_done(mt_done), .mt_pa(mt_pa), .mt_fault(mt_fault), .mt_fslw(mt_fslw),
 	.dm_st_faddr(dm_st_faddr),
@@ -349,7 +350,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.hold1_n(dm_hold1_n), .dc2r_n(dm_dc2r_n), .st_ok_n(dm_st_ok_n), .hold_dt_n(dm_hold_dt_n),
 	.hold1_nk(dm_hold1_nk), .dc2r_n1(dm_dc2r_n1), .dc2r_n0(dm_dc2r_n0), .rdy_dt(dm_rdy_dt),
 	.hold1_nk0(dm_hold1_nk0), .hold1_nk1(dm_hold1_nk1), .st_ok_n0(dm_st_ok_n0), .st_ok_n1(dm_st_ok_n1),
-	.wbst_r(dm_wbst_r),
+	.wbst_r(dm_wbst_r), .dwm_v(dm_dwm_v), .dwm_set(dm_dwm_set),
 	.dc2_rdy(dm_dc2_rdy), .dc2_rdy_c(dm_dc2_rdy_c), .ldata(dm_ldata), .ldata_al(dm_ldata_al), .ldata_alv(dm_ldata_alv), .fault(dm_fault), .fvec(dm_fvec),
 	.faddr(dm_faddr), .fslw(dm_fslw),
 	.st_v(dm_st_v), .st_data(dm_st_data), .st_rdy(dm_st_rdy), .st_ok(dm_st_ok),
