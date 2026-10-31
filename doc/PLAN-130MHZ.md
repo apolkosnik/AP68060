@@ -232,3 +232,45 @@ Regression 392/392 (t_cbsplit as above), corpus smoke 5/5.
 Cycle cost: Dhrystone 1,086 cycles/iteration (was 1,071: +1.4 %),
 Whetstone 784,934 cycles/loop (was 754,922: +4.0 %, the FPU uops wait
 one more stage for "no older uop in flight").
+
+Fit f130_b (b4235d6, PERIOD 7.692): Fmax 103.8 MHz (from 95.5), slack
+-1.94 ns (from -2.78), TNS -1,553 ns (from -1,747), 3,094 failing
+endpoints (from 3,793), 25,627 ALMs.  What leads now: the snooper's
+push-buffer compare into the DMU's snoop phase (-1.94), ex_u.op into the
+stall registers (-1.85, the divide-by-zero test's op compare), wb_ok
+into the walker's address (-1.75), ex_u.cond into the operand captures
+(-1.76, 58 endpoints: the result's select by the condition, Scc, is in
+the broadcast), ex_u.d_reg into DC1's capture (-1.62), the skid's base
+into AG's capture (-1.60), the split access's second translation
+(m2.x.pa -> m2.x1.*, -1.57, 42 endpoints), the store buffer's count into
+the BIU's data (-1.57, 36).
+
+### 3.1b The broadcast from EX2 (next)
+
+EX2's result e2_res is the broadcast (xw_*): the front file's EX write
+port and every younger stage's capture take a register, selected by
+flags against EX2's uop (formed a clock ahead as before); EX bypasses its
+own operands from EX2 for a back-to-back dependence (one 2:1 mux ahead
+of the ALU, the register taking the value for the cycles after); AG
+takes the broadcast a clock late (xw_q) with its writer flags one stage
+longer (EX2, left EX2).  Removes the result-select-into-captures family
+(ex_u.cond / ex_u.op / ex_rk / ex_bv into dc1_b, ex_av, the file's data
+inputs).  Cost: AG's dependence on an EX result one clock longer.
+
+Done 2026-10-31 (the broadcast from EX2).  Found on the way:
+- AG's refusal flags for the broadcast after a load capture (cbl/cxl,
+  now cbl2/cxl2 for the second clock) are the AG uop's own: a new uop
+  entering must not inherit the previous uop's capture, or it refuses the
+  broadcast it waits for and keeps a stale base (Dhrystone's strcpy
+  overran its buffer; the regression had no such sequence -- t_integer
+  306-310 now have it).
+- A latent instruction-cache bug, present on main: F0 reads the tag RAM
+  in the clock a fill writes another way of the same set; the tag read is
+  the old one while the valid bit (read in F1 from registers) is the new
+  one, so a stale tag of zero (any address below $800) matched: two ways
+  hit.  Exposed by t_integer's new tests moving fail_all into the set of
+  a line of code.  The way written in F0's read clock is no hit in F1
+  (the just-filled line is the line buffer's).  To port to main.
+Regression 392/392 (t_integer with 306-310), corpus smoke 5/5.
+Cycle cost: Dhrystone 1,102 cycles/iteration (+1.5 % on EX2, +2.9 % on
+main), Whetstone 789,862 cycles/loop (+0.6 % on EX2).

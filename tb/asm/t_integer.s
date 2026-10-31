@@ -978,6 +978,46 @@ smcq_ok:
 	bge.s	.m6
 	chkl	d3,6,305
 
+;----------------------------------------------- 306-309 loads into address registers
+; An loaded from memory, then an AG-class use of it (MOVEA An,Am forms
+; the address at AG): the load's data reaches AG by the capture as it
+; leaves DC2, or by the broadcast after EX; a second AG uop right behind,
+; depending on another load, must not be refused that broadcast because
+; the one before it captured (the capture flags are the AG uop's own)
+	move.l	#$12345678,($8000).l
+	move.l	#$9abcdef0,($8004).l
+	move.l	#$0badf00d,a2
+	move.l	#$0badf00d,a3
+	move.l	($8000).l,a3
+	move.l	($8004).l,a2
+	move.l	a3,a1
+	move.l	a2,a6
+	move.l	a6,d0
+	chkl	d0,$9abcdef0,306
+	move.l	a1,d0
+	chkl	d0,$12345678,307
+	move.l	#$0badf00d,a2
+	move.l	#$0badf00d,a3
+	move.l	($8000).l,a3
+	move.l	($8004).l,a2
+	nop
+	move.l	a3,a1
+	move.l	a2,a6
+	move.l	a6,d0
+	chkl	d0,$9abcdef0,308
+	move.l	#$0badf00d,a2
+	move.l	#$0badf00d,a3
+	move.l	($8000).l,a3
+	move.l	($8004).l,a2
+	move.l	a3,a1
+	addq.l	#1,a3
+	move.l	a2,a0
+	addq.l	#1,a2
+	move.l	a0,d0
+	chkl	d0,$9abcdef0,309
+	move.l	a2,d0
+	chkl	d0,$9abcdef1,310
+
 ;----------------------------------------------------------------- all done
 	move.w	#$600D,(DONEREG).l
 	stop	#$2700
