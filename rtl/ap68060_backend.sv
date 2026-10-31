@@ -3147,18 +3147,23 @@ wire ex_fpw_n = adv_dc2 ? ((dc2_u.op == OP_FPU) && !((dc2_u.mem != M_NONE) && dm
 wire hs_n     = (ex_v && !adv_ex) ? fp_hs0 : fp_hs1;
 wire ns_n     = (ex_v && !adv_ex) ? fp_ns0 : fp_ns1;
 wire fph_n    = ex_v_n && (hs_n || (!safe_nk && !ns_n));
-wire exho_n   = exh_nk || (ex_v_n && ex_fpw_n && fph_n);
+// (the FPU interface's hold next, fph_n, comes from its next-state
+// candidates -- five levels of its own; the stalls are formed for it
+// taken as 0 and 1 too, and it picks last)
+wire exho_n0  = exh_nk;
+wire exho_n1  = exh_nk || (ex_v_n && ex_fpw_n);
 // the six stalls' next values as one flat function each, for EX's
 // exception decision (ok) and DT's fast/simple-store decision (rdy) taken
 // as 0/1: four candidates, kept as nets, the two late picks and the kill
 // the LUT before the flip-flops
-function automatic logic [5:0] stalls6(input logic ok, input logic rdy);
-	logic wbh, stv, dc2r, swb, sex, sdc2, sdt, sdc1, sag;
+function automatic logic [5:0] stalls6(input logic ok, input logic rdy, input logic fph);
+	logic wbh, stv, dc2r, exho, swb, sex, sdc2, sdt, sdc1, sag;
 	wbh  = ok ? wbh_n1 : wbh_n0;
 	stv  = ok ? wb_stv_n1 : wb_stv_n0;
 	dc2r = rdy ? dm_dc2r_n1 : dm_dc2r_n0;
+	exho = fph ? exho_n1 : exho_n0;
 	swb  = wb_v_n  && (wbh || (stv && !dm_st_ok_n));
-	sex  = ex_v_n  && (exho_n || swb);
+	sex  = ex_v_n  && (exho || swb);
 	sdc2 = dc2_v_n && ((dc2_mx_n && !dc2r) || sex);
 	sdt  = dt_v_n  && (sdc2 || dm_hold_dt_n);
 	sdc1 = dc1_v_n && (sdt  || dm_hold1_nk);
@@ -3170,13 +3175,19 @@ endfunction
 // stall_ag, beside the picks)
 (* keep *) wire sag_sk = ag_v_n && ilk_sk;
 (* keep *) wire sag_in = ag_v_n && ilk_in;
-(* keep *) wire [5:0] st_c00 = stalls6(1'b0, 1'b0);
-(* keep *) wire [5:0] st_c01 = stalls6(1'b0, 1'b1);
-(* keep *) wire [5:0] st_c10 = stalls6(1'b1, 1'b0);
-(* keep *) wire [5:0] st_c11 = stalls6(1'b1, 1'b1);
+(* keep *) wire [5:0] st_c000 = stalls6(1'b0, 1'b0, 1'b0);
+(* keep *) wire [5:0] st_c010 = stalls6(1'b0, 1'b1, 1'b0);
+(* keep *) wire [5:0] st_c100 = stalls6(1'b1, 1'b0, 1'b0);
+(* keep *) wire [5:0] st_c110 = stalls6(1'b1, 1'b1, 1'b0);
+(* keep *) wire [5:0] st_c001 = stalls6(1'b0, 1'b0, 1'b1);
+(* keep *) wire [5:0] st_c011 = stalls6(1'b0, 1'b1, 1'b1);
+(* keep *) wire [5:0] st_c101 = stalls6(1'b1, 1'b0, 1'b1);
+(* keep *) wire [5:0] st_c111 = stalls6(1'b1, 1'b1, 1'b1);
 always_ff @(posedge clk) begin
-	logic [5:0] st;
-	st = ex_okn ? (dm_rdy_dt ? st_c11 : st_c10) : (dm_rdy_dt ? st_c01 : st_c00);
+	logic [5:0] st, st0, st1;
+	st0 = ex_okn ? (dm_rdy_dt ? st_c110 : st_c100) : (dm_rdy_dt ? st_c010 : st_c000);
+	st1 = ex_okn ? (dm_rdy_dt ? st_c111 : st_c101) : (dm_rdy_dt ? st_c011 : st_c001);
+	st  = fph_n ? st1 : st0;
 	{stall_wb, stall_ex, stall_dc2, stall_dt, stall_dc1} <= {5{!kill_now}} & st[5:1];
 	stall_ag <= !kill_now && (st[0] || (sk_v ? sag_sk : sag_in));
 end

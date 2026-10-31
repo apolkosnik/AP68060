@@ -3361,13 +3361,18 @@ always_ff @(posedge clk)
 		$finish;
 	end
 // synthesis translate_on
-always_comb
-	lv_ra = (sn_ph == SN_B)                            ? sn_pa[10:4] :
-	        (e_st == E_SP_W || e_st == E_SP_2)         ? st_set :     // (the next set; read in the wait state, registered: lve_sp)
-	        (e_st == E_S_XLW || e_st == E_S_XL2 || e_st == E_S_ACT ||
-	         e_st == E_W_DEC)                          ? e_va[10:4] :
-	        (e_st == E_M_SCANW || e_st == E_M_SCANW2 ||
-	         e_st == E_M_SCAN2)                        ? sc_set : f_set;
+// (an AND-OR over one-hot selects -- the snoop's phase first, the engine's
+// states after it, the fill's set otherwise -- not a priority chain)
+always_comb begin
+	logic s_sn, s_sp, s_va, s_sc, s_f;
+	s_sn = (sn_ph == SN_B);
+	s_sp = !s_sn && (e_st == E_SP_W || e_st == E_SP_2);              // (the next set; read in the wait state, registered: lve_sp)
+	s_va = !s_sn && (e_st == E_S_XLW || e_st == E_S_XL2 || e_st == E_S_ACT || e_st == E_W_DEC);
+	s_sc = !s_sn && (e_st == E_M_SCANW || e_st == E_M_SCANW2 || e_st == E_M_SCAN2);
+	s_f  = !(s_sn || s_sp || s_va || s_sc);
+	lv_ra = ({7{s_sn}} & sn_pa[10:4]) | ({7{s_sp}} & st_set) | ({7{s_va}} & e_va[10:4]) |
+	        ({7{s_sc}} & sc_set) | ({7{s_f}} & f_set);
+end
 initial for (int i = 0; i < 128; i++) begin
 	lsd[i] = 8'd0; lse[i] = 8'd0; lsw[i] = 8'd0;
 end
