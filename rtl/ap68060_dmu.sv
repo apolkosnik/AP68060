@@ -640,6 +640,79 @@ function automatic xres_t xlate_t(input logic [31:0] la, input logic s, input lo
 	end
 	xlate_t = x;
 endfunction
+// The engine's lookups resolve the translation in two clocks: the wait
+// state registers, besides the TTR hits, the outcome of the cases that do
+// not need the ATC (an alternate space, a TTR, the default translation):
+// xpre_of; the decision state's xlate_e then starts from that register --
+// the chain alt -> TTR -> TC.E -> ATC leaves the compare's clock.
+typedef struct packed {
+	logic       atc;      // the ATC decides (none of the cases below)
+	logic       flt;      // a fault (write protected) in a case below
+	logic [1:0] cm;
+	logic [1:0] upa;
+	logic [31:0] why;     // FSLW bits of the case below (the function's)
+} xpre_t;
+function automatic xpre_t xpre_of(input logic wr, input logic alt, input logic tt0, input logic tt1);
+	xpre_t r;
+	r = '0;
+	if (alt) begin
+		r.cm = 2'b10; r.upa = 2'd0;
+	end
+	else if (tt0 || tt1) begin
+		r.cm  = tt0 ? dtt0[6:5] : dtt1[6:5];
+		r.upa = tt0 ? dtt0[9:8] : dtt1[9:8];
+		r.flt = wr && (tt0 ? dtt0[2] : dtt1[2]);
+		r.why = FSLW_TTR | FSLW_WP;
+	end
+	else if (!tc_e) begin
+		r.cm  = tc[9:8];
+		r.upa = tc[7:6];
+		r.flt = wr && tc[5];
+		r.why = FSLW_WP;
+	end
+	else r.atc = 1'b1;
+	xpre_of = r;
+endfunction
+function automatic xres_t xlate_e(input logic [31:0] la, input logic s, input logic wr,
+                                  input xpre_t pre,
+                                  input logic hitv, input atce_t e,
+                                  input logic [20:0] t0, input logic [20:0] t1,
+                                  input logic [20:0] t2, input logic [20:0] t3,
+                                  input logic [3:0] valid);
+	xres_t x;
+	logic [20:0] tg;
+	x = '0;
+	if (!pre.atc) begin
+		x.ok  = 1'b1;
+		x.pa  = la;
+		x.cm  = pre.cm;
+		x.upa = pre.upa;
+		x.flt = pre.flt;
+		x.why = pre.why;
+	end
+	else if (hitv) begin
+		x.pa  = {e.pa[19:1], tc_p ? la[12] : e.pa[0], la[11:0]};
+		x.cm  = e.cm;
+		x.upa = e.upa;
+		if (!e.r || (e.s && !s) || (wr && e.w)) begin
+			x.flt = 1'b1;
+			x.ok  = 1'b1;
+			x.why = e.b ? (FSLW_TWE | FSLW_LK) : !e.r ? FSLW_PF :
+			        (e.s && !s) ? FSLW_SP : FSLW_WP;
+		end
+		else if (wr && !e.m) x.walk = 1'b1;
+		else x.ok = 1'b1;
+	end
+	else x.walk = 1'b1;
+	tg = x.pa[31:11];
+	if (x.ok && !x.flt) begin
+		if (valid[0] && t0 == tg) begin x.hit = 1'b1; x.way = 2'd0; end
+		if (valid[1] && t1 == tg) begin x.hit = 1'b1; x.way = 2'd1; end
+		if (valid[2] && t2 == tg) begin x.hit = 1'b1; x.way = 2'd2; end
+		if (valid[3] && t3 == tg) begin x.hit = 1'b1; x.way = 2'd3; end
+	end
+	xlate_e = x;
+endfunction
 function automatic xres_t xlate(input logic [31:0] la, input logic s, input logic wr,
                                 input logic alt,
                                 input logic hitv, input atce_t e,
@@ -910,6 +983,7 @@ wire  e_busy = (e_st != E_IDLE) && (e_st != E_W_START) && (e_st != E_W_DEC) &&
 // set (E_S_XLW, E_SP_W), the tags compared from the RAM the clock after
 logic        lk_hit;
 logic        lk_tt0, lk_tt1;       // ... and the address's TTR matches
+xpre_t       lk_pre;               // the stolen lookup's translation but for the ATC, from the wait state
 atce_t       lk_e;
 logic  [3:0] lk_hv;
 logic        e_job;               // the engine owns the DC2 uop until it is done
@@ -1699,6 +1773,9 @@ always_ff @(posedge clk) begin
 			lk_hit <= atc_hit; lk_e <= atc_e; lk_hv <= atc_hv;
 			lk_tt0 <= ttr_hit(dtt0, {m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode);
 			lk_tt1 <= ttr_hit(dtt1, {m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode);
+			lk_pre <= xpre_of((m2.r.mem != M_LD), fc_tt(m2.r.fc) == TT_ALT,
+			                  ttr_hit(dtt0, {m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode),
+			                  ttr_hit(dtt1, {m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode));
 			e_st   <= E_SP_2;
 		end
 		E_SP_3: begin
@@ -1740,9 +1817,16 @@ always_ff @(posedge clk) begin
 		end
 		E_SP_2: begin
 			xres_t x;
-			x  = xlate_t({m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode, (m2.r.mem != M_LD),
-			           fc_tt(m2.r.fc) == TT_ALT, lk_tt0, lk_tt1, lk_hit, lk_e,
-			           tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_fix(st_set));
+			x  = xlate_e({m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode, (m2.r.mem != M_LD),
+			             lk_pre, lk_hit, lk_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_fix(st_set));
+			// synthesis translate_off
+			if (x !== xlate_t({m2.r.a[31:4] + 28'd1, 4'd0}, m2.r.smode, (m2.r.mem != M_LD),
+			                  fc_tt(m2.r.fc) == TT_ALT, lk_tt0, lk_tt1, lk_hit, lk_e,
+			                  tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_fix(st_set))) begin
+				$display("FAIL: DMU: the engine's two-clock translation differs (E_SP_2)");
+				$finish;
+			end
+			// synthesis translate_on
 			// the second part's translation and lookup, registered (the
 			// decision and the data next cycle; the RAM keeps reading the
 			// stolen set)
@@ -1764,15 +1848,24 @@ always_ff @(posedge clk) begin
 			lk_hit <= atc_hit; lk_e <= atc_e; lk_hv <= atc_hv;
 			lk_tt0 <= ttr_hit(dtt0, e_va, m2.r.smode);
 			lk_tt1 <= ttr_hit(dtt1, e_va, m2.r.smode);
+			lk_pre <= xpre_of((m2.r.mem != M_LD), fc_tt(m2.r.fc) == TT_ALT,
+			                  ttr_hit(dtt0, e_va, m2.r.smode), ttr_hit(dtt1, e_va, m2.r.smode));
 			e_st   <= E_S_XL2;
 		end
 		E_S_XL2: begin
 			xres_t x;
 			// after a search: its result, not the ATC's (a failed search
 			// leaves no entry, nor does one in the no-allocate mode)
-			x = xlate_t(e_va, m2.r.smode, (m2.r.mem != M_LD), fc_tt(m2.r.fc) == TT_ALT,
-			          lk_tt0, lk_tt1, lk_hit || tw_use,
-			          tw_use ? tw_e : lk_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_fix(e_va[10:4]));
+			x = xlate_e(e_va, m2.r.smode, (m2.r.mem != M_LD), lk_pre, lk_hit || tw_use,
+			            tw_use ? tw_e : lk_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_fix(e_va[10:4]));
+			// synthesis translate_off
+			if (x !== xlate_t(e_va, m2.r.smode, (m2.r.mem != M_LD), fc_tt(m2.r.fc) == TT_ALT,
+			                  lk_tt0, lk_tt1, lk_hit || tw_use,
+			                  tw_use ? tw_e : lk_e, tq_a[0], tq_a[1], tq_a[2], tq_a[3], lve_fix(e_va[10:4]))) begin
+				$display("FAIL: DMU: the engine's two-clock translation differs (E_S_XL2)");
+				$finish;
+			end
+			// synthesis translate_on
 			if (tw_use && tw_fail) begin
 				x.ok  = 1'b1;
 				x.flt = 1'b1;
