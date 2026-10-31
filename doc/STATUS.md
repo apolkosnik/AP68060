@@ -207,6 +207,8 @@ results as one AND-OR; preserved twins placed by their consumers.
 | f120_r                  | 1cadb07 | 101.6 MHz  | -1.51 ns  | -431 ns  | 1,066             | 24,906 |
 | f120_ab (best)          | 5755964 | 102.65 MHz | -1.41 ns  | -194 ns  | 826               | 25,394 |
 | f120_ac .. f120_ag      | ..629723a | 96.5-100.6 MHz | -1.6..-2.0 ns | -364..-699 ns | 1,160-1,943 | ~25,800 |
+| f120_ah (stalls registered) | dbecc65 | 96.9 MHz | -1.99 ns | -226 ns | 711 | 25,302 |
+| f120_az (best)          | 5fcb013 | 103.25 MHz | -1.35 ns  | -141 ns  | 539               | 26,032 |
 
 The last six fits are near-identical netlists: their spread (TNS -194 to
 -699, the top clusters moving between modules) is placement, not logic --
@@ -224,13 +226,22 @@ iteration (main: the same), Whetstone 754,922 cycles per loop (main
 747,389: +1.0 %, from the one conservative case of the registered FPU
 `safe` -- a uop leaving EX as the FPU's enters).
 
-To 120 MHz: the remaining paths all start at the stall chain or the
-AG operand entry.  The structural fix is the stall of every stage as a
-register formed a clock ahead (doc/NOTES-regstall.md): its backend half is
-mechanical, but the DMU's four hold next-values are formed inside its one
-clocked block from block-local decisions, so it needs that block in
-two-process form first -- a multi-day refactor -- or an AG operand stage
-(an extra pipeline stage, with an IPC cost to measure).
+**Every stage's stall is now a register** (dbecc65 and after; the design
+study is doc/NOTES-regstall.md).  The DMU's four hold next-values turned
+out to need only three block-local terms, two replicated exactly and one
+(DC2's ready) allowed to be conservative by its contract, so no
+two-process refactor was needed.  The stall registers' D-inputs take the
+late decisions (EX's exception decision, the FPU interface's hold, the
+skid's valid, AG's address compare) as the last picks; DT's own decision,
+most of a clock, is out of them: the registers assume the access entering
+DC2 ready and DC2's registered ready corrects the stall nets one LUT from
+flip-flops.  With that the fit-to-fit spread collapsed (ah -226, an -210,
+ao -244, ap -210, av -182, az -141 TNS) and the failing endpoints fell
+from ~1,000-1,900 to 539; what remains fails by at most 1.35 ns: AG's
+operand capture (the file read into the capture's AND-OR), the slow
+ALU's flags, DC2's ready from DT's tag compare (-0.84), the engine's
+stolen lookup (-0.82) -- each within ~1 ns of wire plus 3-4 LUTs.
+Benchmarks unchanged (Dhrystone 1,071, Whetstone 754,922).
 
 ## Next
 
