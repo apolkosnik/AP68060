@@ -1565,10 +1565,12 @@ endfunction
 pst_t   p0, p1;
 fview_t v0, v1;
 fout_t  o0, o1;
-// (the two candidates kept as nets: the advance -- the stall chain, late --
-// is then the one select before oq, not pushed into their logic)
-(* keep *) wire [$bits(fout_t)-1:0] ok0 = o0;
-(* keep *) wire [$bits(fout_t)-1:0] ok1 = o1;
+// (oq: the outputs of the view EX will hold, formed once -- the advance
+// is EX's registered stall, one LUT from flip-flops, so it selects the
+// view first; the two candidates' holds, hs/ns, are still formed apart for
+// the stall registers' next values, fp_hs0/1, fp_ns0/1)
+fview_t vq;
+fout_t  oqn;
 always_comb begin
 	p0 = pred_f(1'b0, act);
 	p1 = pred_f(1'b1, ex_v);
@@ -1596,13 +1598,22 @@ always_comb begin
 	o1 = out_f(v1);
 	hs0 = o0.hs; ns0 = o0.ns;
 	hs1 = o1.hs; ns1 = o1.ns;
+	vq  = (ex_v && !adv) ? v0 : v1;
+	oqn = out_f(vq);
 end
 // (an FPU uop in EX that does not advance stays; otherwise the uop EX takes
 // next is DC2's -- when EX is empty or holds another kind of uop, the
 // outputs are not used)
 always_ff @(posedge clk)
 	if (!nreset) oq <= '0;
-	else oq <= (ex_v && !adv) ? fout_t'(ok0) : fout_t'(ok1);
+	else oq <= oqn;
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && oqn !== ((ex_v && !adv) ? o0 : o1)) begin
+		$display("FAIL: fpif: the selected view's outputs differ from the candidate's");
+		$finish;
+	end
+// synthesis translate_on
 
 // the uop may act: it need not wait for the older uops (oq.ns), or they
 // are gone (safe)
