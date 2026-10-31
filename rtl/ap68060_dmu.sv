@@ -666,6 +666,16 @@ logic       m1_tp;
 logic  [3:0] mt_hv;
 logic [19:0] mt_wpa [4];
 logic [20:0] mt_ptag [4];           // each ATC way's page tag for DT's compare (registered with mt_wpa)
+// DT's tag compare in two halves: the 21-bit equalities' seven 3-bit chunk
+// matches are made in DC1, on the RAM's and the ATC's outputs, and
+// registered (mt_eq: cache way j against ATC way i; mt_eqd: against the
+// untranslated address); DT ANDs the chunks -- one level in DC1, two
+// fewer in DT
+logic [6:0] mt_eq [4][4];
+logic [6:0] mt_eqd [4];
+function automatic logic [6:0] eq7(input logic [20:0] a, input logic [20:0] b);
+	for (int c = 0; c < 7; c++) eq7[c] = (a[3*c +: 3] == b[3*c +: 3]);
+endfunction
 atce_t       mt_ent [4];
 logic [20:0] mt_tq [4];
 logic        mt_tp;
@@ -709,9 +719,9 @@ always_comb begin
 		// mt_ptag: the page-size bit's select and TC.P -- a far register --
 		// are off the compare)
 		for (int i = 0; i < 4; i++)
-			if (mt_hv[i] && mt_tq[j] == mt_ptag[i])
+			if (mt_hv[i] && (&mt_eq[j][i]))
 				ma = 1'b1;
-		tk_mj[j] = lvd_q[j] && (mt_tp ? (mt_tq[j] == mt.a[31:11]) : ma);
+		tk_mj[j] = lvd_q[j] && (mt_tp ? (&mt_eqd[j]) : ma);
 	end
 	tk_hit = |tk_mj;
 	tk_way = tk_mj[3] ? 2'd3 : tk_mj[2] ? 2'd2 : tk_mj[1] ? 2'd1 : 2'd0;
@@ -1456,6 +1466,11 @@ always_ff @(posedge clk) begin
 				mt_hv   <= atc_hvd;
 				mt_wpa  <= atc_wpad;
 				for (int i = 0; i < 4; i++) mt_ptag[i] <= {atc_wpad[i][19:1], tc_p ? m1.a[12] : atc_wpad[i][0], m1.a[11]};
+				for (int j = 0; j < 4; j++) begin
+					for (int i = 0; i < 4; i++)
+						mt_eq[j][i] <= eq7(tq_a[j], {atc_wpad[i][19:1], tc_p ? m1.a[12] : atc_wpad[i][0], m1.a[11]});
+					mt_eqd[j] <= eq7(tq_a[j], m1.a[31:11]);
+				end
 				mt_ent  <= atc_entd;
 				mt_tq   <= tq_a;
 				// (formed again, from the pins and registers as they will be
@@ -1486,6 +1501,11 @@ always_ff @(posedge clk) begin
 					mt_hv  <= atc_hvd;
 					mt_wpa <= atc_wpad;
 					for (int i = 0; i < 4; i++) mt_ptag[i] <= {atc_wpad[i][19:1], tc_p ? mt.a[12] : atc_wpad[i][0], mt.a[11]};
+					for (int j = 0; j < 4; j++) begin
+						for (int i = 0; i < 4; i++)
+							mt_eq[j][i] <= eq7(tq_a[j], {atc_wpad[i][19:1], tc_p ? mt.a[12] : atc_wpad[i][0], mt.a[11]});
+						mt_eqd[j] <= eq7(tq_a[j], mt.a[31:11]);
+					end
 					mt_ent <= atc_entd;
 					mt_tq  <= tq_a;
 					stl    = 1'b0;
@@ -3368,13 +3388,26 @@ end
 // synthesis translate_on
 
 // synthesis translate_off
-always_ff @(posedge clk)
+always_ff @(posedge clk) begin
+	if (nreset && mt.v)
+		for (int j = 0; j < 4; j++) begin
+			for (int i = 0; i < 4; i++)
+				if ((&mt_eq[j][i]) !== (mt_tq[j] == mt_ptag[i])) begin
+					$display("FAIL: DMU: DT's chunked compare of cache way %0d with ATC way %0d %b, the words' %b", j, i, &mt_eq[j][i], mt_tq[j] == mt_ptag[i]);
+					$finish;
+				end
+			if ((&mt_eqd[j]) !== (mt_tq[j] == mt.a[31:11])) begin
+				$display("FAIL: DMU: DT's chunked direct compare of cache way %0d %b, the words' %b", j, &mt_eqd[j], mt_tq[j] == mt.a[31:11]);
+				$finish;
+			end
+		end
 	if (nreset && mt.v)
 		for (int i = 0; i < 4; i++)
 			if (mt_ptag[i] !== {mt_wpa[i][19:1], tc_p ? mt.a[12] : mt_wpa[i][0], mt.a[11]}) begin
 				$display("FAIL: DMU: DT's registered page tag %h of ATC way %0d, the composed %h", mt_ptag[i], i, {mt_wpa[i][19:1], tc_p ? mt.a[12] : mt_wpa[i][0], mt.a[11]});
 				$finish;
 			end
+end
 // synthesis translate_on
 // synthesis translate_off
 always_ff @(posedge clk)
