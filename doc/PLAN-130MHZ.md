@@ -274,3 +274,49 @@ Done 2026-10-31 (the broadcast from EX2).  Found on the way:
 Regression 392/392 (t_integer with 306-310), corpus smoke 5/5.
 Cycle cost: Dhrystone 1,102 cycles/iteration (+1.5 % on EX2, +2.9 % on
 main), Whetstone 789,862 cycles/loop (+0.6 % on EX2).
+
+Fit f130_c (53cc21e): Fmax 99.1 MHz, slack -2.40, TNS -1,601, 3,786
+endpoints, 25,718 ALMs -- worse than f130_b by TNS and count.  The
+broadcast register e2_res fans out to the file's write port, four
+stages' captures, EX's bypass ahead of the ALU and the clock-late copy:
+the bypass put that fan-out's wire in front of the ALU (e2_res -> ccr_f
+-2.15, mxe_b -> e2_stdata -1.87 x 30) and the captures' family moved
+rather than vanished (sk_v -> agx_q -2.16 x 44, m2.x.way -> ex_av_r).
+Two stall-register sources from far modules led (useq.uq_e, dmu.bo_err:
+-2.4, placement).  Next: e2_res in four preserved copies, one per
+consumer group (f130_d), then the AG split.
+
+### 3.2 AG split: the design
+
+Today a uop's base and index are read from the file as it enters AG
+(the ports addressed from the sequencer's head and the skid, the bank
+and front selects registered), and the capture into agb_q/agx_q picks,
+in one clock, among the file's word (its MLAB read, then the select),
+AG's own updates of this clock (b1/b0), the load handed over from DC2
+(dc2_capv) and the broadcast (xw_q); AG then adds (add3) into dm_va.
+The file's word is the last to arrive: that select and the skid's valid
+(sk_v) are the worst family after EX2 (-2.2 ns).
+
+AG1 (operands) / AG2 (address):
+- AG1 holds the uop (a1_u) and the file's words for its base and index
+  as read (a1_fb, a1_fx: the front/back selects applied, nothing else),
+  with the skid folded in: the sequencer's uop enters AG1 directly
+  (in_rdy = !stall_a1, a register), the skid register goes.
+- AG2 is today's AG: agb_q/agx_q are loaded from AG1's registered words
+  with the same capture AND-OR (the updates, the handed-over load, the
+  broadcast) -- all its inputs are now flip-flops -- and adds.
+- The writes the file sees between the read (AG1 entry) and the use
+  (AG2 entry) are one clock more than today: AG's own updates written
+  in the clock the uop sits in AG1 (fwe[0/1]: compared as today, one
+  clock later), and the broadcast's write (xw, a register: compared with
+  a1_u's registers while the uop sits in AG1, the word replaced).  The
+  pattern is the existing one (b1/b0, qb_o), applied in AG1 as well.
+- The writer flags (wf_*) and the interlock (ilk) move with the uop: the
+  compares are made as the uop enters AG1 (one stage earlier), the flags
+  shift by one more stage (DC1 .. left EX2 become AG2, DC1 .. left EX2).
+  AG2's hold is the interlock as today.
+- The register files' ports 0/1 (and 5/6, the skid's) are addressed from
+  the sequencer's head as today; the skid's ports go with the skid.
+Cost: one more stage between the sequencer and the data cache; a
+mispredict or exception reaches the next uop one clock later still
+(+1 on the branch penalty), load-use for an address register +1.

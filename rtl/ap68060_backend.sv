@@ -274,10 +274,22 @@ logic [15:0] e2_sr_new;
 logic  [4:0] e2_ccr;
 logic [31:0] e2_doh;
 // the result broadcast: EX2's, from registers -- the front file's write
-// port and every younger stage's capture of it
+// port and every younger stage's capture of it.  The result register in
+// four preserved copies, one per consumer group, so each sits by its
+// consumers: e2_res the file's write port and WB, e2_res_c the stages'
+// captures (DC1, DT, DC2 and DC2's operands entering EX), e2_res_x EX's
+// own bypass ahead of the ALU, e2_res_q the clock-late copy for AG
+(* preserve *) logic [31:0] e2_res_c, e2_res_x, e2_res_q;
 wire         xw_v   = e2_v && e2_dwe;
 wire   [4:0] xw_reg = e2_u.d_reg;
-wire  [31:0] xw_val = e2_res;
+wire  [31:0] xw_val = e2_res_c;
+// synthesis translate_off
+always_ff @(posedge clk)
+	if (nreset && e2_v && (e2_res_c !== e2_res || e2_res_x !== e2_res || e2_res_q !== e2_res)) begin
+		$display("FAIL: EX2's result copies differ: %h %h %h %h", e2_res, e2_res_c, e2_res_x, e2_res_q);
+		$finish;
+	end
+// synthesis translate_on
 logic wb_ok;                  // WB's uop has no exception (wb_exc == 0), registered
 logic [4:0] ccr_nx;           // the condition codes next, but for the exception entry's (see the block)
 // the holds' next values (for the registered stalls, at the end of this
@@ -858,10 +870,10 @@ logic [31:0] ex_av_r, ex_bv_r;
 // stages' capture selects) -- the back-to-back dependence; the register
 // takes the value as well, for the cycles after
 logic        mxe_a, mxe_b;
-wire  [31:0] ex_av = (xw_v && mxe_a) ? (ex_u.a_sxw ? {{16{e2_res[15]}}, e2_res[15:0]} : e2_res) : ex_av_r;
-wire  [31:0] ex_bv = (xw_v && mxe_b) ? e2_res : ex_bv_r;
-wire  [31:0] ex_a  = (xw_v && mxe_a) ? e2_res : ex_a_r;
-wire  [31:0] ex_b  = (xw_v && mxe_b) ? e2_res : ex_b_r;
+wire  [31:0] ex_av = (xw_v && mxe_a) ? (ex_u.a_sxw ? {{16{e2_res_x[15]}}, e2_res_x[15:0]} : e2_res_x) : ex_av_r;
+wire  [31:0] ex_bv = (xw_v && mxe_b) ? e2_res_x : ex_bv_r;
+wire  [31:0] ex_a  = (xw_v && mxe_a) ? e2_res_x : ex_a_r;
+wire  [31:0] ex_b  = (xw_v && mxe_b) ? e2_res_x : ex_b_r;
 
 logic [31:0] alu_res, alu_sum, alu_sumo, alu_resf;
 logic [15:0] ex_rk;            // the ALU result's case, one-hot (alu_rk), registered
@@ -1918,7 +1930,7 @@ always_comb begin
 	fwoh[0] = ag_uoh; fwoh[1] = ag_u2oh; fwoh[2] = e2_doh;
 	fwe_ag[0] = ag_v && ag_u.upd_v && !ag_dyncan;
 	fwe_ag[1] = ag_v && ag_u.upd2_v && !ag_dyncan;
-	fwe[2] = xw_v;                  fwa[2] = xw_reg;        fwd[2] = xw_val;
+	fwe[2] = xw_v;                  fwa[2] = xw_reg;        fwd[2] = e2_res;
 	wcom  = wb_commit;
 	wpost = adv_wb && wb_is_exc && (wb_post_trap || wb_xcommit);
 	// the back file: two write ports, the later winning on the same
@@ -2490,8 +2502,8 @@ always_ff @(posedge clk) begin
 		else if (ex_v && xw_v) begin
 			// EX2's result into EX's own operands (the bypass above has it
 			// this cycle; the registers for the cycles after)
-			if (mxe_a) begin ex_a_r <= xw_val; ex_av_r <= ex_u.a_sxw ? {{16{xw_val[15]}}, xw_val[15:0]} : xw_val; end
-			if (mxe_b) begin ex_b_r <= xw_val; ex_bv_r <= xw_val; end
+			if (mxe_a) begin ex_a_r <= e2_res_x; ex_av_r <= ex_u.a_sxw ? {{16{e2_res_x[15]}}, e2_res_x[15:0]} : e2_res_x; end
+			if (mxe_b) begin ex_b_r <= e2_res_x; ex_bv_r <= e2_res_x; end
 		end
 		if (!stall_ex) ex_v <= adv_dc2;
 		// EX's next uop against EX2's next and WB's next: EX's own when it
@@ -2541,6 +2553,9 @@ always_ff @(posedge clk) begin
 			e2_npc      <= ex_npc;
 			e2_doh      <= ex_doh;
 			e2_res      <= exw_val;
+			e2_res_c    <= exw_val;
+			e2_res_x    <= exw_val;
+			e2_res_q    <= exw_val;
 			e2_dwe      <= ex_d_eff;
 			e2_upd      <= ex_upd;
 			e2_upd2     <= ex_upd2;
@@ -3084,7 +3099,7 @@ endfunction
 // one is not taken, cbl/cxl and cbl2/cxl2)
 logic cbl, cxl, cbl2, cxl2;
 always_ff @(posedge clk) begin
-	xw_q    <= xw_val;
+	xw_q    <= e2_res_q;
 	xw_qreg <= xw_reg;
 	xw_qv   <= xw_v && !kill_now && !flush && nreset;
 end
