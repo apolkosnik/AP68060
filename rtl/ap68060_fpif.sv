@@ -507,16 +507,17 @@ function automatic logic [6:0] chk_dec(input logic [15:0] ow, input logic [15:0]
 	           (ow[15:6] == 10'b1111_0010_01)};
 endfunction
 logic [6:0] cq;                 // chk_dec of the uop in EX (CHK's words)
-logic       cq_none, cq_flcr;   // ... its fault class K_NONE, K_FLCR (for the hold)
+logic       cq_none, cq_flcr, cq_flil;   // ... its fault class K_NONE, K_FLCR (for the hold)
 logic       cq_zero, cq_eaf;    // ... a fault with frame address 0, or the operand's
 always_ff @(posedge clk)
 	if (!nreset) begin
-		cq <= '0; cq_none <= 1'b1; cq_flcr <= 1'b0; cq_zero <= 1'b0; cq_eaf <= 1'b0;
+		cq <= '0; cq_none <= 1'b1; cq_flcr <= 1'b0; cq_flil <= 1'b0; cq_zero <= 1'b0; cq_eaf <= 1'b0;
 	end
 	else if (dw_ld) begin
 		cq      <= chk_dec(dw_b, dw_a);
 		cq_none <= cq_k_n == K_NONE;
 		cq_flcr <= cq_k_n == K_FLCR;
+		cq_flil <= cq_k_n == K_FLINE || cq_k_n == K_ILL;   // (their own exceptions, the FPU disabled too)
 		cq_zero <= cq_k_n == K_UNIMP || cq_k_n == K_FMOVECR || cq_k_n == K_PK;
 		cq_eaf  <= cq_k_n == K_UNIMPM || cq_k_n == K_PKM;
 	end
@@ -822,7 +823,7 @@ always_comb begin
 				disp = target[15:0] - pc[15:0] - 16'd4;
 				if (dfr == K_DFPM) begin
 					// FScc <mem>, the FPU disabled: its operand's address
-					xvec = VEC_FLINE; xfmt = 4'd4; xnext = 1'b1; xaddr = ea;
+					xvec = VEC_FLINE; xfmt = 4'd4; xnext = 1'b1; xaddr_g = ea;
 				end
 				else if (!is_bcc_l) begin
 					// FScc, FDBcc, FTRAPcc: unimplemented on the 68060.  The
@@ -869,7 +870,7 @@ wire [31:0] eaf_l   = ea_imm_l ? 32'd0 :
 wire [15:0] dbcc_d  = target[15:0] - pc[15:0] - 16'd4;
 always_comb begin
 	case (sub)
-		FC_CHK:  xaddr = (dfp && !cq_flcr) ? (eal ? eaf : 32'd0) :
+		FC_CHK:  xaddr = (dfp && !cq_flcr && !cq_flil) ? (eal ? eaf : 32'd0) :
 		                 (fuse && go) ? (f_unimp ? 32'd0 : pc) :
 		                 chk_pend ? pc : cq_zero ? 32'd0 :
 		                 (cq_eaf && eal) ? eaf : pc;
