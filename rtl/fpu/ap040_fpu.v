@@ -2403,7 +2403,20 @@ always @(posedge clk) begin : fsm
 					               : {r_din[95], 15'h3F80, 16'd0, 1'b0, r_din[86:64], 40'd0}) :
 					      (dbl ? {r_din[95], e[14:0], 16'd0, 1'b1, r_din[83:32], 11'd0}
 					           : {r_din[95], e[14:0], 16'd0, 1'b1, r_din[86:64], 40'd0});
-					sh_src <= img;
+					// (the image is the operand F_SRC writes into a_s/a_e/a_m:
+					// the unpacked significand and the extended exponent --
+					// for every class whose image is read; the others go
+					// through F_EXEC, which writes sh_src again)
+					sh_src <= {r_din[95], r_lde[14:0], 16'd0, unp_m};
+					// synthesis translate_off
+					if (nreset && (!sd ? (r_fmt == 3'd2) : 1'b1) &&
+					    (r_dcls == C_DEN || r_dcls == {1'b0, T_NUM}) &&
+					    img !== {r_din[95], r_lde[14:0], 16'd0, unp_m}) begin
+						$display("FAIL: FPU F_SRC's exception image %h, the operand's %h (fmt %0d class %0d)",
+						         img, {r_din[95], r_lde[14:0], 16'd0, unp_m}, r_fmt, r_dcls);
+						$finish;
+					end
+					// synthesis translate_on
 					case (r_fmt)
 						3'd0, 3'd4, 3'd6: begin
 							a_t <= (r_dcls[1:0] == T_ZERO) ? T_ZERO : T_NUM;
