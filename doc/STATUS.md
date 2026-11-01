@@ -190,6 +190,33 @@ tb/asm bench programs:
 A BALANCED-mode fit (instead of HIGH PERFORMANCE EFFORT) is no smaller
 (24,658 ALMs).
 
+### Branch 060-70mhz: the full CPU at 70 MHz under 20,000 ALMs
+
+The 060-120mhz branch at 950207f (every hold the stall chain reads a
+register, the FPU's state machine re-pipelined), with main's fixes since
+the fork (an unimplemented FP instruction keeps NULL, FSLW TTR on bus
+errors, the instruction cache's stale tag) and the tests t_initstruct,
+t_integer 311-313, t_fpu 763-780.  The full FPU, both caches and ATCs,
+two-word fetch.  Out-of-context fits (syn/fitcore.sh):
+
+| fit | target | ALMs | slack | Fmax |
+|-----|--------|------|-------|------|
+| f69_14286 | 70 MHz (14.286 ns) | 20,622 | +0.504 ns | 72.56 MHz |
+| f69_150 | 66.7 MHz (15 ns) | 20,625 | +0.742 ns | 70.14 MHz |
+
+In the Minimig build main's core took 0.963 of its out-of-context
+figure (19,376 in -016 against 20,116): about 19,860 ALMs in-system.
+Dhrystone 969 cycles/iteration, Whetstone 690,628 cycles/loop (main:
+971, 628,390): at 70 MHz +40 % and +27 % over main at 50 MHz.
+Regression 402 PASS; corpus smoke 5/5.
+
+How it was chosen (fits of 060-120mhz commits at PERIOD=12.5): 494a89a
+20,707 ALMs / 60.5 MHz; 950207f 20,646 / 69.2; e3dba55 21,041 / 74.9;
+91a2353 (the front end's pipelining merged) 22,878 / 92.8; 969f41f
+22,869 / 94.6.  The ~93 MHz step costs ~1,500 ALMs; with the later area
+work ported (predecoder ROMs, the fetch word ring) 969f41f is 22,083,
+still ~1,300 over the budget.
+
 ## Next
 
 1. Area: about 2,500 ALMs still to go.  With the options off, by ALUTs:
