@@ -625,6 +625,15 @@ cas1ok:
 	failt	129
 cas2ok:
 	chkl	d2,$12341234,130	; Dc loaded with the operand
+	moveq	#0,d2			; a mismatch with Du unlike memory:
+	move.l	#$55AA55AA,d3		; the write is of the value read
+	cas.l	d2,d3,($3090).l
+	bne.s	cas3ok
+	failt	312
+cas3ok:
+	move.l	($3090).l,d3
+	chkl	d3,$12341234,311	; memory rewritten with its own value
+	chkl	d2,$12341234,313
 	move.b	#$77,($3094).l
 	move.l	#$77,d3
 	move.l	#$99,d4

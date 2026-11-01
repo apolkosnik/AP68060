@@ -641,6 +641,86 @@ unimp_return:
 	chkl	d0,$00000A28,183	; UNFL+INEX2 status, both accrued
 	fmove.l	#0,fpsr
 
+; Subnormal single and double stores (F_PACKS): the rounding increment at
+; the format's last kept bit, round to nearest even, the carry into the
+; minimum normal; each takes the nonmaskable UNFL trap once.  (Expected
+; values worked out exactly from the extended operands.)
+	; double exact: 2^-1023
+	move.l	#$3C000000,($32D0).l
+	move.l	#$80000000,($32D4).l
+	move.l	#$00000000,($32D8).l
+	fmove.x	($32D0).l,fp5
+	fmove.l	#0,fpsr
+	clr.w	(cnt_fpunfl).l
+	fmove.d	fp5,($32E0).l
+	move.l	($32E0).l,d0
+	chkl	d0,$00080000,763
+	move.l	($32E4).l,d0
+	chkl	d0,$00000000,764
+	chkcnt	cnt_fpunfl,1,765
+	; double just below 2^-1022: carried up to the minimum normal
+	move.l	#$3C000000,($32D0).l
+	move.l	#$FFFFFFFF,($32D4).l
+	move.l	#$FFFFFFF0,($32D8).l
+	fmove.x	($32D0).l,fp5
+	fmove.l	#0,fpsr
+	clr.w	(cnt_fpunfl).l
+	fmove.d	fp5,($32E0).l
+	move.l	($32E0).l,d0
+	chkl	d0,$00100000,766
+	move.l	($32E4).l,d0
+	chkl	d0,$00000000,767
+	chkcnt	cnt_fpunfl,1,768
+	; double 3.5 ulp: to even, 4
+	move.l	#$3BCE0000,($32D0).l
+	move.l	#$E0000000,($32D4).l
+	move.l	#$00000000,($32D8).l
+	fmove.x	($32D0).l,fp5
+	fmove.l	#0,fpsr
+	clr.w	(cnt_fpunfl).l
+	fmove.d	fp5,($32E0).l
+	move.l	($32E0).l,d0
+	chkl	d0,$00000000,769
+	move.l	($32E4).l,d0
+	chkl	d0,$00000004,770
+	chkcnt	cnt_fpunfl,1,771
+	; double 2.5 ulp: to even, 2
+	move.l	#$3BCE0000,($32D0).l
+	move.l	#$A0000000,($32D4).l
+	move.l	#$00000000,($32D8).l
+	fmove.x	($32D0).l,fp5
+	fmove.l	#0,fpsr
+	clr.w	(cnt_fpunfl).l
+	fmove.d	fp5,($32E0).l
+	move.l	($32E0).l,d0
+	chkl	d0,$00000000,772
+	move.l	($32E4).l,d0
+	chkl	d0,$00000002,773
+	chkcnt	cnt_fpunfl,1,774
+	; single 1.5 ulp: 2
+	move.l	#$3F6A0000,($32D0).l
+	move.l	#$C0000000,($32D4).l
+	move.l	#$00000000,($32D8).l
+	fmove.x	($32D0).l,fp5
+	fmove.l	#0,fpsr
+	clr.w	(cnt_fpunfl).l
+	fmove.s	fp5,($32E0).l
+	move.l	($32E0).l,d0
+	chkl	d0,$00000002,775
+	chkcnt	cnt_fpunfl,1,777
+	; single 2^22 + 0.75 ulp: up, no carry
+	move.l	#$3F800000,($32D0).l
+	move.l	#$80000180,($32D4).l
+	move.l	#$00000000,($32D8).l
+	fmove.x	($32D0).l,fp5
+	fmove.l	#0,fpsr
+	clr.w	(cnt_fpunfl).l
+	fmove.s	fp5,($32E0).l
+	move.l	($32E0).l,d0
+	chkl	d0,$00400001,778
+	chkcnt	cnt_fpunfl,1,780
+	fmove.l	#0,fpsr
+
 ; A denormal extended source is an unsupported data type: vector 55 as a
 ; pre-instruction exception (MC68060UM 6.5.2 and table 6-10: format $0, the
 ; stacked PC the NEXT instruction, the address register updated -- the
