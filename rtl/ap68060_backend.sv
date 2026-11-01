@@ -2361,6 +2361,8 @@ logic  [7:0] x_vec;
 logic  [3:0] x_fmt;
 logic [31:0] x_pc, x_addr, x_fslw;
 logic [15:0] x_osr, x_nsr;
+(* keep *) wire [4:0] ccr_nc = ccr_nx;
+(* keep *) wire [4:0] ccr_xc = x_osr[4:0];
 logic  [3:0] x_kind;
 logic  [4:0] x_ssp;
 always_comb begin
@@ -3017,10 +3019,11 @@ always_ff @(posedge clk) begin
 			rt_pc    <= wb_u.pc;
 		end
 		// the condition codes: EX's flags, a redirect's or a refetch's
-		// restart (ccr_nx, formed apart), and the exception entry's (x_osr,
-		// assigned below, last: x_go -- the exception decision, late -- is
-		// then the one select before the flip-flops)
-		ccr_f <= ccr_nx;
+		// restart (ccr_nx, formed apart), and the exception entry's
+		// (x_osr): x_go -- the exception decision, late -- the one select
+		// before the flip-flops, its two candidates kept nets (the fitter
+		// otherwise folds terms in after it)
+		ccr_f <= x_go ? ccr_xc : ccr_nc;
 
 		//------------------------------------------------------------------
 		// exception entry: a faulting/trapping uop (its effects discarded,
@@ -3063,7 +3066,6 @@ always_ff @(posedge clk) begin
 			xm_v     <= (x_kind == EK_IRQ);
 			xm_m     <= x_osr[12];
 			ccr_b    <= x_osr[4:0];
-			ccr_f    <= x_osr[4:0];
 			stopped  <= 1'b0;
 			lpstopped <= 1'b0;
 			if (take_irq && !(adv_wb && wb_is_exc)) begin
