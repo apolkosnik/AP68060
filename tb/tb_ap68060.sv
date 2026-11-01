@@ -1409,7 +1409,7 @@ always_ff @(posedge clk) begin
 			if (dut.be.ipl_q < 3'(l) || dut.be.x_go || dut.be.xwin ||
 			    (dut.be.wb_bound && !dut.be.take_irq))
 				tb_qual[l] <= 1'b0;
-			else if (dut.be.ipl_q == 3'(l) && 3'(l) > dut.be.irq_mask)
+			else if (dut.be.ipl_q == 3'(l) && 3'(l) > dut.be.irq_mask_c)
 				tb_qual[l] <= 1'b1;
 		end
 		if (ipl_lvl == 3'd0) begin

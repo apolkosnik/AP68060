@@ -1965,8 +1965,11 @@ logic  [2:0] ipend_lvl;
 // the mask its own boundary decides with is its new one)
 logic  [2:0] irq_mask;
 logic        wb_srw;          // WB's SR-writing uop has waited its clock
+// (the mask as of this clock, an SR write at WB counted: what irq_mask
+// takes, and what an IPEND claim is formed against)
+wire   [2:0] irq_mask_c = (wb_v && wb_sr_we && wb_ok) ? wb_sr_new[10:8] : sr_r[10:8];
 always_ff @(posedge clk)
-	irq_mask <= (wb_v && wb_sr_we && wb_ok) ? wb_sr_new[10:8] : sr_r[10:8];
+	irq_mask <= irq_mask_c;
 // level 7 is also recognised by level comparison whenever the mask is
 // below 7 (MC68060UM 8.2.9, figure 8-3: RTE or MOVE to SR lowering the
 // mask with IPL still at 7 takes it again); at mask 7 only its edge
@@ -2225,9 +2228,10 @@ always_comb begin
 	if (ipl == 3'd7 && ipl_q != 3'd7) nm = 1'b1;
 	else if (ipl != 3'd7) nm = 1'b0;
 	ir = ipend_r; il = ipend_lvl;
-	if (ipl_q == 3'd0 || ipl_q == 3'd7 || (ipend_r && ipl_q < ipend_lvl) || x_go || xwin)
+	if (ipl_q == 3'd0 || ipl_q == 3'd7 || (ipend_r && ipl_q < ipend_lvl) || x_go || xwin ||
+	    (wb_bound && !take_irq))
 		ir = 1'b0;
-	else if (ipl_q > sr_r[10:8] && (!ipend_r || ipl_q > ipend_lvl)) begin
+	else if (ipl_q > irq_mask_c && (!ipend_r || ipl_q > ipend_lvl)) begin
 		ir = 1'b1;
 		il = ipl_q;
 	end
@@ -2235,7 +2239,7 @@ always_comb begin
 		ir = 1'b0;
 		if (irq_lvl == 3'd7) nm = 1'b0;
 	end
-	mk = (wb_v && wb_sr_we && wb_ok) ? wb_sr_new[10:8] : sr_r[10:8];
+	mk = irq_mask_c;
 	irq_pend_n = nm || (ipl > mk) || (ipl != 3'd7 && ir && ipl >= il);
 end
 always_ff @(posedge clk) irq_pend_q <= nreset && irq_pend_n;
@@ -2534,20 +2538,21 @@ always_ff @(posedge clk) begin
 		// handler's first instruction has completed, and none carried into
 		// it: that instruction may raise the mask first, 8.1, 8.3)
 		// A claim is formed against the mask in force at this boundary
-		// (irq_mask: an SR write at WB counts already -- sr_r still holds
-		// the old mask in the clock ORI #$0700,SR / MOVE #$2700,SR is
-		// there), and it lasts to the next boundary only: one that does
-		// not take it drops it.  Taken there, the handler stacks the new
-		// mask and the PC right after the raise, before anything of the
-		// section it closes has run; at any later boundary the request
-		// would run inside that section (exec's dispatcher: Signal() from
-		// the server Enqueue()s into a list being unlinked, tasks lost).
-		// While the mask stays below the level, irq_pend's comparison
-		// takes the request anyway.
+		// (irq_mask_c: an SR write at WB counts already -- sr_r, and the
+		// registered irq_mask, still hold the old mask in the clocks ORI
+		// #$0700,SR / MOVE #$2700,SR is there), and it lasts to the next
+		// boundary only: one that does not take it drops it.  Taken there,
+		// the handler stacks the new mask and the PC right after the
+		// raise, before anything of the section it closes has run; at any
+		// later boundary the request would run inside that section (exec's
+		// dispatcher: Signal() from the server Enqueue()s into a list
+		// being unlinked, tasks lost).  While the mask stays below the
+		// level, irq_pend's comparison takes the request anyway.
+		// (irq_pend_n below repeats these terms)
 		if (ipl_q == 3'd0 || ipl_q == 3'd7 || (ipend_r && ipl_q < ipend_lvl) || x_go || xwin ||
 		    (wb_bound && !take_irq))
 			ipend_r <= 1'b0;
-		else if (ipl_q > irq_mask && (!ipend_r || ipl_q > ipend_lvl)) begin
+		else if (ipl_q > irq_mask_c && (!ipend_r || ipl_q > ipend_lvl)) begin
 			ipend_r   <= 1'b1;
 			ipend_lvl <= ipl_q;
 		end
