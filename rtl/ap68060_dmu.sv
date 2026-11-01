@@ -397,6 +397,13 @@ logic        vq_v, vq_lwe, vq_lv, vq_dwe, vq_dv;
 logic  [6:0] vq_set;
 logic  [3:0] vq_wm;
 logic        vq_mt;               // vq_set == mt.a[10:4], registered
+// (the snooper's copy of the write: its own flip-flops, placed by it --
+// identical to vq_*, so preserved, or synthesis merges them into vq_set's
+// hundred-fold fan-out)
+(* preserve *) logic        dv_we_q, dv_lv_q;
+(* preserve *) logic  [6:0] dv_set_q;
+(* preserve *) logic  [3:0] dv_wm_q;
+assign dv_we = dv_we_q; assign dv_set = dv_set_q; assign dv_wm = dv_wm_q; assign dv_lv = dv_lv_q;
 // the engine's registered valid bits (lve_sp, read in the stolen lookup's
 // wait state) with the port's pending write laid over them -- a write
 // requested in that clock, which the live read merges -- from registers
@@ -3306,10 +3313,10 @@ always_ff @(posedge clk) begin
 				if (ve_site[7] && f_set == sc_set && f_way == 2'(j)) begin sc_lv[j] <= pv_keep && fv_lv; sc_ld[j] <= 1'b0; end
 			end
 			// (the snooper's copy follows a clock later)
-			dv_we  <= vp_lwe;
-			dv_set <= vp_set;
-			dv_wm  <= vp_wm;
-			dv_lv  <= vp_lv;
+			dv_we_q  <= vp_lwe;
+			dv_set_q <= vp_set;
+			dv_wm_q  <= vp_wm;
+			dv_lv_q  <= vp_lv;
 		end
 		m1_stale <= m1s_n;
 		mt_stale <= mts_n;
