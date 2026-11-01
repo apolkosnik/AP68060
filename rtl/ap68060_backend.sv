@@ -1240,8 +1240,10 @@ logic  [2:0] irq_lvl_r;       // level being acknowledged
 // to SR, RTE, ANDI/ORI/EORI to SR) decides with its new mask, so a request
 // it unmasks is taken at that very boundary (cputest irq/all).  A request
 // that already beat the mask holds IPEND (ipend_r) and is taken at the next
-// boundary although the instruction raises the mask; IPEND lasts only while
-// the request is held at that level or above.
+// boundary although the instruction there raises the mask; IPEND lasts only
+// while the request is held at that level or above, and only to that
+// boundary (below: never at a later one, inside the section the raised
+// mask closes -- t_ipendmask).
 logic        ipend_r;
 logic  [2:0] ipend_lvl;
 wire  [2:0]  irq_mask = (wb_v && wb_sr_we && wb_ok) ? wb_sr_new[10:8] : sr_r[10:8];
@@ -1579,9 +1581,21 @@ always_ff @(posedge clk) begin
 		// (no claim from the start of an exception's processing until its
 		// handler's first instruction has completed, and none carried into
 		// it: that instruction may raise the mask first, 8.1, 8.3)
-		if (ipl_q == 3'd0 || ipl_q == 3'd7 || (ipend_r && ipl_q < ipend_lvl) || x_go || xwin)
+		// A claim is formed against the mask in force at this boundary
+		// (irq_mask: an SR write at WB counts already -- sr_r still holds
+		// the old mask in the clock ORI #$0700,SR / MOVE #$2700,SR is
+		// there), and it lasts to the next boundary only: one that does
+		// not take it drops it.  Taken there, the handler stacks the new
+		// mask and the PC right after the raise, before anything of the
+		// section it closes has run; at any later boundary the request
+		// would run inside that section (exec's dispatcher: Signal() from
+		// the server Enqueue()s into a list being unlinked, tasks lost).
+		// While the mask stays below the level, irq_pend's comparison
+		// takes the request anyway.
+		if (ipl_q == 3'd0 || ipl_q == 3'd7 || (ipend_r && ipl_q < ipend_lvl) || x_go || xwin ||
+		    (wb_bound && !take_irq))
 			ipend_r <= 1'b0;
-		else if (ipl_q > sr_r[10:8] && (!ipend_r || ipl_q > ipend_lvl)) begin
+		else if (ipl_q > irq_mask && (!ipend_r || ipl_q > ipend_lvl)) begin
 			ipend_r   <= 1'b1;
 			ipend_lvl <= ipl_q;
 		end
