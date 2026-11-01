@@ -1368,12 +1368,15 @@ always_ff @(posedge clk)
 		         dut.be.wb_st, dut.be.wb_exc, dut.be.wb_redir, dut.be.wb_redir_pc);
 
 // Interrupt invariants.  tb_qual models the IPEND claims from the core's
-// synchronized level and its SR alone: level L is claimed once it is the
-// visible level and beats the mask, until the level falls below L (the
-// device let go) or an acceptance at L consumes it.  A level hidden behind
-// a higher request holds no claim of its own.  No claim is formed from the
-// start of an exception's processing until its handler's first instruction
-// has completed, and none survives into it: that instruction may raise the
+// synchronized level and the mask in force at the boundary (an SR write at
+// WB counts already): level L is claimed once it is the visible level and
+// beats that mask, until the level falls below L (the device let go), an
+// acceptance at L consumes it, or a boundary passes without taking it --
+// a claim binds the next boundary only, never a later one inside a section
+// a raised mask closes (t_ipendmask).  A level hidden behind a higher
+// request holds no claim of its own.  No claim is formed from the start of
+// an exception's processing until its handler's first instruction has
+// completed, and none survives into it: that instruction may raise the
 // mask to keep a request out (MC68060UM 8.1, 8.2.9, 8.3).
 logic [6:1] tb_qual;
 logic [15:0] ipl_idle_for;
@@ -1387,9 +1390,10 @@ always_ff @(posedge clk) begin
 	end
 	else begin
 		for (int l = 1; l <= 6; l++) begin
-			if (dut.be.ipl_q < 3'(l) || dut.be.x_go || dut.be.xwin)
+			if (dut.be.ipl_q < 3'(l) || dut.be.x_go || dut.be.xwin ||
+			    (dut.be.wb_bound && !dut.be.take_irq))
 				tb_qual[l] <= 1'b0;
-			else if (dut.be.ipl_q == 3'(l) && 3'(l) > dut.be.sr_r[10:8])
+			else if (dut.be.ipl_q == 3'(l) && 3'(l) > dut.be.irq_mask)
 				tb_qual[l] <= 1'b1;
 		end
 		if (ipl_lvl == 3'd0) begin
