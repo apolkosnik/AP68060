@@ -213,7 +213,7 @@ ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EAR
 	.clk(clk), .bclk_en(bclk_en), .rsti_n(rsti_n),
 	.a_o(a_o), .a_oe(a_oe),
 	.a_i(bus_a), .ts_n_i(am_drive ? am_ts_n : 1'b1), .tt_i(bus_tt),
-	.snoop_n(am_drive ? am_snoop_n : 1'b1),
+	.snoop_n(am_drive ? am_snoop_n : 1'b1), .ic_xinv(1'b0), .ic_xl(28'd0), .ic_xall(1'b0),
 	.cdis_n(!pins_r[0]), .mdis_n(!pins_r[1]), .ipend_n(ipend_n), .pst(pst),
 	.d_i(d_pins), .d_o(d_o), .d_oe(d_oe),
 	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(tln), .upa(upa),

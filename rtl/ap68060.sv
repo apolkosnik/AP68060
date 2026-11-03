@@ -40,6 +40,13 @@ module ap68060
 	input  logic        ts_n_i,
 	input  logic  [1:0] tt_i,
 	input  logic        snoop_n,
+	// (an integration's side band, not a 68060 pin) a line written behind
+	// the processor by a master that is not on this bus (a chipset's DMA):
+	// the instruction cache drops it, whoever owns the bus; ic_xall drops
+	// every line (the integration lost track)
+	input  logic        ic_xinv,
+	input  logic [27:0] ic_xl,
+	input  logic        ic_xall,
 	input  logic [31:0] d_i,
 	output logic [31:0] d_o,
 	output logic        d_oe,
@@ -226,7 +233,8 @@ ap68060_snoop snoop (
 	.dt_we(dt_we), .dt_set(dt_set), .dt_way(dt_way), .dt_tag(dt_tag),
 	.dv_we(dv_we), .dv_set(dv_set), .dv_wm(dv_wm), .dv_lv(dv_lv),
 	.pq0_v(pq0_v), .pq0_l(pq0_l), .pq1_v(pq1_v), .pq1_l(pq1_l),
-	.ic_req(sn_ic), .ic_pa(sn_ic_pa), .ic_all(sn_ic_all), .ic_done(sn_ic_done)
+	.ic_req(sn_ic), .ic_pa(sn_ic_pa), .ic_all(sn_ic_all), .ic_done(sn_ic_done),
+	.ic_xinv(ic_xinv), .ic_xl(ic_xl), .ic_xall(ic_xall)
 );
 assign sn_wr    = 1'b0;          // (the 68060 never takes snooped data)
 assign sn_wbe   = '0;

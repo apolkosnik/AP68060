@@ -68,7 +68,7 @@ logic        dbg_retire, dbg_halted;
 ap68060 dut (
 	.clk(clk), .bclk_en(bclk_en), .rsti_n(rsti_n),
 	.a_o(a_o), .a_oe(a_oe),
-	.a_i(a_o), .ts_n_i(1'b1), .tt_i(2'd0), .snoop_n(1'b1),
+	.a_i(a_o), .ts_n_i(1'b1), .tt_i(2'd0), .snoop_n(1'b1), .ic_xinv(1'b0), .ic_xl(28'd0), .ic_xall(1'b0),
 	.cdis_n(1'b1), .mdis_n(1'b1), .ipend_n(), .pst(),
 	.d_i(rsti_n ? d_i : 32'd0), .d_o(d_o), .d_oe(d_oe),
 	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
