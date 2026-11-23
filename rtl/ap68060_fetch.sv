@@ -122,6 +122,13 @@ module ap68060_fetch
 	input  logic        sn_inv_all,    // ... or every line
 	output logic        sn_inv_done,
 	output logic        sn_ihit,       // ... and removed a valid line (or the line buffer)
+	// self-snoop (the DMU's ss_hit): the tag copies read at ssl_ra, the
+	// line ssl_pa held (ssl_hit); drop the line ss_pa (ss_v)
+	input  logic  [6:0] ssl_ra,
+	input  logic [31:4] ssl_pa,
+	output logic        ssl_hit,
+	input  logic        ss_v,
+	input  logic [31:4] ss_pa,
 
 	// BIU client
 	output logic        b_req,
@@ -302,6 +309,7 @@ ap68060_atc #(.SAME_SEARCH(0)) iatc (
 // line (CINVA, a snooped clear, reset) runs the invalidation over the sets
 (* ramstyle = "MLAB, no_rw_check" *) logic [3:0] ivf [128];
 (* ramstyle = "MLAB, no_rw_check" *) logic [3:0] ivo [128];
+(* ramstyle = "MLAB, no_rw_check" *) logic [3:0] ivs [128];  // the self-snoop's copy
 wire   [3:0]   ivf_q, ivo_q;
 logic  [6:0]   ivo_ra;
 logic          inv_rst;         // the invalidation is reset's clear
@@ -327,6 +335,22 @@ always_ff @(posedge clk) begin
 end
 logic [127:0]  cd [4];
 logic [23:0]   ct [4];
+logic [23:0]   sst [4];        // the self-snoop's tag copies, at ssl_ra (read last cycle)
+
+// Self-snoop (not a 68060 behaviour, see the DMU): a store at WB whose line
+// this cache holds -- a valid way's tag, the line buffer's line, or the
+// line a fill is bringing in -- is ssl_hit; when the store is done (ss_v)
+// its line is queued (sq, two entries; a third makes it an invalidation of
+// every line) for the invalidation engine, which also empties the line
+// buffer.  WB refetches what follows the store, and F1 treats a hit in a
+// set with a self-snoop invalidation queued or running as a miss, so the
+// refetch reads memory.
+logic          sq_v0, sq_v1, sq_all;
+logic [31:4]   sq_l0, sq_l1;
+logic          inv_sq;         // the running invalidation is the self-snoop's
+wire           sq_set = sq_all || (sq_v0 && sq_l0[10:4] == f1_pc[10:4]) ||
+                        (sq_v1 && sq_l1[10:4] == f1_pc[10:4]) ||
+                        (inv_busy && inv_sq && (inv_scope == 2'd3 || inv_pa[10:4] == f1_pc[10:4]));
 
 logic [127:0] m_line;            // the line being filled (and the line buffer)
 logic  [3:0] m_got;              // ... the long words of it that arrived
@@ -340,6 +364,11 @@ generate
 		ap68060_sdp_be #(.AW(7), .NB(3), .OREG(0)) tram (
 			.clk(clk), .we(c_we && c_wway == 2'(gw)), .waddr(c_waddr),
 			.wbe(3'b111), .wdata({3'b000, c_wtag}), .raddr(c_raddr), .oce(1'b1), .q(ct[gw])
+		);
+		// the self-snoop's copy of the tags, read at the store's set
+		ap68060_sdp_be #(.AW(7), .NB(3), .OREG(0)) sstram (
+			.clk(clk), .we(c_we && c_wway == 2'(gw)), .waddr(c_waddr),
+			.wbe(3'b111), .wdata({3'b000, c_wtag}), .raddr(ssl_ra), .oce(1'b1), .q(sst[gw])
 		);
 	end
 endgenerate
@@ -460,8 +489,8 @@ always_comb begin
 		          (use_t ? (ct[i][20:0] == tg) : (ct[i][20:0] == f1_pc[31:11]));
 		if (x_mj[i]) begin x_hit = 1'b1; x_way = 2'(i); end
 	end
-	x_hit  = x_hit && x_cach;
-	x_lb   = x_cach && lb_v && (use_t ? (lb_pa == {tg, f1_pc[10:4]}) : (lb_pa == f1_pc[31:4]));
+	x_hit  = x_hit && x_cach && !sq_set;
+	x_lb   = x_cach && lb_v && !sq_set && (use_t ? (lb_pa == {tg, f1_pc[10:4]}) : (lb_pa == f1_pc[31:4]));
 	// (the chunk by the one-hot match, AND-OR: no encoded way on the path;
 	// at most one way holds a line)
 	x_chunk = '0;
@@ -469,6 +498,13 @@ always_comb begin
 	if (x_lb) x_chunk = m_line[127 - 32 * f1_pc[3:2] -: 32];
 end
 wire f1_go      = f1_v && !redir_any;
+always_comb begin
+	logic [3:0] vq;
+	vq = ivs[ssl_pa[10:4]];
+	ssl_hit = (st == S_FILL && m_pa[31:4] == ssl_pa) || (lb_v && lb_pa == ssl_pa[31:4]);
+	for (int w = 0; w < 4; w++)
+		if (vq[w] && sst[w][20:0] == ssl_pa[31:11]) ssl_hit = 1'b1;
+end
 wire f1_deliver = f1_go && (x_hit || x_lb);
 
 //--------------------------------------------------------------------------
@@ -557,6 +593,8 @@ always_ff @(posedge clk) begin
 		inv_busy <= 1'b0; inv_hold <= 1'b0; inv_ph <= 1'b0; inv_i <= '0;
 		inv_sn <= 1'b0; inv_scope <= 2'd3; inv_pa <= '0; inv_lbh <= 1'b0;
 		inv_rst <= 1'b0;
+		inv_sq <= 1'b0;
+		sq_v0 <= 1'b0; sq_v1 <= 1'b0; sq_all <= 1'b0; sq_l0 <= '0; sq_l1 <= '0;
 		sn_ihit <= 1'b0;
 		ic_inv_done <= 1'b0;
 		sn_inv_done <= 1'b0;
@@ -566,6 +604,7 @@ always_ff @(posedge clk) begin
 	end
 	else begin
 		logic [4:0] keep;
+		logic       sqt;            // the self-snoop queue's head taken this cycle
 		c_we        <= 1'b0;
 		ic_inv_done <= 1'b0;
 		sn_inv_done <= 1'b0;
@@ -949,16 +988,22 @@ always_ff @(posedge clk) begin
 		//------------------------------------------------------------------
 		// CINV/CPUSH of the instruction cache
 		//------------------------------------------------------------------
-		if ((ic_inv || sn_inv) && !inv_busy && !inv_hold && st != S_FILL && !c_we) begin
+		// (sources: CINV/CPUSH, the snooper, the self-snoop queue)
+		sqt = 1'b0;
+		if ((ic_inv || sn_inv || sq_v0 || sq_all) && !inv_busy && !inv_hold && st != S_FILL && !c_we) begin
+			logic all;
+			sqt       = !ic_inv && !sn_inv;
+			all       = ic_inv ? (ic_inv_scope == 2'd3) : sn_inv ? sn_inv_all : sq_all;
 			lb_v <= 1'b0;
-			inv_sn    <= !ic_inv;
+			inv_sn    <= !ic_inv && !sqt;
+			inv_sq    <= sqt;
 			inv_scope <= ic_inv ? ic_inv_scope : 2'd1;
-			inv_pa    <= ic_inv ? ic_inv_pa : sn_inv_pa;
-			inv_lbh   <= !ic_inv && lb_v && lb_pa == sn_inv_pa[31:4];
-			if (ic_inv ? (ic_inv_scope == 2'd3) : sn_inv_all) begin
+			inv_pa    <= ic_inv ? ic_inv_pa : sn_inv ? sn_inv_pa : {sq_l0, 4'd0};
+			inv_lbh   <= !ic_inv && !sqt && lb_v && lb_pa == sn_inv_pa[31:4];
+			if (all) begin
 				// every line: the sweep below (scope 3 matches every way)
 				inv_scope <= 2'd3;
-				sn_ihit   <= !ic_inv;
+				sn_ihit   <= !ic_inv && !sqt;
 				inv_busy  <= 1'b1;
 				inv_ph    <= 1'b0;
 				inv_i     <= 8'd0;
@@ -967,7 +1012,7 @@ always_ff @(posedge clk) begin
 				inv_busy <= 1'b1;
 				inv_ph   <= 1'b0;
 				inv_i    <= (!ic_inv || ic_inv_scope == 2'd1) ?
-				            {1'b0, (ic_inv ? ic_inv_pa[10:4] : sn_inv_pa[10:4])} : 8'd0;
+				            {1'b0, (ic_inv ? ic_inv_pa[10:4] : sn_inv ? sn_inv_pa[10:4] : sq_l0[10:4])} : 8'd0;
 			end
 		end
 		if (inv_busy) begin
@@ -994,7 +1039,7 @@ always_ff @(posedge clk) begin
 			if (inv_scope == 2'd1) begin
 				if (inv_ph) begin
 					inv_busy    <= 1'b0;
-					ic_inv_done <= !inv_sn;
+					ic_inv_done <= !inv_sn && !inv_sq;
 					sn_inv_done <= inv_sn;
 					inv_hold    <= 1'b1;
 				end
@@ -1003,12 +1048,31 @@ always_ff @(posedge clk) begin
 				inv_i <= inv_i + 8'd1;
 				if (inv_i == 8'd128) begin
 					inv_busy    <= 1'b0;
-					ic_inv_done <= !inv_sn && !inv_rst;
+					ic_inv_done <= !inv_sn && !inv_sq && !inv_rst;
 					sn_inv_done <= inv_sn;
 					inv_hold    <= 1'b1;
 					inv_rst     <= 1'b0;
 				end
 			end
+		end
+
+		// the self-snoop queue: its head taken above (sqt), a done store's
+		// line pushed (a third entry: every line)
+		begin
+			logic        v0, v1, al;
+			logic [31:4] l0, l1;
+			v0 = sq_v0; v1 = sq_v1; al = sq_all; l0 = sq_l0; l1 = sq_l1;
+			if (sqt) begin
+				if (al) begin v0 = 1'b0; v1 = 1'b0; al = 1'b0; end
+				else begin v0 = v1; l0 = l1; v1 = 1'b0; end
+			end
+			if (ss_v) begin
+				if (al || (v0 && l0 == ss_pa) || (v1 && l1 == ss_pa)) ;   // queued already
+				else if (!v0) begin v0 = 1'b1; l0 = ss_pa; end
+				else if (!v1) begin v1 = 1'b1; l1 = ss_pa; end
+				else al = 1'b1;
+			end
+			sq_v0 <= v0; sq_v1 <= v1; sq_all <= al; sq_l0 <= l0; sq_l1 <= l1;
 		end
 	end
 	// the return stack's one write port
@@ -1018,6 +1082,7 @@ always_ff @(posedge clk) begin
 		if (iw_m != 4'd0) begin
 			ivf[iw_set] <= (ivo_q & ~iw_m) | (iw_m & {4{iw_v}});
 			ivo[iw_set] <= (ivo_q & ~iw_m) | (iw_m & {4{iw_v}});
+			ivs[iw_set] <= (ivo_q & ~iw_m) | (iw_m & {4{iw_v}});
 		end
 		// synthesis translate_off
 		for (int j = 0; j < 4; j++) if (iw_m[j]) iv[iw_set][j] <= iw_v;
@@ -1034,7 +1099,7 @@ wire [6:0] inv_s = (inv_scope == 2'd1) ? inv_pa[10:4] : 7'(inv_i - 8'd1);
 always_comb ivo_ra = inv_busy ? inv_s : m_pa[10:4];
 assign ivf_q = ivf[f1_pc[10:4]];
 assign ivo_q = ivo[ivo_ra];
-initial for (int i = 0; i < 128; i++) begin ivf[i] = 4'd0; ivo[i] = 4'd0; end
+initial for (int i = 0; i < 128; i++) begin ivf[i] = 4'd0; ivo[i] = 4'd0; ivs[i] = 4'd0; end
 // synthesis translate_off
 always_ff @(posedge clk)
 	if (nreset && !inv_rst && (ivf_q != iv[f1_pc[10:4]] || ivo_q != iv[ivo_ra])) begin

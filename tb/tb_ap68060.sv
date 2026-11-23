@@ -65,7 +65,8 @@
 //   $F294 long  copied to $F2A8 when written (a read of $F2A8, another   //
 //               line, shows whether the write reached the bus first)      //
 //   $F2B0 long  (read) counts its own bus reads into $F2B4              //
-//   $F2C0 word  bit 0 asserts CDIS, bit 1 MDIS                            //
+//   $F2C0 word  bit 0 asserts CDIS, bit 1 MDIS, bit 2 IC_SELF (the         //
+//               instruction cache follows the processor's own stores)     //
 //   $F2D0 long  watch window start, $F2D4 its end (exclusive): the CPU's   //
 //               data reads in it are counted into $F2D8, its writes      //
 //               (pushes included) into $F2DC (bus beats; write 0 clears)  //
@@ -160,7 +161,7 @@ function automatic logic rs_valid(input logic [31:0] v, input logic [5:0] k);
 endfunction
 
 // pins the program drives through $F2C0, and the status pins
-logic  [1:0] pins_r;
+logic  [2:0] pins_r;
 logic        ipend_n;
 logic  [4:0] pst;
 
@@ -211,7 +212,7 @@ ap68060 #(.FPU_PIPE(`AP_FPU_PIPE), .LOOP_PRED(`AP_LOOP_PRED), .EARLY_RES(`AP_EAR
 	.a_o(a_o), .a_oe(a_oe),
 	.a_i(bus_a), .ts_n_i(am_drive ? am_ts_n : 1'b1), .tt_i(bus_tt),
 	.snoop_n(am_drive ? am_snoop_n : 1'b1),
-	.cdis_n(!pins_r[0]), .mdis_n(!pins_r[1]), .ipend_n(ipend_n), .pst(pst),
+	.cdis_n(!pins_r[0]), .mdis_n(!pins_r[1]), .ic_self(pins_r[2]), .ipend_n(ipend_n), .pst(pst),
 	.d_i(d_pins), .d_o(d_o), .d_oe(d_oe),
 	.rw_n(rw_n), .siz(siz), .bs_n(bs_n), .tt(tt), .tm(tm), .tln(tln), .upa(upa),
 	.ciout_n(ciout_n), .lock_n(lock_n), .locke_n(locke_n), .lock_oe(lock_oe),
@@ -1016,7 +1017,7 @@ always_ff @(posedge clk) begin
 		irq_exc_armed <= '0;
 		fetch_stall <= '0;
 		am_go       <= 1'b0;
-		pins_r      <= 2'b00;
+		pins_r      <= 3'b000;
 		rs_en <= 1'b0; rs_split <= 1'b0; rs_gap <= '0; rs_cnt <= '0; rs_op <= '0; rs_k <= '0; rs_seq <= '0;
 		rs_busy <= 1'b0; rs_ops <= 0;
 		for (int i = 0; i < 64; i++) rs_last[i] <= 0;
@@ -1212,7 +1213,7 @@ always_ff @(posedge clk) begin
 				16'hF154: begin fberr_armed <= (w != 16'd0); fberr_addr <= w; end
 				16'hF158: halt_arm <= w;
 				16'hF16E: begin ipl_lagm <= w[2:0]; ipl_skw_lvl <= w[6:4]; ipl_skw <= w[15:8]; end
-				16'hF2C0: pins_r <= w[1:0];
+				16'hF2C0: pins_r <= w[2:0];
 				16'hF2C4: begin
 					rs_en    <= w[15];
 					rs_split <= w[14];

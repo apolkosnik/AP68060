@@ -75,6 +75,12 @@ logic [31:0] sn_inv_pa;
 logic        sn_inv_all;
 logic        sn_inv_done;
 logic        sn_ihit;
+// the self-snoop (off: no store reaches the fetch unit here)
+logic  [6:0] ssl_ra = '0;
+logic [31:4] ssl_pa = '0;
+logic        ssl_hit;
+logic        ss_v = 1'b0;
+logic [31:4] ss_pa = '0;
 logic        b_req;
 busreq_t     b_breq;
 logic        b_gnt;

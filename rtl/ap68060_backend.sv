@@ -124,6 +124,7 @@ module ap68060_backend
 	output logic [31:0] dm_st_data,
 	input  logic        dm_st_rdy,      // store accepted (WB may complete)
 	input  logic        dm_st_fault,
+	input  logic        dm_ss_redir,    // the store at WB rewrote a cached instruction line
 	input  logic [31:0] dm_st_fslw,
 	input  logic [31:0] dm_st_faddr,
 
@@ -1269,6 +1270,14 @@ logic        wb_cof;          // the uop's control transfer was taken
 
 wire wb_is_exc   = wb_v && !wb_ok;
 wire wb_commit   = adv_wb && !wb_is_exc;
+// A store that rewrote a line the instruction cache held (the DMU's
+// self-snoop, dm_ss_redir) refetches what follows it: the front end may
+// have fetched it from the old line.  A store uop before the instruction's
+// last defers the refetch to the instruction's end (ss_pend), as smc_pend
+// does: redirecting there would drop the remaining uops.
+logic ss_pend;
+wire  wb_ssr   = wb_v && wb_u.last && (ss_pend || (wb_st && dm_ss_redir));
+wire  wb_rdx   = wb_redir || wb_ssr;      // the redirect, either cause
 wire wb_bound    = wb_commit && wb_u.last;
 wire [31:0] wb_next = wb_redir_pc;
 
@@ -1406,7 +1415,7 @@ assign mt_wr     = (wb_u.cond == 4'd5) && !wb_u.imm_b[6];   // PLPAW $F588, PLPA
 logic        rst_seq;         // reset exception pending (first cycles)
 
 // same-cycle kill of every younger uop: WB takes an exception or redirects
-assign kill_now = (adv_wb && (wb_is_exc || wb_redir)) || x_go;
+assign kill_now = (adv_wb && (wb_is_exc || wb_rdx)) || x_go;
 
 // exception entry values
 logic  [7:0] x_vec;
@@ -1510,6 +1519,7 @@ always_ff @(posedge clk) begin
 		sk_vr <= 1'b0;
 		eredir_pend <= 1'b0;
 		wb_eredir   <= 1'b0;
+		ss_pend     <= 1'b0;
 		fv <= 32'd0;
 		xw_ph <= 2'd0;
 		ccr_f   <= 5'd0;
@@ -1863,6 +1873,8 @@ always_ff @(posedge clk) begin
 		bc_clr <= 1'b0;
 		if (wb_commit) begin
 			dbg_retire <= wb_u.last;
+			if (wb_u.last) ss_pend <= 1'b0;
+			else if (wb_st && dm_ss_redir) ss_pend <= 1'b1;
 			// architectural commit: the back file's write ports (bwe)
 			ccr_b <= wb_ccr;
 			if (wb_u.op == OP_SPW) begin
@@ -1907,9 +1919,9 @@ always_ff @(posedge clk) begin
 			end
 			// HALT: the halted state until reset (no debug port to restart)
 			if (wb_u.op == OP_MISC && wb_u.cond == 4'd10) halted <= 1'b1;
-			if (wb_redir) begin
+			if (wb_rdx) begin
 				flush    <= 1'b1;
-				if (!wb_eredir) begin
+				if (!wb_eredir || wb_ssr) begin
 					fe_flush <= 1'b1;
 					redir_v  <= 1'b1;
 					redir_pc <= wb_redir_pc;
@@ -1944,6 +1956,7 @@ always_ff @(posedge clk) begin
 			logic [15:0] vw;
 			rt_armed <= 1'b0;
 			smc_pend <= 1'b0;
+			ss_pend  <= 1'b0;
 			// BUSCR: L and LE go to the shadow bits SL and SLE, LOCK and
 			// LOCKE are negated (MC68060UM 7.4) -- L and LE as a MOVEC to
 			// BUSCR committing now (a trace after it) leaves them
@@ -2002,7 +2015,7 @@ always_ff @(posedge clk) begin
 		// front-valid bits: a front write makes the register's front copy
 		// current; a redirect, a refetch or an exception drops them all
 		for (int i = 0; i < 3; i++) if (fwe[i]) fv[fwa[i]] <= 1'b1;
-		if ((wb_commit && wb_redir) || wb_refetch || x_go) fv <= 32'd0;
+		if ((wb_commit && wb_rdx) || wb_refetch || x_go) fv <= 32'd0;
 
 		// a store that took a bus error at WB becomes an access fault of
 		// its instruction (WB holds one cycle, then takes it)

@@ -78,6 +78,8 @@ module ap68060
 	output logic        rsto_n,
 	input  logic        cdis_n,       // CDIS: disable the caches (contents kept)
 	input  logic        mdis_n,       // MDIS: disable page translation
+	input  logic        ic_self,      // not a 68060 pin: the instruction cache follows
+	                                  // the processor's own stores (tie low for a 68060)
 	output logic        ipend_n,      // IPEND
 	output logic  [4:0] pst,          // PST4-PST0 (MC68060UM table 2-7), every CLK
 
@@ -205,6 +207,10 @@ logic [127:0] sn_line;
 logic [31:0] sn_wword;
 logic [15:0] sn_wbe;
 logic        sn_ic, sn_ic_all, sn_ic_done, sn_ihit;
+// self-snoop: the DMU's store at WB against the fetch unit's tag copies
+logic  [6:0] ssl_ra;
+logic [31:4] ssl_pa, ss_pa;
+logic        ssl_hit, ss_v, ss_redir;
 logic        sf_req, sf_more, sf_ack, dt_we, dv_we, dv_lv, pq0_v, pq1_v;
 logic  [6:0] sf_set, dt_set, dv_set;
 logic  [1:0] sf_way, dt_way;
@@ -291,7 +297,7 @@ ap68060_backend #(.FPU_PIPE(FPU_PIPE), .EARLY_RES(EARLY_RES), .SKID(SKID),
 	.dm_dc2_rdy(dm_dc2_rdy), .dm_ldata(dm_ldata), .dm_ldata_al(dm_ldata_al), .dm_ldata_alv(dm_ldata_alv), .dm_fault(dm_fault),
 	.dm_fvec(dm_fvec), .dm_faddr(dm_faddr), .dm_fslw(dm_fslw), .if_cause(if_cause),
 	.dm_st_v(dm_st_v), .dm_st_data(dm_st_data), .dm_st_rdy(dm_st_rdy),
-	.dm_st_fault(dm_st_fault), .dm_st_fslw(dm_st_fslw), .dm_lkend(dm_lkend), .dm_iack_end(dm_iack_end),
+	.dm_st_fault(dm_st_fault), .dm_st_fslw(dm_st_fslw), .dm_ss_redir(ss_redir), .dm_lkend(dm_lkend), .dm_iack_end(dm_iack_end),
 	.sb_empty(sb_empty), .sb_err(sb_err), .sb_fslw(sb_fslw), .sb_err_ack(sb_err_ack),
 	.dm_hold1(dm_hold1), .mt_v(mt_v), .mt_op(mt_op), .mt_scope(mt_scope),
 	.mt_caches(mt_caches), .mt_addr(mt_addr), .mt_fc(mt_fc), .mt_ng(mt_ng),
@@ -326,6 +332,7 @@ ap68060_dmu #(.DC1_ATC(DC1_ATC)) dmu (
 	.iw_cause(iw_cause),
 	.ic_inv(ic_inv), .ic_inv_scope(ic_inv_scope), .ic_inv_pa(ic_inv_pa),
 	.ic_inv_done(ic_inv_done),
+	.ss_en(ic_self), .ssl_ra(ssl_ra), .ssl_pa(ssl_pa), .ssl_hit(ssl_hit), .ss_v(ss_v), .ss_pa(ss_pa), .ss_redir(ss_redir),
 	.iatc_flush_all(iatc_flush_all), .iatc_flush_page(iatc_flush_page),
 	.iatc_flush_ng(iatc_flush_ng), .iatc_flush_la(iatc_flush_la),
 	.iatc_flush_fc2(iatc_flush_fc2), .iatc_wr(iatc_wr), .iatc_wla(iatc_wla),
@@ -410,6 +417,7 @@ ap68060_fetch fetch (
 	.ic_inv_done(ic_inv_done),
 	.sn_inv(sn_ic), .sn_inv_pa(sn_ic_pa), .sn_inv_all(sn_ic_all), .sn_inv_done(sn_ic_done),
 	.sn_ihit(sn_ihit),
+	.ssl_ra(ssl_ra), .ssl_pa(ssl_pa), .ssl_hit(ssl_hit), .ss_v(ss_v), .ss_pa(ss_pa),
 	.b_req(b_req[1]), .b_breq(b_breq[1]),
 	.b_gnt(b_gnt[1]), .b_done(b_done[1]), .b_err(b_err[1]),
 	.b_rvalid(b_rvalid && b_rclient == 1'b1), .b_rdata(b_rdata), .b_rbeat(b_rbeat),
